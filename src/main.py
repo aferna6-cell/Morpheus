@@ -46,6 +46,7 @@ from .signals.arb_signal import ArbitrageSignal
 from .cost_tracker import CostTracker
 from .signals.llm_signal import LLMSignal, ConvictionLevel
 from .state import TradeMemory, parse_iso
+from .trade_logger import get_trade_logger
 from .utils import BotConfig, exponential_backoff, load_config, setup_logging, utc_now
 
 
@@ -411,6 +412,23 @@ async def run(
                     ).isoformat()
                     trade_memory.traded_markets[m.id] = True
                     trade_memory.save(trade_memory_path)
+
+                    # Log trade to trade history
+                    trade_logger = get_trade_logger()
+                    trade_logger.log_order_placed(
+                        platform="polymarket",
+                        ticker=m.id,
+                        side=chosen.recommended_side.value,
+                        count=int(trade.executed_amount_usd / max(trade.average_price, 1e-9)),
+                        price_cents=int(trade.average_price * 100),
+                        order_id=str(trade.order_id or "unknown"),
+                        order_type="legacy",
+                        conviction=conviction.value if hasattr(conviction, "value") else str(conviction),
+                        edge=chosen.edge,
+                        cost_usd=trade.executed_amount_usd,
+                        entry_probability=chosen.estimated_prob,
+                        market_price=chosen.market_price or m.midpoint_price or 0.5,
+                    )
 
                     alert_msg = (
                         f"💰 Trade: {chosen.recommended_side.value.upper()} "

@@ -24,6 +24,7 @@ from .markets import Market
 from .portfolio import Portfolio
 from .risk import PositionSize
 from .signals.base import SignalResult, TradingSide
+from .trade_logger import get_trade_logger
 from .utils import append_jsonl
 
 
@@ -371,6 +372,22 @@ class OrderManager:
         self._log_edge_decay(market, signal, avg_price, decision_time)
         self._log_bankroll_entry(market, signal, executed_usd, avg_price)
 
+        # Log to trade history
+        trade_logger = get_trade_logger()
+        trade_logger.log_order_placed(
+            platform="polymarket",
+            ticker=market.id,
+            side=signal.recommended_side.value,
+            count=int(shares),
+            price_cents=int(avg_price * 100),
+            order_id=str(order_id),
+            order_type="taker",
+            edge=signal.edge,
+            cost_usd=executed_usd,
+            entry_probability=signal.estimated_prob,
+            market_price=avg_price,
+        )
+
         return TradeExecution(
             market_id=market.id,
             token_id=token_id,
@@ -507,6 +524,22 @@ class OrderManager:
         self._log_edge_decay(market, signal, avg_price, decision_time)
         self._log_bankroll_entry(market, signal, executed_usd, avg_price)
 
+        # Log to trade history
+        trade_logger = get_trade_logger()
+        trade_logger.log_order_placed(
+            platform="polymarket",
+            ticker=market.id,
+            side=signal.recommended_side.value,
+            count=int(filled_shares),
+            price_cents=int(avg_price * 100),
+            order_id=str(order_id),
+            order_type="maker",
+            edge=signal.edge,
+            cost_usd=executed_usd,
+            entry_probability=signal.estimated_prob,
+            market_price=avg_price,
+        )
+
         return TradeExecution(
             market_id=market.id,
             token_id=token_id,
@@ -567,7 +600,7 @@ class OrderManager:
             avg_price = limit_price
 
         # Close in portfolio (best-effort). PnL uses share amount.
-        await self.portfolio.close_position(
+        realized_pnl = await self.portfolio.close_position(
             position_id=position_id,
             exit_price=avg_price,
             exit_amount=filled_shares,
@@ -580,6 +613,19 @@ class OrderManager:
             order_id=str(order_id),
             shares=filled_shares,
             price=avg_price,
+            reason=reason,
+        )
+
+        # Log position closure to trade history
+        trade_logger = get_trade_logger()
+        trade_logger.log_position_closed(
+            platform="polymarket",
+            ticker=position.market_id,
+            side=position.side,
+            entry_price=position.entry_price,
+            exit_price=avg_price,
+            shares=filled_shares,
+            pnl_usd=realized_pnl,
             reason=reason,
         )
 

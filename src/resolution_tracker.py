@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 import httpx
 import structlog
 
+from .trade_logger import get_trade_logger
 from .utils import BotConfig, append_jsonl, load_config
 
 
@@ -164,6 +165,30 @@ async def check_resolutions(
                     actual_outcome=actual_outcome,
                     predicted_p_yes=pred.get("predicted_p_yes"),
                     side=pred.get("side"),
+                )
+
+                # Log to trade history
+                trade_logger = get_trade_logger()
+                outcome_str_log = "yes" if actual_outcome >= 0.5 else "no"
+                entry_price = pred.get("market_price_at_entry", 0.5)
+                closing_price = actual_outcome  # resolved = 1.0 or 0.0
+                entry_prob = pred.get("predicted_p_yes", 0.5)
+                side_val = pred.get("side", "unknown")
+
+                # Calculate CLV: how much the line moved toward our prediction
+                if "yes" in side_val.lower():
+                    clv_val = closing_price - entry_price
+                else:
+                    clv_val = entry_price - closing_price
+
+                trade_logger.log_market_resolution(
+                    platform="polymarket",
+                    ticker=market_id,
+                    outcome=outcome_str_log,
+                    held_side=side_val,
+                    closing_probability=closing_price,
+                    entry_probability=entry_prob,
+                    clv=round(clv_val, 4),
                 )
 
                 # Log bankroll payout if not dry-run
