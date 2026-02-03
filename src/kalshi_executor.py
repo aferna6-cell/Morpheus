@@ -23,6 +23,7 @@ from .markets import Market
 from .risk import PositionSize, RiskManager
 from .signals.base import SignalResult, TradingSide
 from .signals.llm_signal import ConvictionLevel, classify_conviction
+from .trade_logger import get_trade_logger
 from .utils import BotConfig
 
 
@@ -147,7 +148,22 @@ class KalshiExecutor:
             order_type="limit",
         )
 
+        # Get trade logger
+        trade_logger = get_trade_logger()
+
         if not result:
+            # Log failed order
+            conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
+            conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
+            trade_logger.log_order_failed(
+                platform="kalshi",
+                ticker=ticker,
+                side=side,
+                count=count,
+                price_cents=price_cents,
+                error="Order placement failed - no response",
+                conviction=conv_str,
+            )
             return self._fail(ticker, side, count, price_cents, "Order placement failed")
 
         order_id = (
@@ -167,6 +183,40 @@ class KalshiExecutor:
         executed_count = count if status == "executed" else 0
         executed_usd = executed_count * entry_cost
 
+        # Log the order to trade history
+        conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
+        conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
+        net_edge = getattr(signal, "net_edge", signal.edge)
+
+        if is_success:
+            # Get entry probability for CLV tracking
+            entry_probability = signal.estimated_prob if hasattr(signal, "estimated_prob") else entry_cost
+
+            trade_logger.log_order_placed(
+                platform="kalshi",
+                ticker=ticker,
+                side=side,
+                count=count,
+                price_cents=price_cents,
+                order_id=str(order_id),
+                order_type="limit",
+                conviction=conv_str,
+                edge=net_edge,
+                cost_usd=total_cost,
+                entry_probability=entry_probability,
+                market_price=entry_cost,
+            )
+        else:
+            trade_logger.log_order_failed(
+                platform="kalshi",
+                ticker=ticker,
+                side=side,
+                count=count,
+                price_cents=price_cents,
+                error=f"Order rejected: {status}",
+                conviction=conv_str,
+            )
+
         execution = KalshiTradeExecution(
             ticker=ticker,
             side=side,
@@ -183,10 +233,6 @@ class KalshiExecutor:
 
         # Send Telegram alert
         if is_success:
-            conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
-            conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
-            net_edge = getattr(signal, "net_edge", signal.edge)
-
             alert_msg = (
                 f"🎯 [KALSHI] {side.upper()} {count}x {ticker}\n"
                 f"Price: {price_cents}¢ | Cost: ${count * entry_cost:.2f} + ${total_fee:.2f} fee\n"

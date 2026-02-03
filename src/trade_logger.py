@@ -43,8 +43,10 @@ class TradeLogger:
         conviction: Optional[str] = None,
         edge: Optional[float] = None,
         cost_usd: Optional[float] = None,
+        entry_probability: Optional[float] = None,
+        market_price: Optional[float] = None,
     ) -> None:
-        """Log a successfully placed order."""
+        """Log a successfully placed order with CLV tracking fields."""
         self._write({
             "event": "order_placed",
             "platform": platform,
@@ -57,6 +59,9 @@ class TradeLogger:
             "conviction": conviction,
             "edge": edge,
             "cost_usd": cost_usd,
+            # CLV tracking fields
+            "entry_probability": entry_probability,  # our model's prediction
+            "market_price_at_entry": market_price,   # market price when we entered
         })
 
     def log_order_failed(
@@ -131,8 +136,11 @@ class TradeLogger:
         held_side: Optional[str] = None,
         held_count: Optional[int] = None,
         pnl_usd: Optional[float] = None,
+        closing_probability: Optional[float] = None,
+        entry_probability: Optional[float] = None,
+        clv: Optional[float] = None,
     ) -> None:
-        """Log a market resolution."""
+        """Log a market resolution with CLV data."""
         self._write({
             "event": "market_resolved",
             "platform": platform,
@@ -141,6 +149,10 @@ class TradeLogger:
             "held_side": held_side,
             "held_count": held_count,
             "pnl_usd": pnl_usd,
+            # CLV tracking
+            "closing_probability": closing_probability,
+            "entry_probability": entry_probability,
+            "clv": clv,  # entry_prob - closing_prob (positive = ahead of market)
         })
 
 

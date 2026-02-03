@@ -191,11 +191,13 @@ kalshi:
 arbitrage:
   enabled: false
 
-# CLV tracking
+# CLV tracking — non-negotiable
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
   alert_threshold: -0.02            # alert if CLV < -2%
+  halt_threshold: 0.0               # auto-halt if avg CLV <= 0
+  min_samples: 10                   # need N resolved bets before enforcing
 
 dev:
   dry_run: false
