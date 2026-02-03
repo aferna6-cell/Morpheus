@@ -14,6 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .trade_logger import get_trade_logger
 import structlog
 
 try:
@@ -234,9 +235,11 @@ class KalshiTradingClient:
                 or "unknown"
             )
             self.logger.info("kalshi_order_placed", order_id=order_id, ticker=ticker)
+            get_trade_logger().log_order_placed("kalshi", ticker, side, count, price_cents, order_id, order_type)
             return order_data if isinstance(order_data, dict) else {"order": order_data}
         except Exception as exc:
             self.logger.error("kalshi_order_failed", ticker=ticker, error=str(exc))
+            get_trade_logger().log_order_failed("kalshi", ticker, side, count, price_cents, str(exc))
             return None
 
     async def cancel_order(self, order_id: str) -> bool:
