@@ -1,0 +1,25 @@
+[Unit]
+Description=Polymarket Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-bot
+
+# Option A: load environment variables from a file
+EnvironmentFile=/opt/polymarket-bot/.env
+
+# Option B: set directly
+# Environment=OPENAI_API_KEY=...
+
+ExecStart=/opt/polymarket-bot/.venv/bin/python -m src.main --state-dir /opt/polymarket-bot/state --runs-dir /opt/polymarket-bot/runs
+Restart=on-failure
+RestartSec=10
+
+# Hardening (keep minimal; adjust for your environment)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

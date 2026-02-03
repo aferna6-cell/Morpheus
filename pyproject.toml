@@ -1,0 +1,66 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "polymarket-bot"
+version = "0.1.0"
+description = "Autonomous Polymarket trading bot with LLM-powered signal generation"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+py-clob-client = "^0.26.0"
+httpx = "^0.27.0"
+pydantic = "^2.6.0"
+pydantic-settings = "^2.1.0"
+structlog = "^24.1.0"
+openai = "^1.13.0"
+python-dotenv = "^1.0.1"
+pyyaml = "^6.0.1"
+pandas = "^2.2.0"
+numpy = "^1.26.0"
+asyncio-throttle = "^1.0.2"
+aiofiles = "^23.2.0"
+feedparser = "^6.0.11"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.5"
+black = "^24.2.0"
+isort = "^5.13.2"
+mypy = "^1.8.0"
+flake8 = "^7.0.0"
+
+[tool.poetry.scripts]
+polymarket-bot = "src.main:main"
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.11"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_return_any = true
+strict_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "py_clob_client.*",
+    "feedparser.*",
+]
+ignore_missing_imports = true

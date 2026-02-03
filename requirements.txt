@@ -1,0 +1,9 @@
+# Morpheus — Polymarket Trading Bot
+py-clob-client>=0.18.0
+httpx>=0.24.0
+structlog>=23.0.0
+openai>=1.0.0
+python-dotenv>=1.0.0
+scipy>=1.10.0
+PuLP>=2.7.0
+kalshi-python>=2.1.0

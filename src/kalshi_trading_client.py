@@ -1,0 +1,325 @@
+"""Authenticated Kalshi trading client.
+
+Wraps the ``kalshi-python`` SDK for order placement, balance queries,
+and position management.  Auth uses RSA key signing (API key ID + PEM).
+
+All public methods are async — SDK calls run in a thread-pool executor
+to avoid blocking the event loop (same pattern as :class:`PolymarketClient`).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import structlog
+
+try:
+    from kalshi_python import Configuration, KalshiClient as _KalshiApiClient
+    from kalshi_python.api.portfolio_api import PortfolioApi as _PortfolioApi
+    from kalshi_python.api.exchange_api import ExchangeApi as _ExchangeApi
+    _HAS_KALSHI = True
+except ImportError:
+    _KalshiApiClient = None  # type: ignore
+    _PortfolioApi = None  # type: ignore
+    _ExchangeApi = None  # type: ignore
+    Configuration = None  # type: ignore
+    _HAS_KALSHI = False
+
+from .utils import BotConfig
+
+
+@dataclass
+class KalshiOrder:
+    """Parsed order from the Kalshi API."""
+    order_id: str
+    ticker: str
+    side: str          # "yes" or "no"
+    type: str          # "limit" or "market"
+    status: str
+    count: int         # number of contracts
+    price_cents: int   # price per contract in cents
+    remaining: int     # unfilled contracts
+
+
+@dataclass
+class KalshiPosition:
+    """Parsed position from the Kalshi API."""
+    ticker: str
+    count: int              # net contract count (positive = long yes, negative = long no)
+    market_exposure: float  # USD exposure (count * entry cost)
+
+
+class KalshiTradingClient:
+    """Async-friendly wrapper for the authenticated Kalshi SDK."""
+
+    DEFAULT_HOST = "https://api.elections.kalshi.com/trade-api/v2"
+
+    def __init__(self, config: BotConfig, dry_run: bool = False):
+        self.config = config
+        self.dry_run = dry_run
+        self.logger = structlog.get_logger()
+
+        kalshi_cfg = getattr(config, "kalshi", None) or {}
+        if isinstance(kalshi_cfg, dict):
+            self.host = kalshi_cfg.get("base_url", self.DEFAULT_HOST)
+        else:
+            self.host = self.DEFAULT_HOST
+
+        # Credentials from env
+        self.api_key_id = os.getenv("KALSHI_API_KEY_ID", "")
+        self._private_key_pem = self._load_private_key()
+
+        self._client: Optional[Any] = None
+        self._initialized = False
+
+    # ------------------------------------------------------------------
+    # Private key loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_private_key() -> str:
+        """Load RSA private key from env var (inline) or file path."""
+        inline = os.getenv("KALSHI_PRIVATE_KEY", "")
+        if inline:
+            return inline
+
+        key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+        if key_path:
+            with open(key_path, "r") as f:
+                return f.read()
+
+        return ""
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def initialize(self) -> None:
+        """Set up the SDK client with RSA auth."""
+        if self._initialized:
+            return
+
+        if self.dry_run:
+            self.logger.info("kalshi_trading_client_dry_run")
+            self._initialized = True
+            return
+
+        if not _HAS_KALSHI:
+            raise ImportError(
+                "kalshi-python is required for Kalshi trading; "
+                "pip install kalshi-python"
+            )
+
+        if not self.api_key_id or not self._private_key_pem:
+            raise ValueError(
+                "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY) "
+                "are required for authenticated Kalshi trading"
+            )
+
+        cfg = Configuration(host=self.host)
+        cfg.api_key_id = self.api_key_id
+        cfg.private_key_pem = self._private_key_pem
+
+        api_client = _KalshiApiClient(cfg)
+        self._portfolio = _PortfolioApi(api_client)
+        self._exchange = _ExchangeApi(api_client)
+
+        # Smoke test: fetch balance
+        balance = await self._run_in_executor(self._portfolio.get_balance)
+        usd = balance.balance / 100.0 if hasattr(balance, "balance") else 0.0
+        self.logger.info(
+            "kalshi_trading_client_initialized",
+            host=self.host,
+            balance_usd=usd,
+        )
+        self._initialized = True
+
+    async def close(self) -> None:
+        """Clean up (SDK has no explicit close)."""
+        self._initialized = False
+
+    # ------------------------------------------------------------------
+    # Balance
+    # ------------------------------------------------------------------
+
+    async def get_balance(self) -> float:
+        """Return available USD balance."""
+        if self.dry_run:
+            return float(
+                self.config.dev.get("paper_trading_balance", 10_000.0)
+            )
+
+        await self._ensure_init()
+        result = await self._run_in_executor(self._portfolio.get_balance)
+        # SDK returns cents
+        return result.balance / 100.0 if hasattr(result, "balance") else 0.0
+
+    # ------------------------------------------------------------------
+    # Orders
+    # ------------------------------------------------------------------
+
+    async def place_order(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        price_cents: int,
+        *,
+        order_type: str = "limit",
+    ) -> Optional[Dict[str, Any]]:
+        """Place a limit (or market) order on Kalshi.
+
+        Args:
+            ticker: Market ticker (e.g. ``KXBTC-25FEB07-T101999``).
+            side: ``"yes"`` or ``"no"``.
+            count: Number of contracts.
+            price_cents: Price per contract in cents (1-99 for limit).
+            order_type: ``"limit"`` (default) or ``"market"``.
+
+        Returns:
+            Order response dict or None on failure.
+        """
+        if count <= 0:
+            return None
+
+        self.logger.info(
+            "kalshi_place_order",
+            ticker=ticker,
+            side=side,
+            count=count,
+            price_cents=price_cents,
+            order_type=order_type,
+            dry_run=self.dry_run,
+        )
+
+        if self.dry_run:
+            return {
+                "order_id": f"dry_run_{ticker}_{side}_{count}",
+                "status": "resting" if order_type == "limit" else "executed",
+                "ticker": ticker,
+                "side": side,
+                "count": count,
+                "price_cents": price_cents,
+                "average_price": price_cents,
+            }
+
+        await self._ensure_init()
+
+        try:
+            import uuid
+
+            order_kwargs = dict(
+                ticker=ticker,
+                client_order_id=str(uuid.uuid4()),
+                side=side,
+                action="buy",
+                count=count,
+                type=order_type,
+            )
+            if side == "yes":
+                order_kwargs["yes_price"] = price_cents
+            else:
+                order_kwargs["no_price"] = price_cents
+
+            result = await self._run_in_executor(
+                self._portfolio.create_order, **order_kwargs
+            )
+            order_data = result.to_dict() if hasattr(result, "to_dict") else result
+            order_id = (
+                getattr(result, "order_id", None)
+                or (order_data.get("order", {}).get("order_id") if isinstance(order_data, dict) else None)
+                or "unknown"
+            )
+            self.logger.info("kalshi_order_placed", order_id=order_id, ticker=ticker)
+            return order_data if isinstance(order_data, dict) else {"order": order_data}
+        except Exception as exc:
+            self.logger.error("kalshi_order_failed", ticker=ticker, error=str(exc))
+            return None
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order."""
+        if self.dry_run:
+            return True
+
+        await self._ensure_init()
+        try:
+            await self._run_in_executor(self._portfolio.cancel_order, order_id)
+            self.logger.info("kalshi_order_cancelled", order_id=order_id)
+            return True
+        except Exception as exc:
+            self.logger.error("kalshi_cancel_failed", order_id=order_id, error=str(exc))
+            return False
+
+    async def get_open_orders(self) -> List[KalshiOrder]:
+        """Return all open/resting orders."""
+        if self.dry_run:
+            return []
+
+        await self._ensure_init()
+        try:
+            result = await self._run_in_executor(self._portfolio.get_orders, status="resting")
+            orders_raw = result.orders if hasattr(result, "orders") else []
+            return [
+                KalshiOrder(
+                    order_id=getattr(o, "order_id", ""),
+                    ticker=getattr(o, "ticker", ""),
+                    side=getattr(o, "side", ""),
+                    type=getattr(o, "type", "limit"),
+                    status=getattr(o, "status", ""),
+                    count=getattr(o, "count", 0),
+                    price_cents=getattr(o, "yes_price", 0) or getattr(o, "no_price", 0),
+                    remaining=getattr(o, "remaining_count", 0),
+                )
+                for o in orders_raw
+            ]
+        except Exception as exc:
+            self.logger.error("kalshi_get_orders_failed", error=str(exc))
+            return []
+
+    # ------------------------------------------------------------------
+    # Positions
+    # ------------------------------------------------------------------
+
+    async def get_positions(self) -> List[KalshiPosition]:
+        """Return current positions."""
+        if self.dry_run:
+            return []
+
+        await self._ensure_init()
+        try:
+            result = await self._run_in_executor(self._portfolio.get_positions)
+            positions_raw = (
+                result.market_positions
+                if hasattr(result, "market_positions")
+                else []
+            )
+            return [
+                KalshiPosition(
+                    ticker=getattr(p, "ticker", ""),
+                    count=getattr(p, "position", 0),
+                    market_exposure=abs(getattr(p, "market_exposure", 0)) / 100.0,
+                )
+                for p in positions_raw
+            ]
+        except Exception as exc:
+            self.logger.error("kalshi_get_positions_failed", error=str(exc))
+            return []
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _ensure_init(self) -> None:
+        if not self._initialized:
+            await self.initialize()
+
+    async def _run_in_executor(self, func, *args, **kwargs) -> Any:
+        """Run a blocking SDK call in the default thread-pool."""
+        loop = asyncio.get_event_loop()
+        if kwargs:
+            import functools
+            func = functools.partial(func, **kwargs)
+        return await loop.run_in_executor(None, func, *args)

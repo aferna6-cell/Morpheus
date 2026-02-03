@@ -1,0 +1,17 @@
+Collecting kalshi-python
+  Downloading kalshi_python-2.1.4-py3-none-any.whl.metadata (2.0 kB)
+Requirement already satisfied: urllib3<3.0.0,>=2.1.0 in ./.venv/lib/python3.12/site-packages (from kalshi-python) (2.6.3)
+Requirement already satisfied: python-dateutil>=2.8.2 in ./.venv/lib/python3.12/site-packages (from kalshi-python) (2.9.0.post0)
+Requirement already satisfied: pydantic>=2 in ./.venv/lib/python3.12/site-packages (from kalshi-python) (2.12.5)
+Requirement already satisfied: typing-extensions>=4.7.1 in ./.venv/lib/python3.12/site-packages (from kalshi-python) (4.15.0)
+Collecting lazy-imports<2,>=1 (from kalshi-python)
+  Downloading lazy_imports-1.2.0-py3-none-any.whl.metadata (11 kB)
+Requirement already satisfied: annotated-types>=0.6.0 in ./.venv/lib/python3.12/site-packages (from pydantic>=2->kalshi-python) (0.7.0)
+Requirement already satisfied: pydantic-core==2.41.5 in ./.venv/lib/python3.12/site-packages (from pydantic>=2->kalshi-python) (2.41.5)
+Requirement already satisfied: typing-inspection>=0.4.2 in ./.venv/lib/python3.12/site-packages (from pydantic>=2->kalshi-python) (0.4.2)
+Requirement already satisfied: six>=1.5 in ./.venv/lib/python3.12/site-packages (from python-dateutil>=2.8.2->kalshi-python) (1.17.0)
+Downloading kalshi_python-2.1.4-py3-none-any.whl (181 kB)
+Downloading lazy_imports-1.2.0-py3-none-any.whl (18 kB)
+Installing collected packages: lazy-imports, kalshi-python
+
+Successfully installed kalshi-python-2.1.4 lazy-imports-1.2.0

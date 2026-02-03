@@ -1,0 +1,228 @@
+"""Kalshi trade executor.
+
+Takes approved :class:`TradeSignal` objects (from the Kalshi LLM engine)
+and places orders via :class:`KalshiTradingClient`.  Handles order
+confirmation, rejection, and Telegram alerting.
+
+Kalshi contracts pay $1 each, so ``position_size_usd ≈ number of contracts``.
+Fees are ~$0.07 per contract (flat, not percentage-based).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+import structlog
+
+from .alerts import send_alert
+from .kalshi_trading_client import KalshiTradingClient
+from .markets import Market
+from .risk import PositionSize, RiskManager
+from .signals.base import SignalResult, TradingSide
+from .signals.llm_signal import ConvictionLevel, classify_conviction
+from .utils import BotConfig
+
+
+@dataclass
+class KalshiTradeExecution:
+    """Result of a Kalshi trade attempt."""
+    ticker: str
+    side: str
+    intended_contracts: int
+    executed_contracts: int
+    price_cents: int
+    executed_amount_usd: float
+    average_price: float       # 0-1 scale
+    order_id: Optional[str]
+    was_successful: bool
+    reason: str
+    execution_time: datetime
+
+    # Alias for orchestrator compatibility
+    @property
+    def executed_amount(self) -> float:
+        return self.executed_amount_usd
+
+
+class KalshiExecutor:
+    """Executes Kalshi trades from orchestrator signals."""
+
+    def __init__(
+        self,
+        config: BotConfig,
+        trading_client: KalshiTradingClient,
+        risk_manager: RiskManager,
+    ):
+        self.config = config
+        self.trading_client = trading_client
+        self.risk_manager = risk_manager
+        self.logger = structlog.get_logger()
+
+        kalshi_cfg = getattr(config, "kalshi", None) or {}
+        if isinstance(kalshi_cfg, dict):
+            self._fee_per_contract = float(kalshi_cfg.get("fee_per_contract", 0.07))
+            self._max_contracts = int(kalshi_cfg.get("max_position_contracts", 100))
+        else:
+            self._fee_per_contract = 0.07
+            self._max_contracts = 100
+
+    async def execute_signal(
+        self,
+        market: Market,
+        signal: SignalResult,
+        position_size: PositionSize,
+    ) -> KalshiTradeExecution:
+        """Place a Kalshi order for the given signal.
+
+        Args:
+            market: The Market object (converted from KalshiMarket).
+            signal: The approved SignalResult.
+            position_size: Risk-manager-approved position sizing.
+
+        Returns:
+            KalshiTradeExecution with fill details.
+        """
+        ticker = market.id  # This is the Kalshi ticker
+
+        # Determine side and price
+        if signal.recommended_side == TradingSide.BUY_YES:
+            side = "yes"
+            # Use yes_ask from metadata if available, else market price
+            meta = getattr(signal, "metadata", None) or {}
+            ask_price = meta.get("kalshi_yes_ask") or signal.market_price or market.yes_price or 0.5
+            price_cents = max(1, min(99, round(ask_price * 100)))
+        elif signal.recommended_side == TradingSide.BUY_NO:
+            side = "no"
+            meta = getattr(signal, "metadata", None) or {}
+            ask_price = meta.get("kalshi_no_ask") or (
+                1.0 - (signal.market_price or market.yes_price or 0.5)
+            )
+            price_cents = max(1, min(99, round(ask_price * 100)))
+        else:
+            return KalshiTradeExecution(
+                ticker=ticker,
+                side="hold",
+                intended_contracts=0,
+                executed_contracts=0,
+                price_cents=0,
+                executed_amount_usd=0.0,
+                average_price=0.0,
+                order_id=None,
+                was_successful=False,
+                reason="Signal is HOLD",
+                execution_time=datetime.now(timezone.utc),
+            )
+
+        # Calculate contracts: $1 per contract, so USD ≈ contracts
+        # But we pay price_cents/100 per contract (cost = count * price / 100)
+        entry_cost = price_cents / 100.0
+        if entry_cost <= 0:
+            return self._fail(ticker, side, 0, 0, "Invalid entry cost")
+
+        raw_count = math.floor(position_size.amount_usd / entry_cost)
+        count = min(max(raw_count, 1), self._max_contracts)
+
+        total_fee = count * self._fee_per_contract
+        total_cost = count * entry_cost + total_fee
+
+        self.logger.info(
+            "kalshi_execute",
+            ticker=ticker,
+            side=side,
+            count=count,
+            price_cents=price_cents,
+            cost_usd=total_cost,
+            fee_usd=total_fee,
+        )
+
+        # Place the order
+        result = await self.trading_client.place_order(
+            ticker=ticker,
+            side=side,
+            count=count,
+            price_cents=price_cents,
+            order_type="limit",
+        )
+
+        if not result:
+            return self._fail(ticker, side, count, price_cents, "Order placement failed")
+
+        order_id = (
+            result.get("order_id")
+            or result.get("order", {}).get("order_id", "unknown")
+            if isinstance(result, dict) else "unknown"
+        )
+        status = (
+            result.get("status")
+            or result.get("order", {}).get("status", "unknown")
+            if isinstance(result, dict) else "unknown"
+        )
+
+        # For limit orders, we consider it successful if it was accepted
+        # (resting or executed). Full fill tracking would need polling.
+        is_success = status in {"resting", "executed", "FILLED", "OPEN"}
+        executed_count = count if status == "executed" else 0
+        executed_usd = executed_count * entry_cost
+
+        execution = KalshiTradeExecution(
+            ticker=ticker,
+            side=side,
+            intended_contracts=count,
+            executed_contracts=executed_count if executed_count > 0 else count,
+            price_cents=price_cents,
+            executed_amount_usd=executed_usd if executed_usd > 0 else count * entry_cost,
+            average_price=entry_cost,
+            order_id=str(order_id),
+            was_successful=is_success,
+            reason=f"ok ({status})" if is_success else f"Order status: {status}",
+            execution_time=datetime.now(timezone.utc),
+        )
+
+        # Send Telegram alert
+        if is_success:
+            conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
+            conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
+            net_edge = getattr(signal, "net_edge", signal.edge)
+
+            alert_msg = (
+                f"🎯 [KALSHI] {side.upper()} {count}x {ticker}\n"
+                f"Price: {price_cents}¢ | Cost: ${count * entry_cost:.2f} + ${total_fee:.2f} fee\n"
+                f"Edge: {net_edge:+.3f} | Conv: {conv_str}\n"
+                f"{market.question[:100]}"
+            )
+            try:
+                await send_alert(alert_msg, self.config)
+            except Exception as exc:
+                self.logger.warning("kalshi_alert_failed", error=str(exc))
+
+        self.logger.info(
+            "kalshi_execution_result",
+            ticker=ticker,
+            side=side,
+            count=count,
+            success=is_success,
+            order_id=str(order_id),
+        )
+
+        return execution
+
+    def _fail(
+        self, ticker: str, side: str, count: int, price_cents: int, reason: str,
+    ) -> KalshiTradeExecution:
+        self.logger.warning("kalshi_execution_failed", ticker=ticker, reason=reason)
+        return KalshiTradeExecution(
+            ticker=ticker,
+            side=side,
+            intended_contracts=count,
+            executed_contracts=0,
+            price_cents=price_cents,
+            executed_amount_usd=0.0,
+            average_price=0.0,
+            order_id=None,
+            was_successful=False,
+            reason=reason,
+            execution_time=datetime.now(timezone.utc),
+        )
