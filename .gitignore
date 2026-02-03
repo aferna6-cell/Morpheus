@@ -61,4 +61,4 @@ htmlcov/
 Thumbs.db
 
 # Poetry
-poetry.lock
+poetry.lock*.pem
