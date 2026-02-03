@@ -58,9 +58,17 @@ class KalshiTradingClient:
 
     DEFAULT_HOST = "https://api.elections.kalshi.com/trade-api/v2"
 
-    def __init__(self, config: BotConfig, dry_run: bool = False):
+    def __init__(
+        self,
+        config: BotConfig,
+        dry_run: bool = False,
+        api_key_id: Optional[str] = None,
+        private_key_path: Optional[str] = None,
+        label: str = "default",
+    ):
         self.config = config
         self.dry_run = dry_run
+        self.label = label
         self.logger = structlog.get_logger()
 
         kalshi_cfg = getattr(config, "kalshi", None) or {}
@@ -69,12 +77,51 @@ class KalshiTradingClient:
         else:
             self.host = self.DEFAULT_HOST
 
-        # Credentials from env
-        self.api_key_id = os.getenv("KALSHI_API_KEY_ID", "")
-        self._private_key_pem = self._load_private_key()
+        # Credentials from env or explicit args
+        self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID", "")
+        if private_key_path:
+            with open(private_key_path, "r") as f:
+                self._private_key_pem = f.read()
+        else:
+            self._private_key_pem = self._load_private_key()
 
         self._client: Optional[Any] = None
         self._initialized = False
+        
+        # Trading halt state — stops trading on insufficient balance
+        self._trading_halted = False
+        self._halt_reason: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Trading halt management
+    # ------------------------------------------------------------------
+
+    @property
+    def is_halted(self) -> bool:
+        """Return True if trading is halted (e.g., insufficient balance)."""
+        return self._trading_halted
+
+    @property
+    def halt_reason(self) -> Optional[str]:
+        """Return the reason trading was halted, or None."""
+        return self._halt_reason
+
+    def _halt_trading(self, reason: str) -> None:
+        """Halt all trading with the given reason."""
+        if not self._trading_halted:
+            self._trading_halted = True
+            self._halt_reason = reason
+            self.logger.error(
+                "kalshi_trading_halted",
+                label=self.label,
+                reason=reason,
+            )
+
+    def resume_trading(self) -> None:
+        """Resume trading after a halt (e.g., after adding funds)."""
+        self._trading_halted = False
+        self._halt_reason = None
+        self.logger.info("kalshi_trading_resumed", label=self.label)
 
     # ------------------------------------------------------------------
     # Private key loading
@@ -104,7 +151,7 @@ class KalshiTradingClient:
             return
 
         if self.dry_run:
-            self.logger.info("kalshi_trading_client_dry_run")
+            self.logger.info("kalshi_trading_client_dry_run", label=self.label)
             self._initialized = True
             return
 
@@ -133,6 +180,7 @@ class KalshiTradingClient:
         usd = balance.balance / 100.0 if hasattr(balance, "balance") else 0.0
         self.logger.info(
             "kalshi_trading_client_initialized",
+            label=self.label,
             host=self.host,
             balance_usd=usd,
         )
@@ -186,8 +234,19 @@ class KalshiTradingClient:
         if count <= 0:
             return None
 
+        # Check if trading is halted
+        if self._trading_halted:
+            self.logger.warning(
+                "kalshi_order_skipped_halted",
+                label=self.label,
+                ticker=ticker,
+                reason=self._halt_reason,
+            )
+            return None
+
         self.logger.info(
             "kalshi_place_order",
+            label=self.label,
             ticker=ticker,
             side=side,
             count=count,
@@ -234,11 +293,29 @@ class KalshiTradingClient:
                 or (order_data.get("order", {}).get("order_id") if isinstance(order_data, dict) else None)
                 or "unknown"
             )
-            self.logger.info("kalshi_order_placed", order_id=order_id, ticker=ticker)
+            self.logger.info("kalshi_order_placed", label=self.label, order_id=order_id, ticker=ticker)
             get_trade_logger().log_order_placed("kalshi", ticker, side, count, price_cents, order_id, order_type)
             return order_data if isinstance(order_data, dict) else {"order": order_data}
         except Exception as exc:
-            self.logger.error("kalshi_order_failed", ticker=ticker, error=str(exc))
+            error_str = str(exc).lower()
+            
+            # Detect insufficient balance and halt trading
+            if "insufficient_balance" in error_str or "insufficient balance" in error_str:
+                self._halt_trading(f"Insufficient balance detected: {exc}")
+                # Try to send alert (import here to avoid circular)
+                try:
+                    from .alerts import send_alert
+                    asyncio.create_task(
+                        send_alert(
+                            f"🛑 [{self.label}] Trading HALTED — Insufficient balance. "
+                            f"Fund your Kalshi account to resume.",
+                            self.config,
+                        )
+                    )
+                except Exception:
+                    pass  # Alert failure shouldn't break the flow
+            
+            self.logger.error("kalshi_order_failed", label=self.label, ticker=ticker, error=str(exc))
             get_trade_logger().log_order_failed("kalshi", ticker, side, count, price_cents, str(exc))
             return None
 
@@ -250,10 +327,10 @@ class KalshiTradingClient:
         await self._ensure_init()
         try:
             await self._run_in_executor(self._portfolio.cancel_order, order_id)
-            self.logger.info("kalshi_order_cancelled", order_id=order_id)
+            self.logger.info("kalshi_order_cancelled", label=self.label, order_id=order_id)
             return True
         except Exception as exc:
-            self.logger.error("kalshi_cancel_failed", order_id=order_id, error=str(exc))
+            self.logger.error("kalshi_cancel_failed", label=self.label, order_id=order_id, error=str(exc))
             return False
 
     async def get_open_orders(self) -> List[KalshiOrder]:
@@ -279,7 +356,7 @@ class KalshiTradingClient:
                 for o in orders_raw
             ]
         except Exception as exc:
-            self.logger.error("kalshi_get_orders_failed", error=str(exc))
+            self.logger.error("kalshi_get_orders_failed", label=self.label, error=str(exc))
             return []
 
     # ------------------------------------------------------------------
@@ -308,7 +385,7 @@ class KalshiTradingClient:
                 for p in positions_raw
             ]
         except Exception as exc:
-            self.logger.error("kalshi_get_positions_failed", error=str(exc))
+            self.logger.error("kalshi_get_positions_failed", label=self.label, error=str(exc))
             return []
 
     # ------------------------------------------------------------------
