@@ -1,0 +1,20 @@
+[Unit]
+Description=Morpheus Kalshi Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/morpheus
+
+EnvironmentFile=/opt/morpheus/.env
+
+ExecStart=/opt/morpheus/.venv/bin/python -m src.main --state-dir /opt/morpheus/state --runs-dir /opt/morpheus/runs
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

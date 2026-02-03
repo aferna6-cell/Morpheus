@@ -1,16 +1,10 @@
-# Morpheus — Disciplined mode after $20 lesson.
+# Morpheus — Kalshi trading bot.
 # Strict filters: volume, spread, resolution, data sources.
 # Sports: mostly killed (only live events with edge cases).
 
-polymarket:
-  clob_url: "https://clob.polymarket.com"
-  gamma_url: "https://gamma-api.polymarket.com"
-  chain_id: 137
-  signature_type: 0
-
 strategy:
   enabled_strategies: ["kalshi_llm"]
-  min_edge: 0.05                    # 5% minimum edge (was 2%)
+  min_edge: 0.05                    # 5% minimum edge
   kelly_fraction: 0.25              # quarter-Kelly
   max_position_pct: 0.01            # 1% of bankroll cap
   max_position_size: 10.0
@@ -24,7 +18,7 @@ strategy:
 
 # Strict market filters
 market_filters:
-  min_volume_24h: 50000             # $50k minimum volume (was $1k)
+  min_volume_24h: 50000             # $50k minimum volume
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 500
@@ -33,18 +27,17 @@ market_filters:
   min_data_sources: 3               # require 3+ independent sources
   exclude_closing_within_hours: 2
   max_markets_per_scan: 100
-  max_resolution_days: 30           # ≤30 days to resolution
+  max_resolution_days: 30           # <=30 days to resolution
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
   focus_enabled: false
-  # Portfolio time allocation
+  # Capital recycling: portfolio time allocation
   max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
   max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
 
 # Sports market rules — kill most, allow only edge cases
 sports_filters:
   enabled: true
-  # Categories to block entirely
   blocked_categories:
     - "Sports"
     - "Soccer"
@@ -57,7 +50,6 @@ sports_filters:
     - "MMA"
     - "Boxing"
     - "Racing"
-  # Market types to ALWAYS skip (even if in allowed category)
   blocked_patterns:
     - "Winner"           # pre-match moneyline
     - "vs"               # head-to-head (usually moneyline)
@@ -70,7 +62,6 @@ sports_filters:
     - "Champion"         # championship winner
     - "MVP"
     - "Gold Medal"
-  # Only allow these sports scenarios (if any)
   allowed_live_only: true            # only trade live/in-play
   allowed_patterns:                   # edge cases we might trade
     - "red card"
@@ -95,7 +86,6 @@ llm:
   calibration_shrink_strength: 0.15
   consensus_enabled: false
   monthly_budget_usd: 100.0
-  # Data source requirements
   require_data_sources: true
   min_data_sources: 3
 
@@ -112,15 +102,14 @@ news:
 
 # Risk — quarter-Kelly, 1% cap
 risk:
-  max_loss_per_trade: 5.0           # tighter max loss
+  max_loss_per_trade: 5.0
   max_daily_loss: 10.0
   stop_loss_pct: 0.25
   take_profit_pct: 0.40
   max_position_hold_hours: 168
   position_check_interval_minutes: 30
-  cooldown_minutes: 30              # longer cooldown
+  cooldown_minutes: 30
   prevent_retrade: true
-  # Position sizing: min(1% bankroll, 0.25 * kelly)
   use_quarter_kelly: true
   max_bankroll_pct: 0.01
 
@@ -135,48 +124,25 @@ timing:
 logging:
   level: "INFO"
   format: "json"
-  file: "polymarket_bot.log"
+  file: "morpheus.log"
   max_file_size_mb: 100
   backup_count: 5
 
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 5          # fewer signals per cycle
+  max_signals_per_cycle: 5
   multi_engine_boost: 1.0
-  cycle_interval_seconds: 60        # slower cycle
+  cycle_interval_seconds: 60
 
-execution:
-  default_slippage: 0.005
-  fee_bps: 0.0
-  order_timeout_seconds: 60
-  max_retries: 3
-  retry_delay_seconds: 2
-  prefer_limit_orders: true
-  maker_spread_offset: 0.005
-  urgent_allow_taker: false         # never taker
-  limit_order_timeout_seconds: 30
-
-bregman_arb:
-  enabled: false                    # disabled until Polymarket funded
-
-websocket:
-  enabled: false
-
-spike_detection:
-  enabled: false
-
-copy_trading:
-  enabled: false                    # disabled
-
+# Kalshi — primary platform
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 600
   fee_per_contract: 0.07
-  min_volume: 50000                 # $50k minimum (was 10)
-  max_position_contracts: 50        # smaller positions
-  # Only non-sports categories
+  min_volume: 50000                 # $50k minimum
+  max_position_contracts: 50
   categories:
     - "Politics"
     - "Economics"
@@ -187,9 +153,6 @@ kalshi:
     - "Financials"
   max_resolution_days: 30
   max_spread_pct: 0.05              # 5% spread max
-
-arbitrage:
-  enabled: false
 
 # CLV tracking — non-negotiable
 clv_tracking:

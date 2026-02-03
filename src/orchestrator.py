@@ -21,19 +21,13 @@ import structlog
 from .capital_management import get_capital_manager, CapitalManager
 from .engines.base import BaseEngine
 from .engines.signals import TradeSignal
-from .execution import OrderManager, TradeExecution
+from .kalshi_executor import KalshiExecutor, KalshiTradeExecution
 from .markets import Market
 from .risk import RiskManager
 from .signals.base import SignalResult, TradingSide
 from .signals.llm_signal import ConvictionLevel, classify_conviction
 from .alerts import send_alert
 from .utils import BotConfig, utc_now
-
-# Optional Kalshi executor (imported lazily if needed)
-try:
-    from .kalshi_executor import KalshiExecutor
-except ImportError:
-    KalshiExecutor = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -47,19 +41,11 @@ _URGENCY_BONUS: Dict[str, float] = {
 }
 
 _ENGINE_PRIORITY: Dict[str, float] = {
-    "bregman_arb": 1.0,  # mathematical arb → highest
-    "arb": 0.95,          # simple arb → very high
-    "spike": 0.8,         # time-sensitive
-    "copy": 0.6,          # moderate-high
-    "llm": 0.5,           # moderate
-    "kalshi_llm": 0.5,   # same priority as Polymarket LLM
+    "kalshi_llm": 0.5,
 }
 
 # Engines whose signals route to Kalshi executor
 _KALSHI_ENGINES = {"kalshi_llm"}
-
-# Engines whose signals are mathematically risk-free (skip conviction gating)
-_ARB_ENGINES = {"bregman_arb", "arb"}
 
 
 class Orchestrator:
@@ -70,13 +56,12 @@ class Orchestrator:
         config: BotConfig,
         engines: List[BaseEngine],
         risk_manager: RiskManager,
-        executor: OrderManager,
-        kalshi_executor: Optional["KalshiExecutor"] = None,
+        kalshi_executor: Optional[KalshiExecutor] = None,
+        executor: Optional[object] = None,  # legacy compat, unused
     ):
         self.config = config
         self.engines = engines
         self.risk_manager = risk_manager
-        self.executor = executor
         self.kalshi_executor = kalshi_executor
         self.logger = structlog.get_logger()
 
@@ -246,24 +231,13 @@ class Orchestrator:
                         m = signal.metadata.get("_market")
                         question = getattr(m, "question", signal.market_id) if m else signal.market_id
                     conviction = signal.metadata.get("conviction", "?")
-                    layer = signal.metadata.get("layer")
-                    label = signal.metadata.get("label", "")
 
-                    if signal.engine == "bregman_arb" and layer:
-                        net_profit = signal.metadata.get("net_profit", 0)
-                        alert_msg = (
-                            f"🎯 [BREGMAN L{layer}] {signal.side.upper()} "
-                            f"${trade.executed_amount_usd:.2f} @ {trade.average_price:.3f}\n"
-                            f"Net profit: ${net_profit:.4f} | Conf: {signal.confidence:.2f}\n"
-                            f"{label[:100]}"
-                        )
-                    else:
-                        alert_msg = (
-                            f"💰 [{signal.engine.upper()}] {signal.side.upper()} "
-                            f"${trade.executed_amount_usd:.2f} @ {trade.average_price:.3f}\n"
-                            f"Edge: {signal.edge:+.3f} | Conv: {conviction}\n"
-                            f"{question[:100]}"
-                        )
+                    alert_msg = (
+                        f"[{signal.engine.upper()}] {signal.side.upper()} "
+                        f"${trade.executed_amount_usd:.2f} @ {trade.average_price:.3f}\n"
+                        f"Edge: {signal.edge:+.3f} | Conv: {conviction}\n"
+                        f"{question[:100]}"
+                    )
                     await send_alert(alert_msg, self.config)
             except Exception as exc:
                 self.logger.error(
@@ -362,156 +336,11 @@ class Orchestrator:
     # Dispatch
     # ------------------------------------------------------------------
 
-    async def _dispatch(self, signal: TradeSignal) -> Optional[TradeExecution]:
-        """Convert a TradeSignal to an execution via OrderManager.
+    async def _dispatch(self, signal: TradeSignal) -> Optional[KalshiTradeExecution]:
+        """Convert a TradeSignal to an execution via KalshiExecutor.
 
-        We need to bridge from the engine TradeSignal format to the
-        existing SignalResult + Market that OrderManager.execute_signal expects.
-
-        Kalshi signals are routed to the Kalshi executor.
-
-        Arb engines (bregman_arb, arb) get special treatment:
-        - Bypass conviction gating (it's math, not opinion)
-        - Use execution plan sizing if available
-        - Force HIGH conviction for risk manager approval
-        """
-
-        # Route Kalshi signals to the Kalshi executor
-        if signal.engine in _KALSHI_ENGINES:
-            return await self._dispatch_kalshi(signal)
-
-
-        # Build a minimal SignalResult compatible with execute_signal
-        side_map = {
-            "buy_yes": TradingSide.BUY_YES,
-            "buy_no": TradingSide.BUY_NO,
-        }
-        trading_side = side_map.get(signal.side, TradingSide.HOLD)
-        if trading_side == TradingSide.HOLD:
-            return None
-
-        is_arb = signal.engine in _ARB_ENGINES
-
-        estimated_prob = signal.metadata.get("estimated_prob", 0.5)
-        market_price = signal.metadata.get("market_price") or signal.metadata.get("leg_price", 0.5)
-        net_edge = signal.metadata.get("net_edge", signal.edge)
-        conviction_str = signal.metadata.get("conviction", "high" if is_arb else "medium")
-
-        # For arb signals, set estimated_prob from leg pricing
-        if is_arb and estimated_prob == 0.5:
-            leg_price = signal.metadata.get("leg_price")
-            if leg_price:
-                # Arb: we know the fair value, so estimated_prob reflects our side
-                estimated_prob = leg_price if signal.side == "buy_yes" else 1.0 - leg_price
-
-        sig_result = SignalResult(
-            estimated_prob=estimated_prob,
-            confidence=signal.confidence,
-            edge=signal.edge,
-            recommended_side=trading_side,
-            reasoning=f"[{signal.engine}] {signal.metadata.get('reasoning', signal.metadata.get('label', ''))}",
-            signal_name=signal.engine,
-            market_price=market_price,
-            timestamp=signal.timestamp.isoformat(),
-        )
-
-        # Arb signals → force HIGH conviction (risk-free)
-        if is_arb:
-            sig_result.conviction = ConvictionLevel.HIGH  # type: ignore[attr-defined]
-            sig_result.net_edge = max(net_edge, 0.10)  # type: ignore[attr-defined]
-        else:
-            try:
-                sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
-            except ValueError:
-                sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
-            sig_result.net_edge = net_edge  # type: ignore[attr-defined]
-
-        # Build a minimal Market stub from signal metadata
-        market_data = signal.metadata.get("_market")
-        if market_data is None:
-            from .markets import Market, TokenInfo
-            question = signal.metadata.get("question", signal.market_id)
-            original_price = signal.metadata.get("original_price") or signal.metadata.get("leg_price", 0.5)
-            copy_size = signal.metadata.get("copy_size_usd")
-
-            # Build token info from the signal
-            tokens = {}
-            if signal.token_id:
-                wanted = "Yes" if signal.side == "buy_yes" else "No"
-                tokens[wanted] = TokenInfo(
-                    token_id=signal.token_id,
-                    outcome=wanted,
-                    price=original_price if wanted == "Yes" else 1.0 - original_price,
-                    volume_24h=0.0,
-                )
-
-            if not tokens:
-                self.logger.warning("dispatch_no_token", market_id=signal.market_id)
-                return None
-
-            category = "arbitrage" if is_arb else "copy_trade"
-            market_data = Market(
-                id=signal.market_id,
-                question=question,
-                description="",
-                category=category,
-                end_date=None,
-                volume_24h=0.0,
-                liquidity=10000.0,
-                tokens=tokens,
-            )
-            # Override position size with copy_size if available
-            if copy_size:
-                signal.metadata["_force_size_usd"] = copy_size
-
-        # Calculate position size
-        exposure = self.executor.portfolio.get_current_exposure()
-        balances = await self.executor.client.get_balances()
-        usdc = balances.get(
-            "USDC",
-            self.config.dev.get("paper_trading_balance", 10_000.0),
-        )
-
-        # Arb: use execution plan sizing if available
-        if is_arb:
-            exec_plan = signal.metadata.get("execution_plan", {})
-            arb_max = signal.metadata.get("max_position_usd", 100.0)
-            signal.metadata["_force_size_usd"] = min(arb_max, usdc * 0.10)
-
-        pos = self.risk_manager.calculate_position_size(
-            signal=sig_result,
-            market=market_data,
-            available_capital=usdc,
-            current_positions=exposure,
-        )
-
-        if not self.risk_manager.check_trade_approval(pos, market_data, sig_result):
-            self.logger.debug("dispatch_rejected_by_risk", market_id=signal.market_id)
-            return None
-
-        # Attach metadata for execution layer
-        exec_meta: Dict[str, Any] = {}
-        if signal.urgency == "immediate" or is_arb:
-            exec_meta["urgent"] = True
-        # Pass through forced sizing so RiskManager can consume it
-        force_size = signal.metadata.get("_force_size_usd")
-        if force_size is not None:
-            exec_meta["_force_size_usd"] = force_size
-        sig_result.metadata = exec_meta  # type: ignore[attr-defined]
-
-        trade = await self.executor.execute_signal(market_data, sig_result, pos)
-        return trade
-
-    # ------------------------------------------------------------------
-    # Kalshi dispatch
-    # ------------------------------------------------------------------
-
-    async def _dispatch_kalshi(self, signal: TradeSignal) -> Optional[TradeExecution]:
-        """Route a Kalshi signal to the Kalshi executor.
-
-        Bridges the same TradeSignal → SignalResult → PositionSize flow
-        but uses USD balance from Kalshi and routes to KalshiExecutor.
-        Returns a duck-typed TradeExecution-compatible object.
+        Bridges the TradeSignal → SignalResult → PositionSize flow,
+        gets USD balance from Kalshi, and routes to KalshiExecutor.
         """
         if self.kalshi_executor is None:
             self.logger.warning("kalshi_dispatch_no_executor", market_id=signal.market_id)
@@ -586,12 +415,7 @@ class Orchestrator:
             market_data, sig_result, pos,
         )
 
-        # Wrap as duck-typed TradeExecution for the orchestrator
         if kalshi_trade and kalshi_trade.was_successful:
-            return type("_KalshiTradeProxy", (), {
-                "was_successful": kalshi_trade.was_successful,
-                "executed_amount_usd": kalshi_trade.executed_amount_usd,
-                "average_price": kalshi_trade.average_price,
-            })()  # type: ignore[return-value]
+            return kalshi_trade
 
         return None

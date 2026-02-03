@@ -1,4 +1,4 @@
-"""Portfolio management for the Polymarket trading bot."""
+"""Portfolio management — exchange-agnostic position tracking."""
 
 import asyncio
 from dataclasses import asdict, dataclass
@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
-from .client import PolymarketClient
 from .markets import Market
 from .trade_logger import get_trade_logger
 from .utils import BotConfig, format_usd, load_json_state, save_json_state
@@ -161,7 +160,7 @@ class Portfolio:
     """Manages trading portfolio and positions."""
 
     def __init__(
-        self, config: BotConfig, client: PolymarketClient, *, state_dir: str = "."
+        self, config: BotConfig, client: Any = None, *, state_dir: str = "."
     ):
         """Initialize portfolio manager."""
         self.config = config
