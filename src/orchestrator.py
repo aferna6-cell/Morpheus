@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from .capital_management import get_capital_manager, CapitalManager
 from .engines.base import BaseEngine
 from .engines.signals import TradeSignal
 from .execution import OrderManager, TradeExecution
@@ -99,6 +100,13 @@ class Orchestrator:
         self._dispatched: set = set()
 
         self._running = False
+
+        # Capital management (recycling rules + CLV tracking)
+        self._capital_manager: Optional[CapitalManager] = None
+        try:
+            self._capital_manager = get_capital_manager(config, state_dir="state")
+        except Exception as exc:
+            self.logger.warning("capital_manager_init_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -186,6 +194,14 @@ class Orchestrator:
                 self.logger.warning("trading_halted_skip")
                 break
 
+            # Check capital management rules (recycling + CLV)
+            if self._capital_manager:
+                can_trade, reason = self._capital_manager.can_trade()
+                if not can_trade:
+                    self.logger.warning("capital_management_halt", reason=reason)
+                    await send_alert(f"Capital management halt: {reason}", self.config)
+                    break
+
             # Dedup: skip if we already dispatched this exact signal
             dedup_key = (signal.market_id, signal.side, signal.engine)
             if dedup_key in self._dispatched:
@@ -202,6 +218,27 @@ class Orchestrator:
                 if trade and trade.was_successful:
                     executed += 1
                     self._dispatched.add(dedup_key)
+
+                    # Register position with capital manager for recycling/CLV tracking
+                    if self._capital_manager:
+                        market_data = signal.metadata.get("_market")
+                        resolution_time = getattr(market_data, "end_date", None) if market_data else None
+                        entry_prob = signal.metadata.get("estimated_prob", 0.5)
+                        side = "yes" if signal.side == "buy_yes" else "no"
+                        platform = signal.metadata.get("platform", "polymarket")
+                        if signal.engine in _KALSHI_ENGINES:
+                            platform = "kalshi"
+
+                        self._capital_manager.add_position(
+                            market_id=signal.market_id,
+                            ticker=signal.token_id or signal.market_id,
+                            platform=platform,
+                            amount_usd=trade.executed_amount_usd,
+                            entry_price=trade.average_price,
+                            entry_probability=entry_prob,
+                            side=side,
+                            resolution_time=resolution_time,
+                        )
 
                     # Send alert for successful trades
                     question = signal.metadata.get("question", "")
@@ -240,6 +277,11 @@ class Orchestrator:
             self.logger.info("orchestrator_cycle_summary", cycle=cycle,
                              signals_in=len(all_signals), fresh=len(fresh),
                              executed=executed)
+
+        # Periodic capital management status check (every 10 cycles)
+        if cycle % 10 == 0 and self._capital_manager:
+            summary = self._capital_manager.get_summary()
+            self.logger.info("capital_management_status", **summary)
 
     # ------------------------------------------------------------------
     # Scoring
