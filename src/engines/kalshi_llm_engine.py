@@ -1,8 +1,12 @@
-"""Kalshi LLM engine — scans Kalshi markets and evaluates via the LLM signal pipeline.
+"""Kalshi LLM engine — strict filtering, disciplined trading.
 
-Mirrors :class:`LLMEngine` but operates on Kalshi markets instead of Polymarket.
-Converts :class:`KalshiMarket` objects to the :class:`Market` format the LLM
-signal expects and emits :class:`TradeSignal` objects for the orchestrator.
+Applies:
+- Volume ≥ $50k
+- Spread ≤ 5%
+- Resolution ≤ 30 days
+- Sports blocking (no pre-match moneyline)
+- Data source requirements (≥3 independent sources)
+- Edge ≥ 5%
 """
 
 from __future__ import annotations
@@ -15,30 +19,26 @@ import structlog
 
 from ..cost_tracker import CostTracker
 from ..kalshi_client import KalshiClient, KalshiMarket
+from ..market_filters import MarketFilters, count_data_sources
 from ..markets import Market, TokenInfo
 from ..signals.base import TradingSide
-from ..signals.llm_signal import LLMSignal
+from ..signals.llm_signal import LLMSignal, ConvictionLevel
 from ..utils import BotConfig
 from .base import BaseEngine
 from .signals import TradeSignal
 
 
 def _kalshi_to_market(km: KalshiMarket) -> Market:
-    """Convert a :class:`KalshiMarket` to a :class:`Market` for the LLM signal.
-
-    Kalshi prices are already 0-1 (converted in ``kalshi_client.py``).
-    We synthesize token info with the ticker as both the market id and token id
-    (Kalshi doesn't have separate token ids — the ticker IS the contract).
-    """
+    """Convert KalshiMarket to Market for LLM signal."""
     tokens = {
         "Yes": TokenInfo(
-            token_id=km.ticker,           # ticker serves as the "token id"
+            token_id=km.ticker,
             outcome="Yes",
             price=km.yes_price,
             volume_24h=float(km.volume_24h),
         ),
         "No": TokenInfo(
-            token_id=f"{km.ticker}:no",   # synthetic id for NO side
+            token_id=f"{km.ticker}:no",
             outcome="No",
             price=km.no_price,
             volume_24h=float(km.volume_24h),
@@ -48,17 +48,17 @@ def _kalshi_to_market(km: KalshiMarket) -> Market:
     return Market(
         id=km.ticker,
         question=km.title,
-        description="",                   # Kalshi doesn't expose long descriptions
+        description="",
         category=km.category,
         end_date=km.close_time,
         volume_24h=float(km.volume_24h),
-        liquidity=float(km.open_interest) * 1.0,  # rough proxy
+        liquidity=float(km.open_interest) * 1.0,
         tokens=tokens,
     )
 
 
 class KalshiLLMEngine(BaseEngine):
-    """Kalshi-specific LLM engine producing :class:`TradeSignal` objects."""
+    """Kalshi LLM engine with strict market filtering."""
 
     name = "kalshi_llm"
 
@@ -72,40 +72,70 @@ class KalshiLLMEngine(BaseEngine):
         self.kalshi_client = kalshi_client
         self.logger = structlog.get_logger()
 
-        # Underlying signal — shared LLM pipeline
+        # Market filters
+        self._filters = MarketFilters(config)
+
+        # LLM signal
         self._llm_signal = LLMSignal(config=config)
         if cost_tracker:
             self._llm_signal.set_cost_tracker(cost_tracker)
 
-        # Kalshi-specific config
+        # Kalshi config
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         if isinstance(kalshi_cfg, dict):
-            self._interval = float(kalshi_cfg.get("scan_interval_seconds", 60))
-            self._min_volume = int(kalshi_cfg.get("min_volume", 100))
+            self._interval = float(kalshi_cfg.get("scan_interval_seconds", 600))
+            self._min_volume = int(kalshi_cfg.get("min_volume", 50000))
             self._categories = kalshi_cfg.get("categories", [
-                "Politics", "Economics", "Elections", "World", "Climate and Weather",
+                "Politics", "Economics", "Elections", "Climate and Weather",
             ])
             self._fee_per_contract = float(kalshi_cfg.get("fee_per_contract", 0.07))
             self._max_resolution_days = int(kalshi_cfg.get("max_resolution_days", 30))
+            self._max_spread_pct = float(kalshi_cfg.get("max_spread_pct", 0.05))
         else:
-            self._interval = 60
-            self._min_volume = 100
-            self._categories = ["Politics", "Economics", "Elections", "World", "Climate and Weather"]
+            self._interval = 600
+            self._min_volume = 50000
+            self._categories = ["Politics", "Economics", "Elections"]
             self._fee_per_contract = 0.07
             self._max_resolution_days = 30
+            self._max_spread_pct = 0.05
 
-        # Pending signals buffer — drained by get_signals()
+        # Strategy config
+        strategy_cfg = getattr(config, "strategy", {}) or {}
+        if isinstance(strategy_cfg, dict):
+            self._min_edge = float(strategy_cfg.get("min_edge", 0.05))
+            self._min_conviction = strategy_cfg.get("min_conviction", "medium")
+        else:
+            self._min_edge = 0.05
+            self._min_conviction = "medium"
+
+        # LLM config for data sources
+        llm_cfg = getattr(config, "llm", {}) or {}
+        if isinstance(llm_cfg, dict):
+            self._require_data_sources = bool(llm_cfg.get("require_data_sources", True))
+            self._min_data_sources = int(llm_cfg.get("min_data_sources", 3))
+        else:
+            self._require_data_sources = True
+            self._min_data_sources = 3
+
         self._pending: List[TradeSignal] = []
         self._task: Optional[asyncio.Task] = None
 
-    # ------------------------------------------------------------------
-    # BaseEngine interface
-    # ------------------------------------------------------------------
+        # Stats
+        self._markets_scanned = 0
+        self._markets_filtered = 0
+        self._signals_generated = 0
 
     async def start(self) -> None:
         await self.kalshi_client.start()
         self._task = asyncio.create_task(self._scan_loop())
-        self.logger.info("kalshi_llm_engine_started", interval_seconds=self._interval)
+        self.logger.info(
+            "kalshi_llm_engine_started",
+            interval_seconds=self._interval,
+            min_volume=self._min_volume,
+            max_spread_pct=self._max_spread_pct,
+            min_edge=self._min_edge,
+            min_data_sources=self._min_data_sources,
+        )
 
     async def stop(self) -> None:
         if self._task:
@@ -115,16 +145,17 @@ class KalshiLLMEngine(BaseEngine):
             except asyncio.CancelledError:
                 pass
         await self.kalshi_client.stop()
-        self.logger.info("kalshi_llm_engine_stopped")
+        self.logger.info(
+            "kalshi_llm_engine_stopped",
+            markets_scanned=self._markets_scanned,
+            markets_filtered=self._markets_filtered,
+            signals_generated=self._signals_generated,
+        )
 
     async def get_signals(self) -> List[TradeSignal]:
         out = list(self._pending)
         self._pending.clear()
         return out
-
-    # ------------------------------------------------------------------
-    # Background scanning
-    # ------------------------------------------------------------------
 
     async def _scan_loop(self) -> None:
         while True:
@@ -137,36 +168,125 @@ class KalshiLLMEngine(BaseEngine):
             await asyncio.sleep(self._interval)
 
     async def _scan_once(self) -> None:
-        # Fetch markets by close date — gets short-term markets across ALL categories
+        # Fetch markets — use lower volume threshold for initial fetch,
+        # we'll apply strict filters ourselves
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=self._max_resolution_days,
-            min_volume=self._min_volume,
+            min_volume=1000,  # low threshold, we filter strictly below
         )
 
-        self.logger.info("kalshi_llm_scan", markets_found=len(kalshi_markets))
+        self.logger.info("kalshi_llm_scan_raw", markets_fetched=len(kalshi_markets))
+
+        filtered_markets = []
+        filter_stats = {
+            "volume": 0,
+            "spread": 0,
+            "resolution": 0,
+            "sports": 0,
+            "passed": 0,
+        }
 
         for km in kalshi_markets:
-            # Skip markets with no useful price data (already filtered, but safety check)
+            self._markets_scanned += 1
+
+            # Apply strict filters
+            filter_result = self._filters.check_all(
+                market_id=km.ticker,
+                title=km.title,
+                category=km.category,
+                volume=float(km.volume),
+                bid=km.yes_bid,
+                ask=km.yes_ask,
+                close_time=km.close_time,
+                is_live=False,  # Kalshi doesn't expose live status clearly
+            )
+
+            if not filter_result.passed:
+                self._markets_filtered += 1
+                # Track why markets are filtered
+                reason = filter_result.reason.lower()
+                if "volume" in reason:
+                    filter_stats["volume"] += 1
+                elif "spread" in reason:
+                    filter_stats["spread"] += 1
+                elif "resolves" in reason or "close" in reason:
+                    filter_stats["resolution"] += 1
+                elif "sports" in reason:
+                    filter_stats["sports"] += 1
+                continue
+
+            filter_stats["passed"] += 1
+            filtered_markets.append(km)
+
+        self.logger.info(
+            "kalshi_llm_scan_filtered",
+            markets_passed=len(filtered_markets),
+            filtered_by_volume=filter_stats["volume"],
+            filtered_by_spread=filter_stats["spread"],
+            filtered_by_resolution=filter_stats["resolution"],
+            filtered_by_sports=filter_stats["sports"],
+        )
+
+        # Evaluate remaining markets with LLM
+        for km in filtered_markets:
             if km.yes_price <= 0 or km.yes_price >= 1:
                 continue
 
-            # Convert to Market format for the LLM
             market = _kalshi_to_market(km)
-
             result = await self._llm_signal.evaluate(market)
+
             if result.recommended_side == TradingSide.HOLD:
                 continue
 
-            # Pick the right "token_id" (ticker) for the side
+            # Check edge threshold
+            net_edge = getattr(result, "net_edge", result.edge)
+            if abs(net_edge) < self._min_edge:
+                self.logger.debug(
+                    "kalshi_llm_skip_low_edge",
+                    ticker=km.ticker,
+                    net_edge=net_edge,
+                    min_edge=self._min_edge,
+                )
+                continue
+
+            # Check conviction level
+            conviction = getattr(result, "conviction", ConvictionLevel.MEDIUM)
+            conviction_order = {"none": 0, "low": 1, "medium": 2, "high": 3}
+            min_conv_level = conviction_order.get(self._min_conviction.lower(), 2)
+            actual_conv_level = conviction_order.get(
+                conviction.value if hasattr(conviction, "value") else str(conviction).lower(),
+                0
+            )
+            if actual_conv_level < min_conv_level:
+                self.logger.debug(
+                    "kalshi_llm_skip_low_conviction",
+                    ticker=km.ticker,
+                    conviction=conviction,
+                    min_conviction=self._min_conviction,
+                )
+                continue
+
+            # Check data sources (from news in result metadata)
+            if self._require_data_sources:
+                metadata = getattr(result, "metadata", {}) or {}
+                news_articles = metadata.get("news_articles", [])
+                source_count = count_data_sources(news_articles)
+                if source_count < self._min_data_sources:
+                    self.logger.info(
+                        "kalshi_llm_skip_insufficient_sources",
+                        ticker=km.ticker,
+                        sources_found=source_count,
+                        min_required=self._min_data_sources,
+                    )
+                    continue
+
+            # Build signal
             if result.recommended_side == TradingSide.BUY_YES:
                 token_id = km.ticker
                 side_str = "buy_yes"
             else:
                 token_id = f"{km.ticker}:no"
                 side_str = "buy_no"
-
-            conviction = getattr(result, "conviction", None)
-            net_edge = getattr(result, "net_edge", result.edge)
 
             signal = TradeSignal(
                 engine=self.name,
@@ -181,7 +301,7 @@ class KalshiLLMEngine(BaseEngine):
                     "estimated_prob": result.estimated_prob,
                     "market_price": result.market_price,
                     "net_edge": net_edge,
-                    "conviction": conviction.value if conviction else "medium",
+                    "conviction": conviction.value if hasattr(conviction, "value") else str(conviction),
                     "reasoning": result.reasoning,
                     "kalshi_ticker": km.ticker,
                     "kalshi_yes_bid": km.yes_bid,
@@ -194,13 +314,17 @@ class KalshiLLMEngine(BaseEngine):
                 },
             )
             self._pending.append(signal)
+            self._signals_generated += 1
+
             self.logger.info(
                 "kalshi_llm_engine_signal",
                 ticker=km.ticker,
                 side=side_str,
                 edge=result.edge,
+                net_edge=net_edge,
+                conviction=conviction.value if hasattr(conviction, "value") else str(conviction),
                 confidence=result.confidence,
             )
 
-        # Periodic cost summary
+        # Log periodic summary
         self._llm_signal.log_periodic_summary()

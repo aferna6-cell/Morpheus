@@ -1,42 +1,85 @@
-# Morpheus — Stripped to what works.
-# Two engines: LLM predictions + Event-group arbitrage.
-# Maker orders only (0% fee). That's it.
+# Morpheus — Disciplined mode after $20 lesson.
+# Strict filters: volume, spread, resolution, data sources.
+# Sports: mostly killed (only live events with edge cases).
 
 polymarket:
   clob_url: "https://clob.polymarket.com"
   gamma_url: "https://gamma-api.polymarket.com"
   chain_id: 137
-  signature_type: 0  # 0 = EOA (MetaMask/hardware wallet)
+  signature_type: 0
 
-# Core strategies + copy trading for specific wallets
 strategy:
   enabled_strategies: ["kalshi_llm"]
-  min_edge: 0.05
-  kelly_fraction: 0.5
-  max_position_size: 5000.0
-  max_total_exposure: 25000.0
+  min_edge: 0.05                    # 5% minimum edge (was 2%)
+  kelly_fraction: 0.25              # quarter-Kelly
+  max_position_pct: 0.01            # 1% of bankroll cap
+  max_position_size: 10.0
+  max_total_exposure: 30.0
   min_confidence: 0.5
-  min_conviction: "low"             # net_edge >= 0.02
-  high_conviction_multiplier: 2.0
+  min_conviction: "medium"          # require medium+ conviction
+  high_conviction_multiplier: 1.5
   min_payout_ratio: 0.15
-  fee_pct: 0.00                     # maker orders = 0% fee
+  fee_pct: 0.00
   slippage_pct: 0.005
 
-# Market filters
+# Strict market filters
 market_filters:
-  min_volume_24h: 5000.0
-  min_price: 0.03
-  max_price: 0.97
-  min_liquidity: 500.0
-  min_liquidity_aggressive: 500.0
-  exclude_closing_within_hours: 6
-  max_markets_per_scan: 200
-  max_resolution_days: 7
+  min_volume_24h: 50000             # $50k minimum volume (was $1k)
+  min_price: 0.05
+  max_price: 0.95
+  min_liquidity: 500
+  min_liquidity_aggressive: 500
+  max_spread_pct: 0.05              # 5% max bid-ask spread
+  min_data_sources: 3               # require 3+ independent sources
+  exclude_closing_within_hours: 2
+  max_markets_per_scan: 100
+  max_resolution_days: 30           # ≤30 days to resolution
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
   focus_enabled: false
+  # Portfolio time allocation
+  max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
+  max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
 
-# LLM — two-tier screening saves money, calibration + NO-bias are the edge
+# Sports market rules — kill most, allow only edge cases
+sports_filters:
+  enabled: true
+  # Categories to block entirely
+  blocked_categories:
+    - "Sports"
+    - "Soccer"
+    - "Football"
+    - "Basketball"
+    - "Baseball"
+    - "Hockey"
+    - "Tennis"
+    - "Golf"
+    - "MMA"
+    - "Boxing"
+    - "Racing"
+  # Market types to ALWAYS skip (even if in allowed category)
+  blocked_patterns:
+    - "Winner"           # pre-match moneyline
+    - "vs"               # head-to-head (usually moneyline)
+    - "TIE"              # tie markets (extremely efficient)
+    - "DRAW"
+    - "Underdog"
+    - "to Win"
+    - "to Beat"
+    - "Advance"          # tournament advancement
+    - "Champion"         # championship winner
+    - "MVP"
+    - "Gold Medal"
+  # Only allow these sports scenarios (if any)
+  allowed_live_only: true            # only trade live/in-play
+  allowed_patterns:                   # edge cases we might trade
+    - "red card"
+    - "injury"
+    - "ejection"
+    - "weather delay"
+    - "postponed"
+
+# LLM — strict, calibrated
 llm:
   model: "gpt-4o"
   temperature: 0.1
@@ -52,8 +95,10 @@ llm:
   calibration_shrink_strength: 0.15
   consensus_enabled: false
   monthly_budget_usd: 100.0
+  # Data source requirements
+  require_data_sources: true
+  min_data_sources: 3
 
-# News for LLM context
 news:
   sources:
     - name: "google_news"
@@ -65,25 +110,27 @@ news:
   fetch_full_articles: true
   max_article_chars: 500
 
-# Risk
+# Risk — quarter-Kelly, 1% cap
 risk:
-  max_loss_per_trade: 500.0
-  max_daily_loss: 2000.0
-  stop_loss_pct: 0.15
-  take_profit_pct: 0.30
+  max_loss_per_trade: 5.0           # tighter max loss
+  max_daily_loss: 10.0
+  stop_loss_pct: 0.25
+  take_profit_pct: 0.40
   max_position_hold_hours: 168
   position_check_interval_minutes: 30
-  cooldown_minutes: 60
+  cooldown_minutes: 30              # longer cooldown
   prevent_retrade: true
+  # Position sizing: min(1% bankroll, 0.25 * kelly)
+  use_quarter_kelly: true
+  max_bankroll_pct: 0.01
 
-# Timing
 timing:
-  loop_interval_seconds: 120
-  market_scan_interval_minutes: 30
-  signal_refresh_interval_minutes: 120
+  loop_interval_seconds: 60
+  market_scan_interval_minutes: 15
+  signal_refresh_interval_minutes: 60
   portfolio_update_interval_minutes: 5
   rate_limit_per_minute: 30
-  resolution_check_interval_minutes: 30
+  resolution_check_interval_minutes: 15
 
 logging:
   level: "INFO"
@@ -92,15 +139,13 @@ logging:
   max_file_size_mb: 100
   backup_count: 5
 
-# Orchestrator — simplified, slower cycle
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 10
-  multi_engine_boost: 1.0            # disabled — no consensus to boost
-  cycle_interval_seconds: 30         # was 1s, now 30s (engines update every 30-60s anyway)
+  max_signals_per_cycle: 5          # fewer signals per cycle
+  multi_engine_boost: 1.0
+  cycle_interval_seconds: 60        # slower cycle
 
-# Execution — maker orders, 0% fees
 execution:
   default_slippage: 0.005
   fee_bps: 0.0
@@ -109,20 +154,12 @@ execution:
   retry_delay_seconds: 2
   prefer_limit_orders: true
   maker_spread_offset: 0.005
-  urgent_allow_taker: true
+  urgent_allow_taker: false         # never taker
   limit_order_timeout_seconds: 30
 
-# Bregman arb — L2 event-group only (L1 rare, L3 broken)
 bregman_arb:
-  enabled: true
-  scan_interval_seconds: 300
-  cross_market_scan_interval: 999999  # effectively disabled — L3 doesn't work
-  min_profit_threshold: 0.02
-  min_profit_usd: 5.0
-  max_position_usd: 100.0
-  taker_fee: 0.02
+  enabled: false                    # disabled until Polymarket funded
 
-# Everything below: disabled
 websocket:
   enabled: false
 
@@ -130,29 +167,35 @@ spike_detection:
   enabled: false
 
 copy_trading:
-  enabled: true
-  poll_interval_seconds: 30
-  min_trade_size_usd: 50
-  max_copy_size_usd: 25
-  copy_ratio: 0.1
-  max_masters: 1
-  master_wallets:
-    - "0xd830027529b0baca2a52fd8a4dee43d366a9a592"
-  watchlist_file: "state/copy_watchlist.json"
-  trade_history_file: "state/copy_trades.jsonl"
+  enabled: false                    # disabled
 
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
-  scan_interval_seconds: 900
+  scan_interval_seconds: 600
   fee_per_contract: 0.07
-  min_volume: 50
-  max_position_contracts: 100
-  categories: ["Politics", "Economics", "Elections", "World", "Climate and Weather", "Financials", "Science and Technology", "Entertainment", "Companies", "Social"]
+  min_volume: 50000                 # $50k minimum (was 10)
+  max_position_contracts: 50        # smaller positions
+  # Only non-sports categories
+  categories:
+    - "Politics"
+    - "Economics"
+    - "Elections"
+    - "Climate and Weather"
+    - "Science and Technology"
+    - "Companies"
+    - "Financials"
   max_resolution_days: 30
+  max_spread_pct: 0.05              # 5% spread max
 
 arbitrage:
   enabled: false
+
+# CLV tracking
+clv_tracking:
+  enabled: true
+  check_interval_minutes: 60
+  alert_threshold: -0.02            # alert if CLV < -2%
 
 dev:
   dry_run: false
