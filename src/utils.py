@@ -70,6 +70,12 @@ class BotConfig(BaseModel):
     # Spike Detection Configuration
     spike_detection: Dict[str, Any] = Field(default_factory=dict)
 
+    # Kalshi Flow Engine (follow large trades)
+    kalshi_flow: Dict[str, Any] = Field(default_factory=dict)
+
+    # Kalshi Price Monitor (spike detection)
+    kalshi_monitor: Dict[str, Any] = Field(default_factory=dict)
+
     # Orchestrator Configuration
     orchestrator: Dict[str, Any] = Field(default_factory=dict)
 

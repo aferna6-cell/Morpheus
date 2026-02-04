@@ -178,43 +178,6 @@ async def run(
 
         engines: List[BaseEngine] = []
 
-        # LLM engine — calibrated predictions with NO-bias
-        if (not no_llm) and ("llm" in enabled):
-            llm_engine = LLMEngine(
-                config=config,
-                client=client,
-                scanner=scanner,
-                cost_tracker=cost_tracker,
-            )
-            engines.append(llm_engine)
-
-        # Copy trading engine — mirror specific wallets
-        if "copy" in enabled:
-            try:
-                from .engines.copy_engine import CopyTradingEngine
-                copy_engine = CopyTradingEngine(config)
-                engines.append(copy_engine)
-            except Exception as exc:
-                logger.warning("copy_engine_init_failed", error=str(exc))
-
-        # Bregman arb engine — event-group mispricing detection (no LLM cost)
-        if "bregman_arb" in enabled:
-            try:
-                from .engines.bregman_arb_engine import BregmanArbEngine
-                bregman_engine = BregmanArbEngine(config)
-                engines.append(bregman_engine)
-            except Exception as exc:
-                logger.warning("bregman_arb_engine_init_failed", error=str(exc))
-
-        # Cross-platform arb engine — Polymarket ↔ Kalshi price discrepancies (no LLM cost)
-        if "arb" in enabled:
-            try:
-                from .engines.arb_engine import ArbEngine
-                arb_engine = ArbEngine(config)
-                engines.append(arb_engine)
-            except Exception as exc:
-                logger.warning("arb_engine_init_failed", error=str(exc))
-
         # Kalshi LLM engine + multi-account executors
         kalshi_executors: List = []
         kalshi_cfg = getattr(config, "kalshi", None) or {}
@@ -277,6 +240,27 @@ async def run(
 
                 engines.append(kalshi_engine)
                 logger.info("kalshi_engine_initialized", accounts=len(kalshi_executors))
+
+                # Kalshi flow engine — follow large trades on the tape (no LLM cost)
+                if "kalshi_flow" in enabled:
+                    try:
+                        from .engines.kalshi_flow_engine import KalshiFlowEngine
+                        flow_engine = KalshiFlowEngine(config, kalshi_read)
+                        engines.append(flow_engine)
+                        logger.info("kalshi_flow_engine_initialized")
+                    except Exception as exc:
+                        logger.warning("kalshi_flow_engine_init_failed", error=str(exc))
+
+                # Kalshi monitor engine — detect price spikes (no LLM cost)
+                if "kalshi_monitor" in enabled:
+                    try:
+                        from .engines.kalshi_monitor_engine import KalshiMonitorEngine
+                        monitor_engine = KalshiMonitorEngine(config, kalshi_read)
+                        engines.append(monitor_engine)
+                        logger.info("kalshi_monitor_engine_initialized")
+                    except Exception as exc:
+                        logger.warning("kalshi_monitor_engine_init_failed", error=str(exc))
+
             except Exception as exc:
                 logger.warning("kalshi_engine_init_failed", error=str(exc))
 

@@ -1,16 +1,10 @@
-# Morpheus — Disciplined mode after $20 lesson.
+# Morpheus — Kalshi-only trading bot.
 # Strict filters: volume, spread, resolution, data sources.
-# Sports: mostly killed (only live events with edge cases).
-
-polymarket:
-  clob_url: "https://clob.polymarket.com"
-  gamma_url: "https://gamma-api.polymarket.com"
-  chain_id: 137
-  signature_type: 0
+# Sports: blocked. Three engine types: LLM, flow-following, price monitoring.
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "bregman_arb", "arb"]
-  min_edge: 0.05                    # 5% minimum edge (was 2%)
+  enabled_strategies: ["kalshi_llm", "kalshi_flow", "kalshi_monitor"]
+  min_edge: 0.05                    # 5% minimum edge
   kelly_fraction: 0.25              # quarter-Kelly
   max_position_pct: 0.01            # 1% of bankroll cap
   max_position_size: 10.0
@@ -24,7 +18,7 @@ strategy:
 
 # Strict market filters
 market_filters:
-  min_volume_24h: 50000             # $50k minimum volume (was $1k)
+  min_volume_24h: 50000             # $50k minimum volume
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 500
@@ -32,19 +26,17 @@ market_filters:
   max_spread_pct: 0.05              # 5% max bid-ask spread
   min_data_sources: 3               # require 3+ independent sources
   exclude_closing_within_hours: 2
-  max_markets_per_scan: 50              # fewer markets per scan (cost control)
+  max_markets_per_scan: 50
   max_resolution_days: 30           # ≤30 days to resolution
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
   focus_enabled: false
-  # Portfolio time allocation
-  max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
-  max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
+  max_14d_allocation_pct: 0.70
+  max_7d_allocation_pct: 0.50
 
-# Sports market rules — kill most, allow only edge cases
+# Sports market rules — block all sports
 sports_filters:
   enabled: true
-  # Categories to block entirely
   blocked_categories:
     - "Sports"
     - "Soccer"
@@ -57,22 +49,20 @@ sports_filters:
     - "MMA"
     - "Boxing"
     - "Racing"
-  # Market types to ALWAYS skip (even if in allowed category)
   blocked_patterns:
-    - "Winner"           # pre-match moneyline
-    - "vs"               # head-to-head (usually moneyline)
-    - "TIE"              # tie markets (extremely efficient)
+    - "Winner"
+    - "vs"
+    - "TIE"
     - "DRAW"
     - "Underdog"
     - "to Win"
     - "to Beat"
-    - "Advance"          # tournament advancement
-    - "Champion"         # championship winner
+    - "Advance"
+    - "Champion"
     - "MVP"
     - "Gold Medal"
-  # Only allow these sports scenarios (if any)
-  allowed_live_only: true            # only trade live/in-play
-  allowed_patterns:                   # edge cases we might trade
+  allowed_live_only: true
+  allowed_patterns:
     - "red card"
     - "injury"
     - "ejection"
@@ -88,20 +78,18 @@ llm:
   screening_enabled: true
   screening_model: "gpt-4o-mini"
   cache_enabled: true
-  cache_ttl_minutes: 360                # 6 hours — most markets don't change fast
+  cache_ttl_minutes: 360
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.15
-  # Cross-family consensus: Claude catches GPT-specific biases
   consensus_enabled: true
   consensus_provider: "anthropic"
   consensus_model: "claude-3-5-haiku-20241022"
   consensus_max_divergence: 0.12
-  consensus_min_edge: 0.07              # only run Claude on markets with 7%+ edge (saves ~50% on consensus costs)
+  consensus_min_edge: 0.07
   monthly_budget_usd: 100.0
-  daily_budget_usd: 5.0                 # hard daily cap — prevents runaway costs
-  # Data source requirements
+  daily_budget_usd: 5.0
   require_data_sources: true
   min_data_sources: 3
 
@@ -118,21 +106,20 @@ news:
 
 # Risk — quarter-Kelly, 1% cap
 risk:
-  max_loss_per_trade: 5.0           # tighter max loss
+  max_loss_per_trade: 5.0
   max_daily_loss: 10.0
   stop_loss_pct: 0.25
   take_profit_pct: 0.40
   max_position_hold_hours: 168
   position_check_interval_minutes: 30
-  cooldown_minutes: 30              # longer cooldown
+  cooldown_minutes: 30
   prevent_retrade: true
-  # Position sizing: min(1% bankroll, 0.25 * kelly)
   use_quarter_kelly: true
   max_bankroll_pct: 0.01
 
 timing:
   loop_interval_seconds: 60
-  market_scan_interval_minutes: 30      # scan every 30 min (was 15 — halves LLM costs)
+  market_scan_interval_minutes: 30
   signal_refresh_interval_minutes: 60
   portfolio_update_interval_minutes: 5
   rate_limit_per_minute: 30
@@ -141,16 +128,16 @@ timing:
 logging:
   level: "INFO"
   format: "json"
-  file: "polymarket_bot.log"
+  file: "morpheus.log"
   max_file_size_mb: 100
   backup_count: 5
 
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 5          # fewer signals per cycle
+  max_signals_per_cycle: 5
   multi_engine_boost: 1.0
-  cycle_interval_seconds: 60        # slower cycle
+  cycle_interval_seconds: 60
 
 execution:
   default_slippage: 0.005
@@ -160,33 +147,17 @@ execution:
   retry_delay_seconds: 2
   prefer_limit_orders: true
   maker_spread_offset: 0.005
-  urgent_allow_taker: false         # never taker
+  urgent_allow_taker: false
   limit_order_timeout_seconds: 30
 
-bregman_arb:
-  enabled: true                     # L1/L2 are pure math (no LLM cost), L3 degrades gracefully
-  scan_interval_seconds: 60
-  min_profit_threshold: 0.02        # 2% minimum profit
-  min_profit_usd: 3.0
-  max_position_usd: 50.0
-
-websocket:
-  enabled: false
-
-spike_detection:
-  enabled: false
-
-copy_trading:
-  enabled: false                    # disabled
-
+# Kalshi — primary exchange
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 600
   fee_per_contract: 0.07
-  min_volume: 50000                 # $50k minimum (was 10)
-  max_position_contracts: 50        # smaller positions
-  # Only non-sports categories
+  min_volume: 50000
+  max_position_contracts: 50
   categories:
     - "Politics"
     - "Economics"
@@ -196,27 +167,46 @@ kalshi:
     - "Companies"
     - "Financials"
   max_resolution_days: 30
-  max_spread_pct: 0.05              # 5% spread max
+  max_spread_pct: 0.05
 
-arbitrage:
-  enabled: true                     # cross-platform arb (Polymarket ↔ Kalshi), no LLM cost
-  scan_interval_seconds: 300
-  min_profit_pct: 0.03              # 3% minimum after fees
-  polymarket_taker_fee: 0.02
-  kalshi_fee: 0.07
-  min_volume: 10000
-  max_position_usd: 50.0
-  match_confidence_threshold: 0.80
+# Kalshi flow engine — follow large trades on the public tape (no LLM cost)
+kalshi_flow:
+  enabled: true
+  poll_interval_seconds: 30          # check trade tape every 30s
+  min_contracts: 50                  # only follow trades >= 50 contracts
+  min_volume: 10000                  # market must have $10k+ volume
+  cooldown_seconds: 300              # 5 min cooldown per ticker
+  lookback_seconds: 120              # look at trades from last 2 min
+  max_price: 0.90                    # skip near-certain markets
+  min_price: 0.10                    # skip near-zero markets
+
+# Kalshi price monitor — detect price spikes (no LLM cost)
+kalshi_monitor:
+  enabled: true
+  poll_interval_seconds: 15          # poll orderbooks every 15s
+  market_refresh_seconds: 300        # refresh tracked market list every 5 min
+  min_volume: 20000                  # only monitor markets with $20k+ volume
+  max_tracked_markets: 50            # track top 50 markets by volume
+  cooldown_seconds: 120              # 2 min cooldown per market after signal
+  fast_spike_pct: 0.03              # 3% move in <30s
+  fast_spike_window_seconds: 30
+  medium_spike_pct: 0.05            # 5% move in <5 min
+  medium_spike_window_seconds: 300
+  large_spike_pct: 0.10             # 10% move in <30 min
+  large_spike_window_seconds: 1800
 
 # CLV tracking — non-negotiable
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
-  alert_threshold: -0.01            # alert if CLV < -1% (tightened from -2%)
-  halt_threshold: 0.01              # auto-halt if avg CLV <= 1% (raised from 0%)
-  min_samples: 10                   # need N resolved bets before enforcing
-  per_type_tracking: true           # track CLV per market type
-  per_type_halt_threshold: -0.01    # disable specific market types with CLV < -1%
+  alert_threshold: -0.01
+  halt_threshold: 0.01
+  min_samples: 10
+  per_type_tracking: true
+  per_type_halt_threshold: -0.01
+
+# BotConfig compatibility fields (unused but required by pydantic model)
+bregman_arb: {}
 
 dev:
   dry_run: false

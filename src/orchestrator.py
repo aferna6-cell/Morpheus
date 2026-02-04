@@ -49,14 +49,16 @@ _URGENCY_BONUS: Dict[str, float] = {
 _ENGINE_PRIORITY: Dict[str, float] = {
     "bregman_arb": 1.0,  # mathematical arb → highest
     "arb": 0.95,          # simple arb → very high
-    "spike": 0.8,         # time-sensitive
-    "copy": 0.6,          # moderate-high
+    "kalshi_monitor": 0.8, # time-sensitive spike detection
+    "kalshi_flow": 0.7,   # follow large trades
+    "spike": 0.8,         # time-sensitive (legacy)
+    "copy": 0.6,          # moderate-high (legacy)
     "llm": 0.5,           # moderate
-    "kalshi_llm": 0.5,   # same priority as Polymarket LLM
+    "kalshi_llm": 0.5,   # same priority as LLM
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_flow", "kalshi_monitor"}
 
 # Engines whose signals are mathematically risk-free (skip conviction gating)
 _ARB_ENGINES = {"bregman_arb", "arb"}
@@ -539,11 +541,43 @@ class Orchestrator:
         net_edge = signal.metadata.get("net_edge", signal.edge)
         conviction_str = signal.metadata.get("conviction", "medium")
 
-        # Get Market from signal metadata
+        # Get Market from signal metadata, or build a stub for flow/monitor engines
         market_data = signal.metadata.get("_market")
         if market_data is None:
-            self.logger.warning("kalshi_dispatch_no_market", market_id=signal.market_id)
-            return None
+            from .markets import Market, TokenInfo
+            ticker = signal.metadata.get("kalshi_ticker", signal.market_id)
+            title = signal.metadata.get("title", ticker)
+            trade_price = signal.metadata.get("trade_price") or signal.metadata.get("current_price", 0.5)
+
+            tokens = {
+                "Yes": TokenInfo(
+                    token_id=ticker,
+                    outcome="Yes",
+                    price=trade_price,
+                    volume_24h=0.0,
+                ),
+                "No": TokenInfo(
+                    token_id=f"{ticker}:no",
+                    outcome="No",
+                    price=1.0 - trade_price,
+                    volume_24h=0.0,
+                ),
+            }
+            market_data = Market(
+                id=ticker,
+                question=title,
+                description="",
+                category="",
+                end_date=None,
+                volume_24h=float(signal.metadata.get("volume", 0)),
+                liquidity=10000.0,
+                tokens=tokens,
+            )
+            # Use the trade price as market price
+            if not market_price or market_price == 0.5:
+                market_price = trade_price
+            if estimated_prob == 0.5:
+                estimated_prob = trade_price
 
         first_result: Optional[TradeExecution] = None
 
