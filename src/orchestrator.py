@@ -45,7 +45,7 @@ _ENGINE_PRIORITY: Dict[str, float] = {
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_flow", "kalshi_monitor"}
 
 
 class Orchestrator:
@@ -342,7 +342,7 @@ class Orchestrator:
         Bridges the TradeSignal → SignalResult → PositionSize flow,
         gets USD balance from Kalshi, and routes to KalshiExecutor.
         """
-        if self.kalshi_executor is None:
+        if not self.kalshi_executors:
             self.logger.warning("kalshi_dispatch_no_executor", market_id=signal.market_id)
             return None
 
@@ -359,63 +359,103 @@ class Orchestrator:
         net_edge = signal.metadata.get("net_edge", signal.edge)
         conviction_str = signal.metadata.get("conviction", "medium")
 
-        sig_result = SignalResult(
-            estimated_prob=estimated_prob,
-            confidence=signal.confidence,
-            edge=signal.edge,
-            recommended_side=trading_side,
-            reasoning=f"[{signal.engine}] {signal.metadata.get('reasoning', '')}",
-            signal_name=signal.engine,
-            market_price=market_price,
-            timestamp=signal.timestamp.isoformat(),
-        )
-
-        try:
-            sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
-        except ValueError:
-            sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
-        sig_result.net_edge = net_edge  # type: ignore[attr-defined]
-
-        # Pass through Kalshi-specific metadata for the executor
-        sig_result.metadata = {  # type: ignore[attr-defined]
-            "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
-            "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
-        }
-
-        # Get Market from signal metadata
+        # Get Market from signal metadata, or build a stub for flow/monitor engines
         market_data = signal.metadata.get("_market")
         if market_data is None:
-            self.logger.warning("kalshi_dispatch_no_market", market_id=signal.market_id)
-            return None
+            from .markets import Market, TokenInfo
+            ticker = signal.metadata.get("kalshi_ticker", signal.market_id)
+            title = signal.metadata.get("title", ticker)
+            trade_price = signal.metadata.get("trade_price") or signal.metadata.get("current_price", 0.5)
 
-        # Get Kalshi balance for position sizing
-        available_usd = await self.kalshi_executor.trading_client.get_balance()
+            tokens = {
+                "Yes": TokenInfo(
+                    token_id=ticker,
+                    outcome="Yes",
+                    price=trade_price,
+                    volume_24h=0.0,
+                ),
+                "No": TokenInfo(
+                    token_id=f"{ticker}:no",
+                    outcome="No",
+                    price=1.0 - trade_price,
+                    volume_24h=0.0,
+                ),
+            }
+            market_data = Market(
+                id=ticker,
+                question=title,
+                description="",
+                category="",
+                end_date=None,
+                volume_24h=float(signal.metadata.get("volume", 0)),
+                liquidity=10000.0,
+                tokens=tokens,
+            )
+            # Use the trade price as market price
+            if not market_price or market_price == 0.5:
+                market_price = trade_price
+            if estimated_prob == 0.5:
+                estimated_prob = trade_price
 
-        # Use same risk manager for position sizing
-        exposure: Dict[str, float] = {}
-        try:
-            positions = await self.kalshi_executor.trading_client.get_positions()
-            for p in positions:
-                exposure[p.ticker] = p.market_exposure
-        except Exception:
-            pass
+        first_result: Optional[TradeExecution] = None
 
-        pos = self.risk_manager.calculate_position_size(
-            signal=sig_result,
-            market=market_data,
-            available_capital=available_usd,
-            current_positions=exposure,
-        )
+        for executor in self.kalshi_executors:
+            label = executor.trading_client.label
+            try:
+                # Skip halted accounts
+                if executor.trading_client.is_halted:
+                    self.logger.info("kalshi_dispatch_skip_halted", label=label, market_id=signal.market_id)
+                    continue
 
-        if not self.risk_manager.check_trade_approval(pos, market_data, sig_result):
-            self.logger.debug("kalshi_dispatch_rejected_by_risk", market_id=signal.market_id)
-            return None
+                sig_result = SignalResult(
+                    estimated_prob=estimated_prob,
+                    confidence=signal.confidence,
+                    edge=signal.edge,
+                    recommended_side=trading_side,
+                    reasoning=f"[{signal.engine}] {signal.metadata.get('reasoning', '')}",
+                    signal_name=signal.engine,
+                    market_price=market_price,
+                    timestamp=signal.timestamp.isoformat(),
+                )
 
-        kalshi_trade = await self.kalshi_executor.execute_signal(
-            market_data, sig_result, pos,
-        )
+                try:
+                    sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
+                except ValueError:
+                    sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
+                sig_result.net_edge = net_edge  # type: ignore[attr-defined]
+
+                sig_result.metadata = {  # type: ignore[attr-defined]
+                    "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
+                    "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
+                }
+
+                # Each account sizes independently based on its own balance
+                available_usd = await executor.trading_client.get_balance()
+
+                exposure: Dict[str, float] = {}
+                try:
+                    positions = await executor.trading_client.get_positions()
+                    for p in positions:
+                        exposure[p.ticker] = p.market_exposure
+                except Exception:
+                    pass
+
+                pos = self.risk_manager.calculate_position_size(
+                    signal=sig_result,
+                    market=market_data,
+                    available_capital=available_usd,
+                    current_positions=exposure,
+                )
+
+                if not self.risk_manager.check_trade_approval(pos, market_data, sig_result):
+                    self.logger.debug("kalshi_dispatch_rejected_by_risk", label=label, market_id=signal.market_id)
+                    continue
+
+                kalshi_trade = await executor.execute_signal(
+                    market_data, sig_result, pos,
+                )
 
         if kalshi_trade and kalshi_trade.was_successful:
             return kalshi_trade
 
-        return None
+        return first_result

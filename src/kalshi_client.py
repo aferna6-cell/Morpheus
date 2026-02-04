@@ -404,6 +404,39 @@ class KalshiClient:
         self.logger.info("kalshi_markets_by_close_date", total=len(all_markets), max_days=max_days)
         return all_markets
 
+    async def get_public_trades(
+        self,
+        *,
+        ticker: Optional[str] = None,
+        min_ts: Optional[int] = None,
+        max_ts: Optional[int] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent public trades from the trade tape.
+
+        Returns list of dicts with: trade_id, ticker, price, count,
+        taker_side ("yes"/"no"), created_time.
+        """
+        params: Dict[str, Any] = {"limit": min(limit, 1000)}
+        if ticker:
+            params["ticker"] = ticker
+        if min_ts:
+            params["min_ts"] = min_ts
+        if max_ts:
+            params["max_ts"] = max_ts
+
+        data = await self._get("/markets/trades", params=params)
+        trades = data.get("trades", [])
+        return trades
+
+    async def get_orderbook(self, ticker: str) -> Dict[str, Any]:
+        """Fetch the current orderbook for a market ticker.
+
+        Returns dict with 'yes' and 'no' arrays of [price, quantity] levels.
+        """
+        data = await self._get(f"/orderbook/v2/{ticker}")
+        return data.get("orderbook", data)
+
     async def fetch_market(self, ticker: str) -> Optional[KalshiMarket]:
         """Fetch a single market by ticker."""
         try:

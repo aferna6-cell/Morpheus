@@ -49,10 +49,12 @@ async def run(
 
     risk = RiskManager(config=config, state_dir=str(state_path))
 
-    # Cost tracker
+    # Cost tracker with daily + monthly caps
     monthly_budget = float(config.llm.get("monthly_budget_usd", 100.0))
+    daily_budget = float(config.llm.get("daily_budget_usd", 5.0))
     cost_tracker = CostTracker(
         monthly_budget=monthly_budget,
+        daily_budget=daily_budget,
         state_path=state_path / "cost_tracker.json",
     )
     logger.info("cost_tracker_init", **cost_tracker.get_summary())
@@ -86,7 +88,41 @@ async def run(
                     kalshi_client=kalshi_read,
                     cost_tracker=cost_tracker,
                 )
+
+                # Balance gate — skip LLM calls when all accounts are unfunded
+                _kalshi_execs = list(kalshi_executors)  # capture for closure
+                async def _total_kalshi_balance() -> float:
+                    total = 0.0
+                    for ex in _kalshi_execs:
+                        try:
+                            total += await ex.trading_client.get_balance()
+                        except Exception:
+                            pass
+                    return total
+                kalshi_engine.set_balance_checker(_total_kalshi_balance, min_balance=1.0)
+
                 engines.append(kalshi_engine)
+                logger.info("kalshi_engine_initialized", accounts=len(kalshi_executors))
+
+                # Kalshi flow engine — follow large trades on the tape (no LLM cost)
+                if "kalshi_flow" in enabled:
+                    try:
+                        from .engines.kalshi_flow_engine import KalshiFlowEngine
+                        flow_engine = KalshiFlowEngine(config, kalshi_read)
+                        engines.append(flow_engine)
+                        logger.info("kalshi_flow_engine_initialized")
+                    except Exception as exc:
+                        logger.warning("kalshi_flow_engine_init_failed", error=str(exc))
+
+                # Kalshi monitor engine — detect price spikes (no LLM cost)
+                if "kalshi_monitor" in enabled:
+                    try:
+                        from .engines.kalshi_monitor_engine import KalshiMonitorEngine
+                        monitor_engine = KalshiMonitorEngine(config, kalshi_read)
+                        engines.append(monitor_engine)
+                        logger.info("kalshi_monitor_engine_initialized")
+                    except Exception as exc:
+                        logger.warning("kalshi_monitor_engine_init_failed", error=str(exc))
 
             kalshi_exec = KalshiExecutor(
                 config=config,

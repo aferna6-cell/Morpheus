@@ -49,17 +49,32 @@ class BotConfig(BaseModel):
     # Kalshi Integration
     kalshi: Dict[str, Any] = Field(default_factory=dict)
 
+    # Bregman Arbitrage (single-market + event-group mispricing)
+    bregman_arb: Dict[str, Any] = Field(default_factory=dict)
+
     # Cross-Platform Arbitrage
     arbitrage: Dict[str, Any] = Field(default_factory=dict)
 
     # Copy Trading Configuration
     copy_trading: Dict[str, Any] = Field(default_factory=dict)
 
+    # Sports Filters
+    sports_filters: Dict[str, Any] = Field(default_factory=dict)
+
+    # CLV Tracking
+    clv_tracking: Dict[str, Any] = Field(default_factory=dict)
+
     # WebSocket Configuration
     websocket: Dict[str, Any] = Field(default_factory=dict)
 
     # Spike Detection Configuration
     spike_detection: Dict[str, Any] = Field(default_factory=dict)
+
+    # Kalshi Flow Engine (follow large trades)
+    kalshi_flow: Dict[str, Any] = Field(default_factory=dict)
+
+    # Kalshi Price Monitor (spike detection)
+    kalshi_monitor: Dict[str, Any] = Field(default_factory=dict)
 
     # Orchestrator Configuration
     orchestrator: Dict[str, Any] = Field(default_factory=dict)

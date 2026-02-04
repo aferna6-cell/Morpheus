@@ -163,6 +163,7 @@ class KalshiExecutor:
                 price_cents=price_cents,
                 error="Order placement failed - no response",
                 conviction=conv_str,
+                account_label=self.trading_client.label,
             )
             return self._fail(ticker, side, count, price_cents, "Order placement failed")
 
@@ -205,6 +206,7 @@ class KalshiExecutor:
                 cost_usd=total_cost,
                 entry_probability=entry_probability,
                 market_price=entry_cost,
+                account_label=self.trading_client.label,
             )
         else:
             trade_logger.log_order_failed(
@@ -215,6 +217,7 @@ class KalshiExecutor:
                 price_cents=price_cents,
                 error=f"Order rejected: {status}",
                 conviction=conv_str,
+                account_label=self.trading_client.label,
             )
 
         execution = KalshiTradeExecution(
@@ -233,8 +236,9 @@ class KalshiExecutor:
 
         # Send Telegram alert
         if is_success:
+            acct = self.trading_client.label or "kalshi"
             alert_msg = (
-                f"🎯 [KALSHI] {side.upper()} {count}x {ticker}\n"
+                f"🎯 [{acct}] {side.upper()} {count}x {ticker}\n"
                 f"Price: {price_cents}¢ | Cost: ${count * entry_cost:.2f} + ${total_fee:.2f} fee\n"
                 f"Edge: {net_edge:+.3f} | Conv: {conv_str}\n"
                 f"{market.question[:100]}"

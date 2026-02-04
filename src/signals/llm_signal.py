@@ -20,11 +20,58 @@ import openai
 import structlog
 from openai import AsyncOpenAI
 
+try:
+    import anthropic
+    from anthropic import AsyncAnthropic
+    _HAS_ANTHROPIC = True
+except ImportError:
+    _HAS_ANTHROPIC = False
+
+from pathlib import Path
+
 from ..cost_tracker import CostTracker
 from ..markets import Market
 from ..news import NewsAggregator
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
+
+
+# ---------------------------------------------------------------------------
+# Base rate database
+# ---------------------------------------------------------------------------
+
+_BASE_RATES: List[Dict[str, Any]] = []
+
+
+def _load_base_rates() -> List[Dict[str, Any]]:
+    """Load empirical base rates from JSON file."""
+    global _BASE_RATES
+    if _BASE_RATES:
+        return _BASE_RATES
+    base_rates_path = Path(__file__).parent.parent / "base_rates.json"
+    if base_rates_path.exists():
+        try:
+            with open(base_rates_path) as f:
+                data = json.load(f)
+            _BASE_RATES = data.get("patterns", [])
+        except Exception:
+            _BASE_RATES = []
+    return _BASE_RATES
+
+
+def lookup_base_rate(question: str, description: str = "") -> Optional[Dict[str, Any]]:
+    """Find the best matching base rate for a market question."""
+    rates = _load_base_rates()
+    text = f"{question} {description}".lower()
+    best_match = None
+    best_score = 0
+    for entry in rates:
+        keywords = entry.get("keywords", [])
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_match = entry
+    return best_match if best_score > 0 else None
 
 
 class ConvictionLevel(str, Enum):
@@ -178,6 +225,18 @@ def detect_market_type(question: str) -> str:
     if any(politics_signals):
         return "politics"
 
+    # Economics — data-driven markets where LLM has good calibration
+    economics_signals = [
+        any(w in q for w in ["fed ", "federal reserve", "interest rate", "rate cut",
+                             "rate hike", "fomc", "powell", "monetary policy"]),
+        any(w in q for w in ["inflation", "cpi", "ppi", "gdp", "recession",
+                             "unemployment", "jobs report", "nonfarm", "payroll"]),
+        any(w in q for w in ["treasury", "bond", "yield", "debt ceiling",
+                             "deficit", "fiscal", "stimulus"]),
+    ]
+    if any(economics_signals):
+        return "economics"
+
     return "normal"
 
 
@@ -189,23 +248,26 @@ class MarketTypeCalibration:
     yes_boost: float = 0.0       # Pull YES-side preds back toward 0.5 (0=none, 0.3=strong)
     no_dampen: float = 0.0       # Let NO-side preds be more confident (0=none, 0.2=moderate)
     skip: bool = False           # If True, don't trade this market type at all
+    min_edge: float = 0.05       # Category-specific minimum edge threshold
 
 
 MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)
-    "exact_phrase": MarketTypeCalibration(skip=False, yes_boost=0.10),
+    "exact_phrase": MarketTypeCalibration(skip=False, yes_boost=0.10, min_edge=0.08),
     # Narrow price ranges are near-random → SKIP (backtest: 0.56 avg Brier)
-    "price_range": MarketTypeCalibration(skip=True),
+    "price_range": MarketTypeCalibration(skip=True, min_edge=0.10),
     # LLM has no real sports analytics → SKIP (backtest: 0.64+ Brier)
-    "sports":      MarketTypeCalibration(skip=True),
+    "sports":      MarketTypeCalibration(skip=True, min_edge=0.10),
     # Physical outcomes / coin flips — LLM has zero edge
-    "coin_flip":   MarketTypeCalibration(skip=True),
-    # Trump/volatile actors — LLM underestimates chaos (YES happens more than expected)
-    "wild_card":   MarketTypeCalibration(extra_shrink=0.05, yes_boost=-0.10, no_dampen=0.0),
-    # Politics — LLM systematically underestimates YES outcomes
-    "politics":    MarketTypeCalibration(extra_shrink=0.0, yes_boost=-0.08, no_dampen=0.10),
+    "coin_flip":   MarketTypeCalibration(skip=True, min_edge=0.10),
+    # Trump/volatile actors — LLM underestimates chaos; require higher edge
+    "wild_card":   MarketTypeCalibration(extra_shrink=0.05, yes_boost=-0.10, no_dampen=0.0, min_edge=0.07),
+    # Politics — LLM has some edge here (decent backtest), lower threshold
+    "politics":    MarketTypeCalibration(extra_shrink=0.0, yes_boost=-0.08, no_dampen=0.10, min_edge=0.04),
+    # Economics — data-driven, LLM does well with structured economic data
+    "economics":   MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.0, no_dampen=0.05, min_edge=0.03),
     # Normal markets — asymmetric correction based on backtest data
-    "normal":      MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.10, no_dampen=0.10),
+    "normal":      MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.10, no_dampen=0.10, min_edge=0.05),
 }
 
 # Backward compat: flat extra-shrink dict for any code that references it
@@ -364,6 +426,15 @@ class LLMSignal(Signal):
         # Default to maker (0%) since that's our execution strategy.
         self.fee_pct = float(strategy.get("fee_pct", 0.0))
         self.slippage_pct = float(strategy.get("slippage_pct", 0.005))  # 0.5%
+
+        # Edge decay compensation — add historical erosion to costs
+        self.edge_decay_compensation = self._load_edge_decay()
+        if self.edge_decay_compensation > 0:
+            self.logger.info(
+                "edge_decay_loaded",
+                avg_erosion=self.edge_decay_compensation,
+                msg="Adding to slippage to compensate for historical edge decay",
+            )
         self.min_conviction = ConvictionLevel(
             strategy.get("min_conviction", "low")
         )
@@ -383,21 +454,93 @@ class LLMSignal(Signal):
         cache_enabled = llm_config.get("cache_enabled", True)
         self._cache = _ResultCache(ttl_seconds=cache_ttl, enabled=cache_enabled)
 
-        # Calibration config
+        # Calibration config — load dynamic params from backtest if available
         self.calibration_enabled = llm_config.get("calibration_enabled", True)
         self.calibration_floor = float(llm_config.get("calibration_floor", 0.05))
         self.calibration_ceiling = float(llm_config.get("calibration_ceiling", 0.95))
         self.calibration_shrink = float(llm_config.get("calibration_shrink_strength", 0.15))
 
+        # Try to load optimized calibration from backtest results
+        dynamic_cal = self._load_dynamic_calibration()
+        if dynamic_cal:
+            self.calibration_shrink = float(dynamic_cal.get("shrink_strength", self.calibration_shrink))
+            self.logger.info(
+                "dynamic_calibration_loaded",
+                shrink=self.calibration_shrink,
+                yes_boost=dynamic_cal.get("yes_boost"),
+                no_dampen=dynamic_cal.get("no_dampen"),
+                sample_size=dynamic_cal.get("sample_size"),
+            )
+
         # Consensus config
         self.consensus_enabled = llm_config.get("consensus_enabled", False)
-        self.consensus_model = llm_config.get("consensus_model", "gpt-4o-mini")
+        self.consensus_model = llm_config.get("consensus_model", "claude-3-5-haiku-20241022")
+        self.consensus_provider = llm_config.get("consensus_provider", "anthropic")
         self.consensus_max_divergence = float(llm_config.get("consensus_max_divergence", 0.10))
+        self.consensus_min_edge = float(llm_config.get("consensus_min_edge", 0.07))
+
+        # Daily budget cap
+        self._daily_budget = float(llm_config.get("daily_budget_usd", 5.0))
+
+        # Anthropic client for cross-family consensus
+        self._anthropic_client = None
+        if _HAS_ANTHROPIC and self.consensus_provider == "anthropic":
+            try:
+                self._anthropic_client = AsyncAnthropic(timeout=self.timeout)
+            except Exception:
+                self.logger.warning("anthropic_client_init_failed")
 
         # Screening stats for periodic summary
         self._screened_total = 0
         self._screened_passed = 0
         self._cache_served = 0
+
+    @staticmethod
+    def _load_edge_decay() -> float:
+        """Load average edge erosion from state/edge_decay.jsonl.
+
+        Returns the average erosion amount so we can add it to the
+        slippage/fee cost when computing net edge.
+        """
+        decay_path = Path("state") / "edge_decay.jsonl"
+        if not decay_path.exists():
+            return 0.0
+        try:
+            erosions = []
+            with open(decay_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.load(json.loads(line)) if False else json.loads(line)
+                        ed = float(r.get("edge_at_decision", 0))
+                        ee = float(r.get("edge_at_execution", 0))
+                        erosions.append(ed - ee)
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        continue
+            if len(erosions) >= 5:
+                avg_erosion = sum(erosions) / len(erosions)
+                return max(0.0, avg_erosion)  # Only compensate for positive erosion
+        except Exception:
+            pass
+        return 0.0
+
+    @staticmethod
+    def _load_dynamic_calibration() -> Optional[Dict[str, Any]]:
+        """Load calibration params computed by backtest (state/calibration_params.json)."""
+        cal_path = Path("state") / "calibration_params.json"
+        if not cal_path.exists():
+            return None
+        try:
+            with open(cal_path) as f:
+                data = json.load(f)
+            # Only use if we had enough samples
+            if data.get("sample_size", 0) >= 20:
+                return data
+        except Exception:
+            pass
+        return None
 
     def set_cost_tracker(self, tracker: CostTracker) -> None:
         """Inject a shared CostTracker instance (called from main.py)."""
@@ -479,13 +622,30 @@ class LLMSignal(Signal):
             p_yes = float(llm_data["p_yes"])
             p_yes = max(0.001, min(0.999, p_yes))
 
-            # Calibration: asymmetric shrink + category adjustments
+            # Calibration: asymmetric shrink + category + time-to-resolution adjustments
             if self.calibration_enabled:
                 p_yes_raw = p_yes
                 # Detect market type for category-specific calibration
                 mtype = detect_market_type(market.question)
                 type_cal = MARKET_TYPE_CALIBRATION.get(mtype, MarketTypeCalibration())
                 total_shrink = min(0.45, self.calibration_shrink + type_cal.extra_shrink)
+
+                # Time-to-resolution shrinkage scaling:
+                # Longer-horizon markets have more uncertainty → more shrinkage
+                # < 3 days: no extra shrink (information is fresh)
+                # 3-14 days: +0.03 shrink
+                # 14-30 days: +0.06 shrink
+                # > 30 days: +0.10 shrink
+                time_shrink = 0.0
+                if market.end_date:
+                    days_to_close = (market.end_date - datetime.now(timezone.utc)).total_seconds() / 86400
+                    if days_to_close > 30:
+                        time_shrink = 0.10
+                    elif days_to_close > 14:
+                        time_shrink = 0.06
+                    elif days_to_close > 3:
+                        time_shrink = 0.03
+                total_shrink = min(0.50, total_shrink + time_shrink)
 
                 p_yes = calibrate_probability(
                     p_yes,
@@ -502,15 +662,16 @@ class LLMSignal(Signal):
                     raw_p_yes=p_yes_raw,
                     calibrated_p_yes=p_yes,
                     extra_shrink=type_cal.extra_shrink,
+                    time_shrink=time_shrink,
                     yes_boost=type_cal.yes_boost,
                     no_dampen=type_cal.no_dampen,
                 )
 
-            # Multi-model consensus
-            if self.consensus_enabled:
-                self.logger.info("llm_consensus_start", market_id=market.id, primary_p_yes=p_yes)
-                await self.rate_limiter.acquire()
-                consensus_data = await self._call_llm(prompt, model=self.consensus_model)
+            # Multi-model consensus — only when edge is large enough to justify cost
+            preliminary_edge = abs(p_yes - market_price)
+            if self.consensus_enabled and preliminary_edge >= self.consensus_min_edge:
+                self.logger.info("llm_consensus_start", market_id=market.id, primary_p_yes=p_yes, preliminary_edge=preliminary_edge)
+                consensus_data = await self._call_consensus(prompt)
                 if consensus_data and _validate_llm_response(consensus_data) is None:
                     p_yes_2 = float(consensus_data["p_yes"])
                     p_yes_2 = max(0.001, min(0.999, p_yes_2))
@@ -518,12 +679,13 @@ class LLMSignal(Signal):
                     self.logger.info(
                         "llm_consensus_result",
                         market_id=market.id,
+                        provider=self.consensus_provider,
                         primary_p_yes=p_yes,
                         consensus_p_yes=p_yes_2,
                         divergence=divergence,
                     )
                     if divergence > self.consensus_max_divergence:
-                        result = self._hold(market, f"Consensus divergence {divergence:.3f} > {self.consensus_max_divergence}")
+                        result = self._hold(market, f"Consensus divergence {divergence:.3f} > {self.consensus_max_divergence} ({self.consensus_provider})")
                         self._cache.put(ck, result)
                         return result
                     p_yes = (p_yes + p_yes_2) / 2.0
@@ -542,9 +704,19 @@ class LLMSignal(Signal):
                 self._cache.put(ck, result)
                 return result
 
-            # Compute net edge
+            # Compute net edge (includes historical edge decay compensation)
             raw_edge = p_yes - market_price  # positive → YES underpriced
-            net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+            net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct - self.edge_decay_compensation
+
+            # Category-specific minimum edge (uses type_cal from calibration block above)
+            category_min_edge = type_cal.min_edge if self.calibration_enabled else 0.05
+            if net_edge < category_min_edge:
+                result = self._hold(
+                    market,
+                    f"Net edge {net_edge:.3f} below category min {category_min_edge:.3f} (type={mtype})",
+                )
+                self._cache.put(ck, result)
+                return result
 
             conviction = classify_conviction(net_edge)
 
@@ -567,22 +739,39 @@ class LLMSignal(Signal):
 
             # Determine side
             # Strategy insight from backtesting: the LLM is excellent at predicting NO
-            # (0-30% range is well-calibrated) but terrible at predicting YES
-            # in the MIDDLE range (50-70% has ~0.40 gap). 
+            # (0-25% range is well-calibrated) but terrible at predicting YES
+            # in the MIDDLE range (30-75% has ~0.40 gap).
             #
-            # NO-bias rules:
+            # Widened abstention zone (was 0.30-0.70, now 0.25-0.75):
             # - BUY_NO: freely, whenever raw_edge < 0 and net_edge > 0
-            # - BUY_YES when p_yes > 0.70: high conviction YES (LLM is confident)
-            # - BUY_YES when p_yes < 0.30: cheap lotto — 0-30% bucket is well-calibrated
-            # - HOLD when 0.30 <= p_yes <= 0.70: the "mushy middle" — LLM unreliable
+            # - BUY_YES when p_yes > 0.75: very high conviction YES only
+            # - BUY_YES when p_yes < 0.25: cheap lotto — well-calibrated range
+            # - HOLD when 0.25 <= p_yes <= 0.75: the "mushy middle" — LLM unreliable
+            #
+            # Contrarian NO: when LLM says 0.40-0.65 YES and market agrees (price > 0.45),
+            # backtest data shows actual is ~22% — strong contrarian NO signal.
             if raw_edge > 0 and net_edge > 0:
-                if p_yes > 0.70 or p_yes < 0.30:
+                if p_yes > 0.75 or p_yes < 0.25:
                     side = TradingSide.BUY_YES
                 else:
-                    # LLM says mildly YES (0.30-0.70) — historically unreliable, hold
                     side = TradingSide.HOLD
             elif raw_edge < 0 and net_edge > 0:
                 side = TradingSide.BUY_NO
+            elif (0.40 <= p_yes <= 0.65 and market_price > 0.45
+                  and (market_price - p_yes) > self.fee_pct + self.slippage_pct):
+                # Contrarian: LLM says mild YES but calibration shows actual ~22%
+                # Market is overpriced relative to calibrated reality → BUY_NO
+                side = TradingSide.BUY_NO
+                raw_edge = p_yes - market_price  # negative → NO direction
+                net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                conviction = classify_conviction(net_edge)
+                self.logger.info(
+                    "contrarian_no_signal",
+                    market_id=market.id,
+                    p_yes=p_yes,
+                    market_price=market_price,
+                    net_edge=net_edge,
+                )
             else:
                 side = TradingSide.HOLD
 
@@ -692,8 +881,8 @@ class LLMSignal(Signal):
 
         prompt = (
             f"Q: {market.question}\n"
-            f"Price: {market_price:.2f} | Ends: {end_date_str} | Liq: ${market.liquidity:,.0f}\n\n"
-            "Is the current price likely mispriced by >5%? "
+            f"Ends: {end_date_str} | Liq: ${market.liquidity:,.0f}\n\n"
+            "Based on your knowledge, is this market likely to be mispriced by >5%? "
             'Reply JSON: {{"worth_evaluating": true/false, "reason": "..."}}'
         )
 
@@ -797,6 +986,53 @@ class LLMSignal(Signal):
             self.logger.error("llm_call_error", error=str(e))
             return None
 
+    async def _call_consensus(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Call consensus model — supports Anthropic (Claude) or OpenAI fallback."""
+        if self.consensus_provider == "anthropic" and self._anthropic_client:
+            return await self._call_anthropic(prompt)
+        else:
+            # Fallback to OpenAI consensus
+            await self.rate_limiter.acquire()
+            return await self._call_llm(prompt, model=self.consensus_model)
+
+    async def _call_anthropic(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Call Anthropic Claude API for cross-family consensus."""
+        if not self._anthropic_client:
+            return None
+        try:
+            response = await self._anthropic_client.messages.create(
+                model=self.consensus_model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=self._system_prompt(),
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            content = response.content[0].text if response.content else None
+
+            # Track cost
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    self.consensus_model,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                )
+
+            if not content:
+                return None
+
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = self._extract_json_object(content)
+                if extracted is None:
+                    return None
+                return json.loads(extracted)
+
+        except Exception as e:
+            self.logger.warning("anthropic_consensus_error", error=str(e))
+            return None
+
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
@@ -813,24 +1049,38 @@ class LLMSignal(Signal):
             hours = delta.seconds // 3600
             time_remaining = f"{days}d {hours}h" if days > 0 else f"{hours}h"
 
+        # Lookup empirical base rate from database
+        base_rate_entry = lookup_base_rate(market.question, market.description)
+        base_rate_context = ""
+        if base_rate_entry:
+            base_rate_context = (
+                f"\nEMPIRICAL BASE RATE DATA (use this as your starting anchor):\n"
+                f"  Base rate: {base_rate_entry['base_rate']:.0%}\n"
+                f"  Reference class: {base_rate_entry['reference_class']}\n"
+                f"  Source: {base_rate_entry['source']}\n"
+                f"Start from this empirical base rate and adjust based on current evidence.\n"
+            )
+
         return f"""
 You are a superforecaster estimating the TRUE probability of YES for this prediction market.
 
 Question: {market.question}
 Description: {market.description}
 Category: {market.category}
-Current YES price: {market_price:.4f}
 End date: {end_date_str} ({time_remaining} remaining)
 24h volume: ${market.volume_24h:,.0f}
 Liquidity: ${market.liquidity:,.0f}
 
+NOTE: You are intentionally NOT given the current market price. Derive your
+probability estimate independently from your own analysis. Do NOT guess or
+infer the market price from any contextual clues.
+{base_rate_context}
 {news_context}
 
 Follow this structured forecasting methodology:
 
 STEP 1 — BASE RATE (Reference Class Forecasting):
-Identify the most relevant reference class for this event. What is the historical
-base rate for similar events? (e.g., "Incumbents win re-election ~70% of the time",
+{"Use the EMPIRICAL BASE RATE DATA provided above as your starting point." if base_rate_entry else "Identify the most relevant reference class for this event. What is the historical base rate for similar events?"} (e.g., "Incumbents win re-election ~70% of the time",
 "Government shutdowns resolve within 2 weeks ~60% of the time"). Start your estimate
 here.
 
@@ -868,7 +1118,6 @@ Rules:
 - key_facts: 2-5 most important facts driving your estimate
 - uncertainty: low = strong evidence, high = guessing
 - disqualifiers: list reasons to NOT trade (ambiguous resolution, stale info, etc). Empty list if tradeable.
-- Do NOT anchor on the current market price. Derive your estimate independently.
 
 Domain guidance:
 - For political markets: consider partisan dynamics, committee compositions, historical precedent, polling data, insider reporting, legislative vote counts, and historical base rates for similar events.
@@ -1023,9 +1272,9 @@ Domain guidance:
             else:
                 conviction = ConvictionLevel.NONE
 
-            # Same NO-bias strategy as live: BUY_YES only outside mushy middle
+            # Same NO-bias strategy as live: BUY_YES only outside widened mushy middle
             if raw_edge > 0:
-                if p_yes > 0.70 or p_yes < 0.30:
+                if p_yes > 0.75 or p_yes < 0.25:
                     side = TradingSide.BUY_YES
                 else:
                     side = TradingSide.HOLD

@@ -18,6 +18,62 @@ from .markets import Market
 from .utils import BotConfig, RateLimiter
 
 
+# ---------------------------------------------------------------------------
+# Source credibility — weight authoritative sources higher
+# ---------------------------------------------------------------------------
+
+_HIGH_CREDIBILITY_DOMAINS = {
+    "reuters.com", "apnews.com", "bloomberg.com", "wsj.com",
+    "nytimes.com", "washingtonpost.com", "bbc.com", "bbc.co.uk",
+    "ft.com", "economist.com", "cnbc.com", "politico.com",
+    "thehill.com", "axios.com", "bls.gov", "federalreserve.gov",
+    "treasury.gov", "congress.gov", "whitehouse.gov",
+}
+
+_MEDIUM_CREDIBILITY_DOMAINS = {
+    "cnn.com", "foxnews.com", "msnbc.com", "npr.org",
+    "theguardian.com", "usatoday.com", "abcnews.go.com",
+    "cbsnews.com", "nbcnews.com", "pbs.org",
+}
+
+
+def _source_credibility_score(url: str) -> float:
+    """Return a credibility score 0.0-1.0 for a news source URL."""
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.replace("www.", "")
+        parts = domain.split(".")
+        if len(parts) >= 2:
+            domain = ".".join(parts[-2:])
+        if domain in _HIGH_CREDIBILITY_DOMAINS:
+            return 1.0
+        if domain in _MEDIUM_CREDIBILITY_DOMAINS:
+            return 0.7
+    except Exception:
+        pass
+    return 0.4
+
+
+# ---------------------------------------------------------------------------
+# Domain-specific query expansion
+# ---------------------------------------------------------------------------
+
+_DOMAIN_EXPANSIONS = {
+    "fed": ["FOMC", "interest rate decision", "monetary policy"],
+    "rate cut": ["FOMC meeting", "federal funds rate", "CME FedWatch"],
+    "rate hike": ["FOMC meeting", "federal funds rate", "tightening"],
+    "tariff": ["trade policy", "import duties", "trade war"],
+    "shutdown": ["government shutdown", "continuing resolution", "funding"],
+    "cpi": ["inflation data", "consumer price index", "BLS report"],
+    "gdp": ["economic growth", "GDP report", "BEA data"],
+    "jobs report": ["nonfarm payrolls", "unemployment rate", "BLS"],
+    "election": ["polling", "election forecast", "voter turnout"],
+    "impeach": ["impeachment", "congressional vote", "articles of impeachment"],
+    "supreme court": ["SCOTUS", "court ruling", "oral arguments"],
+    "executive order": ["presidential action", "White House directive"],
+}
+
+
 def _html_to_text(html: str, max_words: int = 500) -> str:
     """Strip HTML tags and return first max_words words of text."""
     # Remove script/style blocks
@@ -279,7 +335,7 @@ class NewsAggregator:
                              msg="Set TAVILY_API_KEY or BRAVE_SEARCH_API_KEY for better results")
 
     async def get_market_news(self, market: Market) -> List[NewsArticle]:
-        """Get news articles relevant to a market."""
+        """Get news articles relevant to a market, including counterarguments."""
         if not self.sources:
             return []
 
@@ -302,10 +358,28 @@ class NewsAggregator:
                     self.logger.warning("news_source_error", source=type(source).__name__, error=str(e))
                     continue
 
+            # Counterargument search — get opposing views for balanced analysis
+            counter_query = self._build_counterargument_query(market)
+            for source in self.sources:
+                try:
+                    await self.rate_limiter.acquire()
+                    counter_articles = await source.search(counter_query, 3)
+                    for a in counter_articles:
+                        a.source = f"{a.source} [counter]"
+                    all_articles.extend(counter_articles)
+                    if counter_articles:
+                        break
+                except Exception:
+                    continue
+
             # Filter recent + deduplicate
             recent = [a for a in all_articles if a.is_recent(self.article_age_hours)]
             unique = self._deduplicate(recent if recent else all_articles)
-            unique.sort(key=lambda a: a.published, reverse=True)
+
+            # Sort by credibility first, then recency
+            unique.sort(
+                key=lambda a: (-_source_credibility_score(a.url), -a.published.timestamp()),
+            )
 
             self.logger.info(
                 "news_found",
@@ -318,11 +392,11 @@ class NewsAggregator:
 
             result = unique[:self.max_articles_per_query]
 
-            # Fetch full article content for top 3 articles
+            # Fetch full article content for top 5 articles (increased from 3)
             fetch_full = self.config.news.get("fetch_full_articles", True)
             if fetch_full and result:
-                max_article_chars = int(self.config.news.get("max_article_chars", 500))
-                top_articles = result[:3]
+                max_article_chars = int(self.config.news.get("max_article_chars", 1500))
+                top_articles = result[:5]
                 tasks = [
                     _fetch_article_text(a.url, timeout=5.0, max_chars=max_article_chars)
                     for a in top_articles
@@ -339,10 +413,12 @@ class NewsAggregator:
             return []
 
     def _build_search_query(self, market: Market) -> str:
-        """Build a good search query from market question.
+        """Build a search query from market question with domain-specific expansion.
 
-        Strategy: use the market question almost directly — it's already
-        a well-formed English question. Just trim prediction-market jargon.
+        Strategy:
+        1. Strip prediction-market framing
+        2. Add domain-specific expansion terms for better results
+        3. Cap at search-engine-friendly length
         """
         question = market.question or ""
 
@@ -363,9 +439,43 @@ class NewsAggregator:
         # Clean up
         question = re.sub(r"\s+", " ", question).strip()
 
+        # Domain-specific query expansion
+        q_lower = question.lower()
+        expansion_terms = []
+        for trigger, expansions in _DOMAIN_EXPANSIONS.items():
+            if trigger in q_lower:
+                # Add first expansion term that isn't already in the question
+                for term in expansions:
+                    if term.lower() not in q_lower:
+                        expansion_terms.append(term)
+                        break
+                break  # Only add one expansion to keep query focused
+
+        if expansion_terms:
+            question = f"{question} {expansion_terms[0]}"
+
         # Cap length for search query
-        if len(question) > 120:
-            question = " ".join(question.split()[:12])
+        if len(question) > 140:
+            question = " ".join(question.split()[:14])
+
+        return question
+
+    def _build_counterargument_query(self, market: Market) -> str:
+        """Build a search query for counterarguments / opposing views."""
+        question = market.question or ""
+        question = re.sub(r"^Will\s+", "", question, flags=re.IGNORECASE)
+        question = re.sub(r"\?$", "", question)
+        question = re.sub(r"\s+", " ", question).strip()
+
+        # Add negation / skepticism framing
+        q_lower = question.lower()
+        if any(w in q_lower for w in ["likely", "expect", "will"]):
+            question = f"{question} unlikely obstacles challenges"
+        else:
+            question = f"{question} skepticism criticism opposition"
+
+        if len(question) > 140:
+            question = " ".join(question.split()[:14])
 
         return question
 
@@ -398,19 +508,26 @@ class NewsAggregator:
 
         return unique
 
-    def format_news_context(self, articles: List[NewsArticle], max_total_chars: int = 2000) -> str:
-        """Format news articles for LLM context, including full text when available."""
+    def format_news_context(self, articles: List[NewsArticle], max_total_chars: int = 4000) -> str:
+        """Format news articles for LLM context, including full text when available.
+
+        Increased context window (was 2000, now 4000) and article content
+        (was 400 chars, now 800) for better LLM analysis.
+        """
         if not articles:
             return "No recent news articles found for this market."
 
-        parts = [f"Recent news ({len(articles)} articles):"]
+        # Tag credibility
+        parts = [f"Recent news ({len(articles)} articles, sorted by source credibility):"]
         total_chars = 0
-        for i, article in enumerate(articles[:6], 1):
-            snippet = article.get_snippet(250)
+        for i, article in enumerate(articles[:8], 1):
+            snippet = article.get_snippet(350)
             source = article.source
-            entry = f"{i}. [{source}] {snippet}"
+            cred = _source_credibility_score(article.url)
+            cred_tag = "HIGH" if cred >= 0.9 else "MED" if cred >= 0.6 else "LOW"
+            entry = f"{i}. [{source}] [{cred_tag} credibility] {snippet}"
             if article.full_text:
-                entry += f"\n   Content: {article.full_text[:400]}"
+                entry += f"\n   Content: {article.full_text[:800]}"
             if total_chars + len(entry) > max_total_chars:
                 break
             parts.append(entry)

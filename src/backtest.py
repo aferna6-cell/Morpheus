@@ -398,20 +398,80 @@ async def run_backtest(
     if save_results:
         state_path = Path(state_dir)
         state_path.mkdir(parents=True, exist_ok=True)
-        
+
         results_file = state_path / "backtest_results.jsonl"
         with open(results_file, "w") as f:
             for r in results:
                 f.write(json.dumps(r) + "\n")
-        
+
         metrics_file = state_path / "backtest_metrics.json"
         with open(metrics_file, "w") as f:
             json.dump(metrics, f, indent=2)
-        
+
         print(f"\n  Results saved to {results_file}")
         print(f"  Metrics saved to {metrics_file}")
-    
+
+        # Dynamic calibration: compute optimal params from backtest data
+        calibration_params = _compute_optimal_calibration(results)
+        if calibration_params:
+            cal_file = state_path / "calibration_params.json"
+            with open(cal_file, "w") as f:
+                json.dump(calibration_params, f, indent=2)
+            print(f"  Calibration params saved to {cal_file}")
+            print(f"    shrink_strength: {calibration_params['shrink_strength']:.4f}")
+            print(f"    yes_boost: {calibration_params['yes_boost']:.4f}")
+            print(f"    no_dampen: {calibration_params['no_dampen']:.4f}")
+
     return metrics
+
+
+def _compute_optimal_calibration(results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Compute optimal calibration parameters by minimizing Brier score.
+
+    Grid-searches over shrink_strength, yes_boost, no_dampen to find the
+    combination that produces the lowest Brier score on backtest data.
+    Saves the result so the live bot can load and use them.
+    """
+    if len(results) < 20:
+        return None  # Not enough data to calibrate
+
+    from .signals.llm_signal import calibrate_probability
+
+    best_brier = float("inf")
+    best_params = {"shrink_strength": 0.15, "yes_boost": 0.0, "no_dampen": 0.0}
+
+    # Grid search over parameter space
+    for shrink in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]:
+        for yb in [-0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20]:
+            for nd in [0.0, 0.05, 0.10, 0.15, 0.20]:
+                total_brier = 0.0
+                count = 0
+                for r in results:
+                    raw_p = r.get("predicted_p_yes", 0.5)
+                    actual = r.get("actual_outcome", 0.5)
+                    cal_p = calibrate_probability(
+                        raw_p,
+                        shrink_strength=shrink,
+                        yes_boost=yb,
+                        no_dampen=nd,
+                    )
+                    total_brier += (cal_p - actual) ** 2
+                    count += 1
+                if count > 0:
+                    avg_brier = total_brier / count
+                    if avg_brier < best_brier:
+                        best_brier = avg_brier
+                        best_params = {
+                            "shrink_strength": shrink,
+                            "yes_boost": yb,
+                            "no_dampen": nd,
+                        }
+
+    best_params["brier_score"] = round(best_brier, 6)
+    best_params["sample_size"] = len(results)
+    best_params["computed_at"] = datetime.now(timezone.utc).isoformat()
+
+    return best_params
 
 
 # ---------------------------------------------------------------------------

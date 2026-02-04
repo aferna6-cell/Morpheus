@@ -35,7 +35,7 @@ market_filters:
   max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
   max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
 
-# Sports market rules — kill most, allow only edge cases
+# Sports market rules — block all sports
 sports_filters:
   enabled: true
   blocked_categories:
@@ -51,15 +51,15 @@ sports_filters:
     - "Boxing"
     - "Racing"
   blocked_patterns:
-    - "Winner"           # pre-match moneyline
-    - "vs"               # head-to-head (usually moneyline)
-    - "TIE"              # tie markets (extremely efficient)
+    - "Winner"
+    - "vs"
+    - "TIE"
     - "DRAW"
     - "Underdog"
     - "to Win"
     - "to Beat"
-    - "Advance"          # tournament advancement
-    - "Champion"         # championship winner
+    - "Advance"
+    - "Champion"
     - "MVP"
     - "Gold Medal"
   allowed_live_only: true            # only trade live/in-play
@@ -79,12 +79,16 @@ llm:
   screening_enabled: true
   screening_model: "gpt-4o-mini"
   cache_enabled: true
-  cache_ttl_minutes: 120
+  cache_ttl_minutes: 360
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.15
-  consensus_enabled: false
+  consensus_enabled: true
+  consensus_provider: "anthropic"
+  consensus_model: "claude-3-5-haiku-20241022"
+  consensus_max_divergence: 0.12
+  consensus_min_edge: 0.07
   monthly_budget_usd: 100.0
   require_data_sources: true
   min_data_sources: 3
@@ -94,11 +98,11 @@ news:
     - name: "google_news"
       url: "https://news.google.com/rss/search"
       enabled: true
-  max_articles_per_query: 5
-  article_age_hours: 24
+  max_articles_per_query: 8
+  article_age_hours: 48
   rate_limit_seconds: 1
   fetch_full_articles: true
-  max_article_chars: 500
+  max_article_chars: 1500
 
 # Risk — quarter-Kelly, 1% cap
 risk:
@@ -115,7 +119,7 @@ risk:
 
 timing:
   loop_interval_seconds: 60
-  market_scan_interval_minutes: 15
+  market_scan_interval_minutes: 30
   signal_refresh_interval_minutes: 60
   portfolio_update_interval_minutes: 5
   rate_limit_per_minute: 30
@@ -152,15 +156,20 @@ kalshi:
     - "Companies"
     - "Financials"
   max_resolution_days: 30
-  max_spread_pct: 0.05              # 5% spread max
+  max_spread_pct: 0.05
 
 # CLV tracking — non-negotiable
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
-  alert_threshold: -0.02            # alert if CLV < -2%
-  halt_threshold: 0.0               # auto-halt if avg CLV <= 0
-  min_samples: 10                   # need N resolved bets before enforcing
+  alert_threshold: -0.01
+  halt_threshold: 0.01
+  min_samples: 10
+  per_type_tracking: true
+  per_type_halt_threshold: -0.01
+
+# BotConfig compatibility fields (unused but required by pydantic model)
+bregman_arb: {}
 
 dev:
   dry_run: false
