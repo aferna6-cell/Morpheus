@@ -45,11 +45,18 @@ async def send_telegram(text: str, chat_id: str = CHAT_ID) -> None:
         # Telegram max message length is 4096
         for i in range(0, len(text), 4000):
             chunk = text[i:i + 4000]
-            await client.post(
+            # Try Markdown first, fall back to plain text if it fails
+            resp = await client.post(
                 f"{TELEGRAM_API}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
                 timeout=30,
             )
+            if resp.status_code != 200 or not resp.json().get("ok"):
+                await client.post(
+                    f"{TELEGRAM_API}/sendMessage",
+                    json={"chat_id": chat_id, "text": chunk},
+                    timeout=30,
+                )
 
 
 async def handle_status() -> str:
@@ -142,7 +149,7 @@ async def ask_claude(user_message: str) -> str:
 
     try:
         response = await client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-3-haiku-20240307",
             max_tokens=1000,
             system=(
                 "You are a helpful assistant accessible via Telegram. "
@@ -206,12 +213,13 @@ async def poll_updates() -> None:
                     else:
                         reply = await ask_claude(text)
 
+                    print(f"Replying to '{text[:50]}' -> {len(reply)} chars")
                     await send_telegram(reply, chat_id)
 
             except httpx.TimeoutException:
                 continue
             except Exception as e:
-                print(f"Poll error: {e}")
+                print(f"Poll error: {e}", flush=True)
                 await asyncio.sleep(5)
 
 
