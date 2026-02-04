@@ -125,12 +125,15 @@ class CapitalManager:
         self._load_state()
 
     def _load_state(self) -> None:
-        """Load persisted state."""
+        """Load persisted state.
+
+        Note: halt flags are NOT restored from disk. Each run starts fresh
+        and halts only if it detects a violation during this session.
+        This prevents stale state from permanently blocking the bot.
+        """
         try:
             state = load_json_state(str(self.capital_state_file))
-            if state:
-                self._halted_capital_recycling = state.get("halted_capital_recycling", False)
-                self._halted_clv = state.get("halted_clv", False)
+            # Deliberately do NOT restore halt flags — start clean each run
 
             pos_state = load_json_state(str(self.positions_file))
             if pos_state and isinstance(pos_state, dict):
@@ -277,6 +280,7 @@ class CapitalManager:
         for pos in self._positions.values():
             days = pos.days_to_resolution()
             if days is None:
+                # Unknown resolution — can't enforce time rule on these
                 exposure_unknown += pos.amount_usd
             elif days <= 7:
                 exposure_7d += pos.amount_usd
@@ -284,9 +288,25 @@ class CapitalManager:
             elif days <= 14:
                 exposure_14d += pos.amount_usd
 
-        # Include unknown in the "bad" bucket (not resolving soon)
-        pct_7d = exposure_7d / total_exposure if total_exposure > 0 else 0.0
-        pct_14d = exposure_14d / total_exposure if total_exposure > 0 else 0.0
+        # Only enforce recycling on positions with known resolution dates.
+        # Positions with unknown resolution are excluded from the denominator.
+        known_exposure = total_exposure - exposure_unknown
+        if known_exposure <= 0:
+            # All positions have unknown resolution — can't enforce, allow trading
+            return CapitalRecyclingStatus(
+                compliant=True,
+                pct_resolving_7d=1.0,
+                pct_resolving_14d=1.0,
+                required_7d_pct=self.required_7d_pct,
+                required_14d_pct=self.required_14d_pct,
+                total_exposure=total_exposure,
+                exposure_7d=exposure_7d,
+                exposure_14d=exposure_14d,
+                reason="All positions have unknown resolution — skipping check",
+            )
+
+        pct_7d = exposure_7d / known_exposure
+        pct_14d = exposure_14d / known_exposure
 
         compliant = pct_14d >= self.required_14d_pct and pct_7d >= self.required_7d_pct
 
