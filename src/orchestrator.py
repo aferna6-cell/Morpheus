@@ -72,12 +72,21 @@ class Orchestrator:
         risk_manager: RiskManager,
         executor: OrderManager,
         kalshi_executor: Optional["KalshiExecutor"] = None,
+        kalshi_executors: Optional[List["KalshiExecutor"]] = None,
     ):
         self.config = config
         self.engines = engines
         self.risk_manager = risk_manager
         self.executor = executor
-        self.kalshi_executor = kalshi_executor
+        # Support multiple Kalshi accounts; fall back to single executor
+        if kalshi_executors:
+            self.kalshi_executors: List["KalshiExecutor"] = kalshi_executors
+        elif kalshi_executor:
+            self.kalshi_executors = [kalshi_executor]
+        else:
+            self.kalshi_executors = []
+        # Keep single-executor property for backward compatibility
+        self.kalshi_executor = self.kalshi_executors[0] if self.kalshi_executors else None
         self.logger = structlog.get_logger()
 
         orch_cfg = getattr(config, "orchestrator", None) or config.__dict__.get("orchestrator", {})
@@ -507,13 +516,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def _dispatch_kalshi(self, signal: TradeSignal) -> Optional[TradeExecution]:
-        """Route a Kalshi signal to the Kalshi executor.
+        """Route a Kalshi signal to all Kalshi executors (multi-account).
 
-        Bridges the same TradeSignal → SignalResult → PositionSize flow
-        but uses USD balance from Kalshi and routes to KalshiExecutor.
-        Returns a duck-typed TradeExecution-compatible object.
+        Each account independently sizes its position based on its own
+        balance, then places the same directional trade.
+        Returns a proxy from the first successful execution.
         """
-        if self.kalshi_executor is None:
+        if not self.kalshi_executors:
             self.logger.warning("kalshi_dispatch_no_executor", market_id=signal.market_id)
             return None
 
@@ -530,68 +539,87 @@ class Orchestrator:
         net_edge = signal.metadata.get("net_edge", signal.edge)
         conviction_str = signal.metadata.get("conviction", "medium")
 
-        sig_result = SignalResult(
-            estimated_prob=estimated_prob,
-            confidence=signal.confidence,
-            edge=signal.edge,
-            recommended_side=trading_side,
-            reasoning=f"[{signal.engine}] {signal.metadata.get('reasoning', '')}",
-            signal_name=signal.engine,
-            market_price=market_price,
-            timestamp=signal.timestamp.isoformat(),
-        )
-
-        try:
-            sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
-        except ValueError:
-            sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
-        sig_result.net_edge = net_edge  # type: ignore[attr-defined]
-
-        # Pass through Kalshi-specific metadata for the executor
-        sig_result.metadata = {  # type: ignore[attr-defined]
-            "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
-            "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
-        }
-
         # Get Market from signal metadata
         market_data = signal.metadata.get("_market")
         if market_data is None:
             self.logger.warning("kalshi_dispatch_no_market", market_id=signal.market_id)
             return None
 
-        # Get Kalshi balance for position sizing
-        available_usd = await self.kalshi_executor.trading_client.get_balance()
+        first_result: Optional[TradeExecution] = None
 
-        # Use same risk manager for position sizing
-        exposure: Dict[str, float] = {}
-        try:
-            positions = await self.kalshi_executor.trading_client.get_positions()
-            for p in positions:
-                exposure[p.ticker] = p.market_exposure
-        except Exception:
-            pass
+        for executor in self.kalshi_executors:
+            label = executor.trading_client.label
+            try:
+                # Skip halted accounts
+                if executor.trading_client.is_halted:
+                    self.logger.info("kalshi_dispatch_skip_halted", label=label, market_id=signal.market_id)
+                    continue
 
-        pos = self.risk_manager.calculate_position_size(
-            signal=sig_result,
-            market=market_data,
-            available_capital=available_usd,
-            current_positions=exposure,
-        )
+                sig_result = SignalResult(
+                    estimated_prob=estimated_prob,
+                    confidence=signal.confidence,
+                    edge=signal.edge,
+                    recommended_side=trading_side,
+                    reasoning=f"[{signal.engine}] {signal.metadata.get('reasoning', '')}",
+                    signal_name=signal.engine,
+                    market_price=market_price,
+                    timestamp=signal.timestamp.isoformat(),
+                )
 
-        if not self.risk_manager.check_trade_approval(pos, market_data, sig_result):
-            self.logger.debug("kalshi_dispatch_rejected_by_risk", market_id=signal.market_id)
-            return None
+                try:
+                    sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
+                except ValueError:
+                    sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
+                sig_result.net_edge = net_edge  # type: ignore[attr-defined]
 
-        kalshi_trade = await self.kalshi_executor.execute_signal(
-            market_data, sig_result, pos,
-        )
+                sig_result.metadata = {  # type: ignore[attr-defined]
+                    "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
+                    "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
+                }
 
-        # Wrap as duck-typed TradeExecution for the orchestrator
-        if kalshi_trade and kalshi_trade.was_successful:
-            return type("_KalshiTradeProxy", (), {
-                "was_successful": kalshi_trade.was_successful,
-                "executed_amount_usd": kalshi_trade.executed_amount_usd,
-                "average_price": kalshi_trade.average_price,
-            })()  # type: ignore[return-value]
+                # Each account sizes independently based on its own balance
+                available_usd = await executor.trading_client.get_balance()
 
-        return None
+                exposure: Dict[str, float] = {}
+                try:
+                    positions = await executor.trading_client.get_positions()
+                    for p in positions:
+                        exposure[p.ticker] = p.market_exposure
+                except Exception:
+                    pass
+
+                pos = self.risk_manager.calculate_position_size(
+                    signal=sig_result,
+                    market=market_data,
+                    available_capital=available_usd,
+                    current_positions=exposure,
+                )
+
+                if not self.risk_manager.check_trade_approval(pos, market_data, sig_result):
+                    self.logger.debug("kalshi_dispatch_rejected_by_risk", label=label, market_id=signal.market_id)
+                    continue
+
+                kalshi_trade = await executor.execute_signal(
+                    market_data, sig_result, pos,
+                )
+
+                if kalshi_trade and kalshi_trade.was_successful:
+                    self.logger.info(
+                        "kalshi_trade_executed",
+                        label=label,
+                        market_id=signal.market_id,
+                        side=signal.side,
+                        contracts=kalshi_trade.executed_contracts,
+                        amount_usd=kalshi_trade.executed_amount_usd,
+                    )
+                    if first_result is None:
+                        first_result = type("_KalshiTradeProxy", (), {
+                            "was_successful": kalshi_trade.was_successful,
+                            "executed_amount_usd": kalshi_trade.executed_amount_usd,
+                            "average_price": kalshi_trade.average_price,
+                        })()  # type: ignore[return-value]
+
+            except Exception as exc:
+                self.logger.warning("kalshi_dispatch_account_error", label=label, error=str(exc))
+
+        return first_result

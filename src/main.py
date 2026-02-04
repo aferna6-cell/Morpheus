@@ -215,8 +215,8 @@ async def run(
             except Exception as exc:
                 logger.warning("arb_engine_init_failed", error=str(exc))
 
-        # Kalshi LLM engine — prediction markets on Kalshi
-        kalshi_exec = None
+        # Kalshi LLM engine + multi-account executors
+        kalshi_executors: List = []
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         if isinstance(kalshi_cfg, dict) and kalshi_cfg.get("enabled", False):
             try:
@@ -226,8 +226,36 @@ async def run(
                 from .engines.kalshi_llm_engine import KalshiLLMEngine
 
                 kalshi_read = KalshiReadClient(config)
-                kalshi_trading = KalshiTradingClient(config, dry_run=dry_run)
-                await kalshi_trading.initialize()
+
+                # Primary Kalshi account
+                kalshi_trading_1 = KalshiTradingClient(
+                    config, dry_run=dry_run, label="kalshi_primary",
+                )
+                await kalshi_trading_1.initialize()
+                kalshi_executors.append(KalshiExecutor(
+                    config=config,
+                    trading_client=kalshi_trading_1,
+                    risk_manager=risk,
+                ))
+                logger.info("kalshi_account_initialized", label="kalshi_primary")
+
+                # Secondary Kalshi account (if configured)
+                key_id_2 = os.getenv("KALSHI_API_KEY_ID_2", "")
+                key_path_2 = os.getenv("KALSHI_PRIVATE_KEY_PATH_2", "")
+                if key_id_2 and key_path_2:
+                    kalshi_trading_2 = KalshiTradingClient(
+                        config, dry_run=dry_run,
+                        api_key_id=key_id_2,
+                        private_key_path=key_path_2,
+                        label="kalshi_secondary",
+                    )
+                    await kalshi_trading_2.initialize()
+                    kalshi_executors.append(KalshiExecutor(
+                        config=config,
+                        trading_client=kalshi_trading_2,
+                        risk_manager=risk,
+                    ))
+                    logger.info("kalshi_account_initialized", label="kalshi_secondary")
 
                 kalshi_engine = KalshiLLMEngine(
                     config=config,
@@ -235,13 +263,7 @@ async def run(
                     cost_tracker=cost_tracker,
                 )
                 engines.append(kalshi_engine)
-
-                kalshi_exec = KalshiExecutor(
-                    config=config,
-                    trading_client=kalshi_trading,
-                    risk_manager=risk,
-                )
-                logger.info("kalshi_engine_initialized")
+                logger.info("kalshi_engine_initialized", accounts=len(kalshi_executors))
             except Exception as exc:
                 logger.warning("kalshi_engine_init_failed", error=str(exc))
 
@@ -251,7 +273,7 @@ async def run(
                 engines=engines,
                 risk_manager=risk,
                 executor=exec_mgr,
-                kalshi_executor=kalshi_exec,
+                kalshi_executors=kalshi_executors if kalshi_executors else None,
             )
 
             logger.info(
