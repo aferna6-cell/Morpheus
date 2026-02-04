@@ -45,11 +45,13 @@ class TradeLogger:
         cost_usd: Optional[float] = None,
         entry_probability: Optional[float] = None,
         market_price: Optional[float] = None,
+        account_label: Optional[str] = None,
     ) -> None:
         """Log a successfully placed order with CLV tracking fields."""
         self._write({
             "event": "order_placed",
             "platform": platform,
+            "account": account_label,
             "ticker": ticker,
             "side": side,
             "count": count,
@@ -73,11 +75,13 @@ class TradeLogger:
         price_cents: int,
         error: str,
         conviction: Optional[str] = None,
+        account_label: Optional[str] = None,
     ) -> None:
         """Log a failed order attempt."""
         self._write({
             "event": "order_failed",
             "platform": platform,
+            "account": account_label,
             "ticker": ticker,
             "side": side,
             "count": count,
@@ -94,11 +98,13 @@ class TradeLogger:
         count: int,
         fill_price_cents: int,
         order_id: str,
+        account_label: Optional[str] = None,
     ) -> None:
         """Log an order fill."""
         self._write({
             "event": "order_filled",
             "platform": platform,
+            "account": account_label,
             "ticker": ticker,
             "side": side,
             "count": count,
@@ -115,11 +121,13 @@ class TradeLogger:
         entry_price_cents: int,
         exit_price_cents: int,
         pnl_usd: float,
+        account_label: Optional[str] = None,
     ) -> None:
         """Log a position closure with P&L."""
         self._write({
             "event": "position_closed",
             "platform": platform,
+            "account": account_label,
             "ticker": ticker,
             "side": side,
             "count": count,
@@ -139,11 +147,13 @@ class TradeLogger:
         closing_probability: Optional[float] = None,
         entry_probability: Optional[float] = None,
         clv: Optional[float] = None,
+        account_label: Optional[str] = None,
     ) -> None:
         """Log a market resolution with CLV data."""
         self._write({
             "event": "market_resolved",
             "platform": platform,
+            "account": account_label,
             "ticker": ticker,
             "outcome": outcome,
             "held_side": held_side,
