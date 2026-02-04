@@ -477,6 +477,10 @@ class LLMSignal(Signal):
         self.consensus_model = llm_config.get("consensus_model", "claude-3-5-haiku-20241022")
         self.consensus_provider = llm_config.get("consensus_provider", "anthropic")
         self.consensus_max_divergence = float(llm_config.get("consensus_max_divergence", 0.10))
+        self.consensus_min_edge = float(llm_config.get("consensus_min_edge", 0.07))
+
+        # Daily budget cap
+        self._daily_budget = float(llm_config.get("daily_budget_usd", 5.0))
 
         # Anthropic client for cross-family consensus
         self._anthropic_client = None
@@ -663,9 +667,10 @@ class LLMSignal(Signal):
                     no_dampen=type_cal.no_dampen,
                 )
 
-            # Multi-model consensus (cross-family: GPT primary, Claude consensus)
-            if self.consensus_enabled:
-                self.logger.info("llm_consensus_start", market_id=market.id, primary_p_yes=p_yes)
+            # Multi-model consensus — only when edge is large enough to justify cost
+            preliminary_edge = abs(p_yes - market_price)
+            if self.consensus_enabled and preliminary_edge >= self.consensus_min_edge:
+                self.logger.info("llm_consensus_start", market_id=market.id, primary_p_yes=p_yes, preliminary_edge=preliminary_edge)
                 consensus_data = await self._call_consensus(prompt)
                 if consensus_data and _validate_llm_response(consensus_data) is None:
                     p_yes_2 = float(consensus_data["p_yes"])

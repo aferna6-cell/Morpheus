@@ -9,7 +9,7 @@ polymarket:
   signature_type: 0
 
 strategy:
-  enabled_strategies: ["kalshi_llm"]
+  enabled_strategies: ["kalshi_llm", "bregman_arb", "arb"]
   min_edge: 0.05                    # 5% minimum edge (was 2%)
   kelly_fraction: 0.25              # quarter-Kelly
   max_position_pct: 0.01            # 1% of bankroll cap
@@ -32,7 +32,7 @@ market_filters:
   max_spread_pct: 0.05              # 5% max bid-ask spread
   min_data_sources: 3               # require 3+ independent sources
   exclude_closing_within_hours: 2
-  max_markets_per_scan: 100
+  max_markets_per_scan: 50              # fewer markets per scan (cost control)
   max_resolution_days: 30           # ≤30 days to resolution
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
@@ -88,7 +88,7 @@ llm:
   screening_enabled: true
   screening_model: "gpt-4o-mini"
   cache_enabled: true
-  cache_ttl_minutes: 120
+  cache_ttl_minutes: 360                # 6 hours — most markets don't change fast
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
@@ -98,7 +98,9 @@ llm:
   consensus_provider: "anthropic"
   consensus_model: "claude-3-5-haiku-20241022"
   consensus_max_divergence: 0.12
+  consensus_min_edge: 0.07              # only run Claude on markets with 7%+ edge (saves ~50% on consensus costs)
   monthly_budget_usd: 100.0
+  daily_budget_usd: 5.0                 # hard daily cap — prevents runaway costs
   # Data source requirements
   require_data_sources: true
   min_data_sources: 3
@@ -130,7 +132,7 @@ risk:
 
 timing:
   loop_interval_seconds: 60
-  market_scan_interval_minutes: 15
+  market_scan_interval_minutes: 30      # scan every 30 min (was 15 — halves LLM costs)
   signal_refresh_interval_minutes: 60
   portfolio_update_interval_minutes: 5
   rate_limit_per_minute: 30
@@ -162,7 +164,11 @@ execution:
   limit_order_timeout_seconds: 30
 
 bregman_arb:
-  enabled: false                    # disabled until Polymarket funded
+  enabled: true                     # L1/L2 are pure math (no LLM cost), L3 degrades gracefully
+  scan_interval_seconds: 60
+  min_profit_threshold: 0.02        # 2% minimum profit
+  min_profit_usd: 3.0
+  max_position_usd: 50.0
 
 websocket:
   enabled: false
@@ -193,7 +199,14 @@ kalshi:
   max_spread_pct: 0.05              # 5% spread max
 
 arbitrage:
-  enabled: false
+  enabled: true                     # cross-platform arb (Polymarket ↔ Kalshi), no LLM cost
+  scan_interval_seconds: 300
+  min_profit_pct: 0.03              # 3% minimum after fees
+  polymarket_taker_fee: 0.02
+  kalshi_fee: 0.07
+  min_volume: 10000
+  max_position_usd: 50.0
+  match_confidence_threshold: 0.80
 
 # CLV tracking — non-negotiable
 clv_tracking:

@@ -143,10 +143,12 @@ async def run(
         state_dir=str(state_path), dry_run=dry_run,
     )
 
-    # Cost tracker
+    # Cost tracker with daily + monthly caps
     monthly_budget = float(config.llm.get("monthly_budget_usd", 100.0))
+    daily_budget = float(config.llm.get("daily_budget_usd", 5.0))
     cost_tracker = CostTracker(
         monthly_budget=monthly_budget,
+        daily_budget=daily_budget,
         state_path=state_path / "cost_tracker.json",
     )
     logger.info("cost_tracker_init", **cost_tracker.get_summary())
@@ -195,7 +197,7 @@ async def run(
             except Exception as exc:
                 logger.warning("copy_engine_init_failed", error=str(exc))
 
-        # Bregman arb engine — event-group mispricing detection
+        # Bregman arb engine — event-group mispricing detection (no LLM cost)
         if "bregman_arb" in enabled:
             try:
                 from .engines.bregman_arb_engine import BregmanArbEngine
@@ -203,6 +205,15 @@ async def run(
                 engines.append(bregman_engine)
             except Exception as exc:
                 logger.warning("bregman_arb_engine_init_failed", error=str(exc))
+
+        # Cross-platform arb engine — Polymarket ↔ Kalshi price discrepancies (no LLM cost)
+        if "arb" in enabled:
+            try:
+                from .engines.arb_engine import ArbEngine
+                arb_engine = ArbEngine(config)
+                engines.append(arb_engine)
+            except Exception as exc:
+                logger.warning("arb_engine_init_failed", error=str(exc))
 
         # Kalshi LLM engine — prediction markets on Kalshi
         kalshi_exec = None
