@@ -93,7 +93,11 @@ llm:
   calibration_floor: 0.05
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.15
-  consensus_enabled: false
+  # Cross-family consensus: Claude catches GPT-specific biases
+  consensus_enabled: true
+  consensus_provider: "anthropic"
+  consensus_model: "claude-3-5-haiku-20241022"
+  consensus_max_divergence: 0.12
   monthly_budget_usd: 100.0
   # Data source requirements
   require_data_sources: true
@@ -104,11 +108,11 @@ news:
     - name: "google_news"
       url: "https://news.google.com/rss/search"
       enabled: true
-  max_articles_per_query: 5
-  article_age_hours: 24
+  max_articles_per_query: 8
+  article_age_hours: 48
   rate_limit_seconds: 1
   fetch_full_articles: true
-  max_article_chars: 500
+  max_article_chars: 1500
 
 # Risk — quarter-Kelly, 1% cap
 risk:
@@ -195,9 +199,11 @@ arbitrage:
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
-  alert_threshold: -0.02            # alert if CLV < -2%
-  halt_threshold: 0.0               # auto-halt if avg CLV <= 0
+  alert_threshold: -0.01            # alert if CLV < -1% (tightened from -2%)
+  halt_threshold: 0.01              # auto-halt if avg CLV <= 1% (raised from 0%)
   min_samples: 10                   # need N resolved bets before enforcing
+  per_type_tracking: true           # track CLV per market type
+  per_type_halt_threshold: -0.01    # disable specific market types with CLV < -1%
 
 dev:
   dry_run: false

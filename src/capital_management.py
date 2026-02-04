@@ -109,9 +109,12 @@ class CapitalManager:
             clv_cfg = {}
 
         self.clv_enabled = bool(clv_cfg.get("enabled", True))
-        self.clv_alert_threshold = float(clv_cfg.get("alert_threshold", -0.02))
-        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", 0.0))
+        self.clv_alert_threshold = float(clv_cfg.get("alert_threshold", -0.01))
+        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", 0.01))
         self.clv_min_samples = int(clv_cfg.get("min_samples", 10))
+        self.per_type_tracking = bool(clv_cfg.get("per_type_tracking", True))
+        self.per_type_halt_threshold = float(clv_cfg.get("per_type_halt_threshold", -0.01))
+        self._disabled_market_types: set = set()  # market types with poor CLV
 
         # State files
         self.positions_file = self.state_dir / "open_positions.json"
@@ -195,6 +198,7 @@ class CapitalManager:
         entry_probability: float,
         side: str,
         resolution_time: Optional[datetime] = None,
+        market_type: str = "unknown",
     ) -> None:
         """Add a new position to track."""
         self._positions[market_id] = OpenPosition(
@@ -209,7 +213,7 @@ class CapitalManager:
             side=side,
         )
 
-        # Log CLV entry
+        # Log CLV entry with market type for per-type tracking
         self._log_clv_entry(
             market_id=market_id,
             ticker=ticker,
@@ -217,6 +221,7 @@ class CapitalManager:
             entry_probability=entry_probability,
             entry_market_price=entry_price,
             direction=side,
+            market_type=market_type,
         )
 
         self._save_state()
@@ -335,6 +340,61 @@ class CapitalManager:
     # CLV Tracking
     # -------------------------------------------------------------------------
 
+    def is_market_type_allowed(self, market_type: str) -> bool:
+        """Check if a market type is allowed based on per-type CLV tracking."""
+        if not self.per_type_tracking:
+            return True
+        return market_type not in self._disabled_market_types
+
+    def check_per_type_clv(self) -> Dict[str, Dict[str, Any]]:
+        """Check CLV per market type and disable types with poor performance."""
+        if not self.clv_enabled or not self.per_type_tracking:
+            return {}
+
+        records = []
+        try:
+            if self.clv_file.exists():
+                with open(self.clv_file, "r") as f:
+                    for line in f:
+                        if line.strip():
+                            records.append(json.loads(line))
+        except Exception:
+            return {}
+
+        # Group by market type
+        from collections import defaultdict
+        by_type: Dict[str, list] = defaultdict(list)
+        for r in records:
+            if r.get("clv") is not None:
+                mtype = r.get("market_type", "unknown")
+                by_type[mtype].append(r["clv"])
+
+        results = {}
+        for mtype, clv_values in by_type.items():
+            if len(clv_values) < 5:  # Need minimum samples per type
+                continue
+            avg = sum(clv_values) / len(clv_values)
+            results[mtype] = {
+                "avg_clv": round(avg, 4),
+                "count": len(clv_values),
+                "disabled": avg < self.per_type_halt_threshold,
+            }
+            if avg < self.per_type_halt_threshold:
+                if mtype not in self._disabled_market_types:
+                    self._disabled_market_types.add(mtype)
+                    self.logger.warning(
+                        "clv_type_disabled",
+                        market_type=mtype,
+                        avg_clv=avg,
+                        threshold=self.per_type_halt_threshold,
+                        sample_size=len(clv_values),
+                    )
+            elif mtype in self._disabled_market_types:
+                self._disabled_market_types.discard(mtype)
+                self.logger.info("clv_type_re_enabled", market_type=mtype, avg_clv=avg)
+
+        return results
+
     def _log_clv_entry(
         self,
         market_id: str,
@@ -343,6 +403,7 @@ class CapitalManager:
         entry_probability: float,
         entry_market_price: float,
         direction: str,
+        market_type: str = "unknown",
     ) -> None:
         """Log a CLV entry when a trade is placed."""
         if not self.clv_enabled:
@@ -356,6 +417,7 @@ class CapitalManager:
             "entry_probability": entry_probability,
             "entry_market_price": entry_market_price,
             "direction": direction,
+            "market_type": market_type,
             "closing_probability": None,
             "clv": None,
             "resolved": False,
@@ -552,7 +614,7 @@ class CapitalManager:
     # Combined check
     # -------------------------------------------------------------------------
 
-    def can_trade(self) -> tuple[bool, str]:
+    def can_trade(self, market_type: str = "") -> tuple[bool, str]:
         """Check if trading is allowed based on all capital management rules."""
         reasons = []
 
@@ -563,6 +625,10 @@ class CapitalManager:
         if not self.is_clv_compliant():
             status = self.check_clv_status()
             reasons.append(f"CLV: {status.reason} (avg={status.average_clv:.3f})")
+
+        # Per-type CLV gate
+        if market_type and not self.is_market_type_allowed(market_type):
+            reasons.append(f"Market type '{market_type}' disabled due to poor CLV")
 
         if reasons:
             return False, "; ".join(reasons)
