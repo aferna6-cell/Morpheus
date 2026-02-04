@@ -262,6 +262,19 @@ async def run(
                     kalshi_client=kalshi_read,
                     cost_tracker=cost_tracker,
                 )
+
+                # Balance gate — skip LLM calls when all accounts are unfunded
+                _kalshi_execs = list(kalshi_executors)  # capture for closure
+                async def _total_kalshi_balance() -> float:
+                    total = 0.0
+                    for ex in _kalshi_execs:
+                        try:
+                            total += await ex.trading_client.get_balance()
+                        except Exception:
+                            pass
+                    return total
+                kalshi_engine.set_balance_checker(_total_kalshi_balance, min_balance=1.0)
+
                 engines.append(kalshi_engine)
                 logger.info("kalshi_engine_initialized", accounts=len(kalshi_executors))
             except Exception as exc:

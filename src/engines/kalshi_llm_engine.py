@@ -120,6 +120,10 @@ class KalshiLLMEngine(BaseEngine):
         self._pending: List[TradeSignal] = []
         self._task: Optional[asyncio.Task] = None
 
+        # Balance gate — set by orchestrator/main to skip LLM calls when unfunded
+        self._min_trade_balance: float = 1.0  # minimum USD across all accounts
+        self._balance_checker = None  # async callable returning float
+
         # Stats
         self._markets_scanned = 0
         self._markets_filtered = 0
@@ -167,7 +171,27 @@ class KalshiLLMEngine(BaseEngine):
                 self.logger.error("kalshi_llm_engine_scan_error", error=str(exc))
             await asyncio.sleep(self._interval)
 
+    def set_balance_checker(self, checker, min_balance: float = 1.0) -> None:
+        """Set an async callable that returns total USD across all Kalshi accounts."""
+        self._balance_checker = checker
+        self._min_trade_balance = min_balance
+
     async def _scan_once(self) -> None:
+        # Balance gate — don't waste LLM API calls if there's no money to trade
+        if self._balance_checker is not None:
+            try:
+                total_balance = await self._balance_checker()
+                if total_balance < self._min_trade_balance:
+                    self.logger.info(
+                        "kalshi_llm_skip_unfunded",
+                        total_balance=total_balance,
+                        min_required=self._min_trade_balance,
+                        msg="Skipping LLM evaluation — accounts unfunded",
+                    )
+                    return
+            except Exception as exc:
+                self.logger.warning("balance_check_failed", error=str(exc))
+
         # Fetch markets — use lower volume threshold for initial fetch,
         # we'll apply strict filters ourselves
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
