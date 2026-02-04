@@ -876,8 +876,8 @@ class LLMSignal(Signal):
 
         prompt = (
             f"Q: {market.question}\n"
-            f"Price: {market_price:.2f} | Ends: {end_date_str} | Liq: ${market.liquidity:,.0f}\n\n"
-            "Is the current price likely mispriced by >5%? "
+            f"Ends: {end_date_str} | Liq: ${market.liquidity:,.0f}\n\n"
+            "Based on your knowledge, is this market likely to be mispriced by >5%? "
             'Reply JSON: {{"worth_evaluating": true/false, "reason": "..."}}'
         )
 
