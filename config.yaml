@@ -1,9 +1,9 @@
-# Morpheus — Kalshi-only trading bot.
+# Morpheus — Kalshi trading bot.
 # Strict filters: volume, spread, resolution, data sources.
-# Sports: blocked. Three engine types: LLM, flow-following, price monitoring.
+# Sports: mostly killed (only live events with edge cases).
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_flow", "kalshi_monitor"]
+  enabled_strategies: ["kalshi_llm"]
   min_edge: 0.05                    # 5% minimum edge
   kelly_fraction: 0.25              # quarter-Kelly
   max_position_pct: 0.01            # 1% of bankroll cap
@@ -26,13 +26,14 @@ market_filters:
   max_spread_pct: 0.05              # 5% max bid-ask spread
   min_data_sources: 3               # require 3+ independent sources
   exclude_closing_within_hours: 2
-  max_markets_per_scan: 50
-  max_resolution_days: 30           # ≤30 days to resolution
+  max_markets_per_scan: 100
+  max_resolution_days: 30           # <=30 days to resolution
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
   focus_enabled: false
-  max_14d_allocation_pct: 0.70
-  max_7d_allocation_pct: 0.50
+  # Capital recycling: portfolio time allocation
+  max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
+  max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
 
 # Sports market rules — block all sports
 sports_filters:
@@ -61,8 +62,8 @@ sports_filters:
     - "Champion"
     - "MVP"
     - "Gold Medal"
-  allowed_live_only: true
-  allowed_patterns:
+  allowed_live_only: true            # only trade live/in-play
+  allowed_patterns:                   # edge cases we might trade
     - "red card"
     - "injury"
     - "ejection"
@@ -89,7 +90,6 @@ llm:
   consensus_max_divergence: 0.12
   consensus_min_edge: 0.07
   monthly_budget_usd: 100.0
-  daily_budget_usd: 5.0
   require_data_sources: true
   min_data_sources: 3
 
@@ -139,24 +139,13 @@ orchestrator:
   multi_engine_boost: 1.0
   cycle_interval_seconds: 60
 
-execution:
-  default_slippage: 0.005
-  fee_bps: 0.0
-  order_timeout_seconds: 60
-  max_retries: 3
-  retry_delay_seconds: 2
-  prefer_limit_orders: true
-  maker_spread_offset: 0.005
-  urgent_allow_taker: false
-  limit_order_timeout_seconds: 30
-
-# Kalshi — primary exchange
+# Kalshi — primary platform
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 600
   fee_per_contract: 0.07
-  min_volume: 50000
+  min_volume: 50000                 # $50k minimum
   max_position_contracts: 50
   categories:
     - "Politics"
@@ -168,32 +157,6 @@ kalshi:
     - "Financials"
   max_resolution_days: 30
   max_spread_pct: 0.05
-
-# Kalshi flow engine — follow large trades on the public tape (no LLM cost)
-kalshi_flow:
-  enabled: true
-  poll_interval_seconds: 30          # check trade tape every 30s
-  min_contracts: 50                  # only follow trades >= 50 contracts
-  min_volume: 10000                  # market must have $10k+ volume
-  cooldown_seconds: 300              # 5 min cooldown per ticker
-  lookback_seconds: 120              # look at trades from last 2 min
-  max_price: 0.90                    # skip near-certain markets
-  min_price: 0.10                    # skip near-zero markets
-
-# Kalshi price monitor — detect price spikes (no LLM cost)
-kalshi_monitor:
-  enabled: true
-  poll_interval_seconds: 15          # poll orderbooks every 15s
-  market_refresh_seconds: 300        # refresh tracked market list every 5 min
-  min_volume: 20000                  # only monitor markets with $20k+ volume
-  max_tracked_markets: 50            # track top 50 markets by volume
-  cooldown_seconds: 120              # 2 min cooldown per market after signal
-  fast_spike_pct: 0.03              # 3% move in <30s
-  fast_spike_window_seconds: 30
-  medium_spike_pct: 0.05            # 5% move in <5 min
-  medium_spike_window_seconds: 300
-  large_spike_pct: 0.10             # 10% move in <30 min
-  large_spike_window_seconds: 1800
 
 # CLV tracking — non-negotiable
 clv_tracking:
