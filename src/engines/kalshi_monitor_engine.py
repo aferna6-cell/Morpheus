@@ -309,7 +309,7 @@ class KalshiMonitorEngine(BaseEngine):
             side = "buy_no"
             confidence = min(0.7, abs(magnitude) * 3)
 
-        edge = abs(magnitude) * 0.4  # expect 40% of the move to revert
+        edge = max(0.05, abs(magnitude) * 0.5)  # min 5% edge to meet threshold
 
         return TradeSignal(
             engine=self.name,

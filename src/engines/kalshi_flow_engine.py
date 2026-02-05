@@ -156,7 +156,7 @@ class KalshiFlowEngine(BaseEngine):
 
             # Confidence scales with trade size
             confidence = min(0.7, 0.4 + (count / 500.0) * 0.3)
-            edge = 0.03  # conservative: we're following, not leading
+            edge = 0.05  # meets min_edge threshold
 
             signal = TradeSignal(
                 engine=self.name,
