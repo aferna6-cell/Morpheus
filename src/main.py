@@ -68,21 +68,47 @@ async def run(
     from .engines.base import BaseEngine
 
     engines: List[BaseEngine] = []
-    kalshi_exec = None
+    kalshi_executors: List = []
+    enabled = config.strategy.get("enabled_strategies", [])
 
     kalshi_cfg = getattr(config, "kalshi", None) or {}
     if isinstance(kalshi_cfg, dict) and kalshi_cfg.get("enabled", False):
         try:
+            import os
             from .kalshi_client import KalshiClient as KalshiReadClient
             from .kalshi_trading_client import KalshiTradingClient
             from .kalshi_executor import KalshiExecutor
             from .engines.kalshi_llm_engine import KalshiLLMEngine
 
             kalshi_read = KalshiReadClient(config)
-            kalshi_trading = KalshiTradingClient(config, dry_run=dry_run)
-            await kalshi_trading.initialize()
 
-            if not no_llm:
+            # Primary Kalshi account
+            kalshi_trading = KalshiTradingClient(config, dry_run=dry_run, label="kalshi_primary")
+            await kalshi_trading.initialize()
+            kalshi_exec_primary = KalshiExecutor(
+                config=config,
+                trading_client=kalshi_trading,
+                risk_manager=risk,
+            )
+            kalshi_executors.append(kalshi_exec_primary)
+
+            # Secondary Kalshi account (if configured)
+            if os.getenv("KALSHI_API_KEY_ID_2") and os.getenv("KALSHI_PRIVATE_KEY_PATH_2"):
+                kalshi_trading_2 = KalshiTradingClient(
+                    config, dry_run=dry_run, label="kalshi_secondary",
+                    key_id_env="KALSHI_API_KEY_ID_2",
+                    key_path_env="KALSHI_PRIVATE_KEY_PATH_2",
+                )
+                await kalshi_trading_2.initialize()
+                kalshi_exec_secondary = KalshiExecutor(
+                    config=config,
+                    trading_client=kalshi_trading_2,
+                    risk_manager=risk,
+                )
+                kalshi_executors.append(kalshi_exec_secondary)
+                logger.info("kalshi_secondary_account_initialized")
+
+            if not no_llm and "kalshi_llm" in enabled:
                 kalshi_engine = KalshiLLMEngine(
                     config=config,
                     kalshi_client=kalshi_read,
@@ -102,34 +128,29 @@ async def run(
                 kalshi_engine.set_balance_checker(_total_kalshi_balance, min_balance=1.0)
 
                 engines.append(kalshi_engine)
-                logger.info("kalshi_engine_initialized", accounts=len(kalshi_executors))
+                logger.info("kalshi_llm_engine_initialized", accounts=len(kalshi_executors))
 
-                # Kalshi flow engine — follow large trades on the tape (no LLM cost)
-                if "kalshi_flow" in enabled:
-                    try:
-                        from .engines.kalshi_flow_engine import KalshiFlowEngine
-                        flow_engine = KalshiFlowEngine(config, kalshi_read)
-                        engines.append(flow_engine)
-                        logger.info("kalshi_flow_engine_initialized")
-                    except Exception as exc:
-                        logger.warning("kalshi_flow_engine_init_failed", error=str(exc))
+            # Kalshi flow engine — follow large trades on the tape (no LLM cost)
+            if "kalshi_flow" in enabled:
+                try:
+                    from .engines.kalshi_flow_engine import KalshiFlowEngine
+                    flow_engine = KalshiFlowEngine(config, kalshi_read)
+                    engines.append(flow_engine)
+                    logger.info("kalshi_flow_engine_initialized")
+                except Exception as exc:
+                    logger.warning("kalshi_flow_engine_init_failed", error=str(exc))
 
-                # Kalshi monitor engine — detect price spikes (no LLM cost)
-                if "kalshi_monitor" in enabled:
-                    try:
-                        from .engines.kalshi_monitor_engine import KalshiMonitorEngine
-                        monitor_engine = KalshiMonitorEngine(config, kalshi_read)
-                        engines.append(monitor_engine)
-                        logger.info("kalshi_monitor_engine_initialized")
-                    except Exception as exc:
-                        logger.warning("kalshi_monitor_engine_init_failed", error=str(exc))
+            # Kalshi monitor engine — detect price spikes (no LLM cost)
+            if "kalshi_monitor" in enabled:
+                try:
+                    from .engines.kalshi_monitor_engine import KalshiMonitorEngine
+                    monitor_engine = KalshiMonitorEngine(config, kalshi_read)
+                    engines.append(monitor_engine)
+                    logger.info("kalshi_monitor_engine_initialized")
+                except Exception as exc:
+                    logger.warning("kalshi_monitor_engine_init_failed", error=str(exc))
 
-            kalshi_exec = KalshiExecutor(
-                config=config,
-                trading_client=kalshi_trading,
-                risk_manager=risk,
-            )
-            logger.info("kalshi_engine_initialized")
+            logger.info("kalshi_setup_complete", executors=len(kalshi_executors), engines=[e.name for e in engines])
         except Exception as exc:
             logger.error("kalshi_engine_init_failed", error=str(exc))
             raise
@@ -144,7 +165,7 @@ async def run(
         engines=engines,
         risk_manager=risk,
         executor=None,
-        kalshi_executor=kalshi_exec,
+        kalshi_executors=kalshi_executors,
     )
 
     logger.info(

@@ -56,13 +56,13 @@ class Orchestrator:
         config: BotConfig,
         engines: List[BaseEngine],
         risk_manager: RiskManager,
-        kalshi_executor: Optional[KalshiExecutor] = None,
+        kalshi_executors: Optional[List[KalshiExecutor]] = None,
         executor: Optional[object] = None,  # legacy compat, unused
     ):
         self.config = config
         self.engines = engines
         self.risk_manager = risk_manager
-        self.kalshi_executor = kalshi_executor
+        self.kalshi_executors = kalshi_executors or []
         self.logger = structlog.get_logger()
 
         orch_cfg = getattr(config, "orchestrator", None) or config.__dict__.get("orchestrator", {})
