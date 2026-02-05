@@ -31,9 +31,9 @@ market_filters:
   price_move_alert_pct: 0.05
   max_per_correlation_cluster: 1
   focus_enabled: false
-  # Capital recycling: portfolio time allocation
-  max_14d_allocation_pct: 0.70      # 70%+ resolves within 14 days
-  max_7d_allocation_pct: 0.50       # 50%+ resolves within 7 days
+  # Capital recycling: disabled (was blocking trades with empty portfolio)
+  max_14d_allocation_pct: 0.0
+  max_7d_allocation_pct: 0.0
 
 # Sports market rules — block all sports
 sports_filters:
