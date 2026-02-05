@@ -398,6 +398,7 @@ class Orchestrator:
                 estimated_prob = trade_price
 
         first_result: Optional[TradeExecution] = None
+        kalshi_trade: Optional[KalshiTradeExecution] = None
 
         for executor in self.kalshi_executors:
             label = executor.trading_client.label
