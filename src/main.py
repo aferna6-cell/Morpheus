@@ -93,11 +93,13 @@ async def run(
             kalshi_executors.append(kalshi_exec_primary)
 
             # Secondary Kalshi account (if configured)
-            if os.getenv("KALSHI_API_KEY_ID_2") and os.getenv("KALSHI_PRIVATE_KEY_PATH_2"):
+            key_id_2 = os.getenv("KALSHI_API_KEY_ID_2")
+            key_path_2 = os.getenv("KALSHI_PRIVATE_KEY_PATH_2")
+            if key_id_2 and key_path_2:
                 kalshi_trading_2 = KalshiTradingClient(
                     config, dry_run=dry_run, label="kalshi_secondary",
-                    key_id_env="KALSHI_API_KEY_ID_2",
-                    key_path_env="KALSHI_PRIVATE_KEY_PATH_2",
+                    api_key_id=key_id_2,
+                    private_key_path=key_path_2,
                 )
                 await kalshi_trading_2.initialize()
                 kalshi_exec_secondary = KalshiExecutor(
