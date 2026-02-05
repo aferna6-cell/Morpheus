@@ -184,7 +184,7 @@ class Orchestrator:
                 can_trade, reason = self._capital_manager.can_trade()
                 if not can_trade:
                     self.logger.warning("capital_management_halt", reason=reason)
-                    await send_alert(f"Capital management halt: {reason}", self.config)
+                    # Don't alert on capital management - only alert on actual trades
                     break
 
             # Dedup: skip if we already dispatched this exact signal

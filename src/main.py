@@ -175,10 +175,7 @@ async def run(
         engines=[e.name for e in engines],
         dry_run=dry_run,
     )
-    await send_alert(
-        f"Morpheus online — engines: {[e.name for e in engines]}, dry_run={dry_run}",
-        config,
-    )
+    # Only alert on actual trades, not on startup
 
     await orchestrator.start_engines()
     try:
