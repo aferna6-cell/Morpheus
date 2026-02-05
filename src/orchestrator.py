@@ -455,6 +455,12 @@ class Orchestrator:
                     market_data, sig_result, pos,
                 )
 
+                if kalshi_trade and kalshi_trade.was_successful and first_result is None:
+                    first_result = kalshi_trade
+
+            except Exception as exc:
+                self.logger.error("kalshi_dispatch_error", label=label, market_id=signal.market_id, error=str(exc))
+
         if kalshi_trade and kalshi_trade.was_successful:
             return kalshi_trade
 
