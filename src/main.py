@@ -60,7 +60,7 @@ async def run(
     logger.info("cost_tracker_init", **cost_tracker.get_summary())
 
     # Initialize trade logger
-    get_trade_logger(state_dir=str(state_path))
+    get_trade_logger(log_path=str(state_path / "trade_history.jsonl"))
 
     # ------------------------------------------------------------------
     # Kalshi engine setup
