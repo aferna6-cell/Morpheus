@@ -36,8 +36,8 @@ from .utils import BotConfig, utc_now
 # ---------------------------------------------------------------------------
 
 _URGENCY_BONUS: Dict[str, float] = {
-    "immediate": 1.0,
-    "normal": 0.3,
+    "immediate": 2.0,   # closing soon — highest priority
+    "normal": 0.5,
     "low": 0.0,
 }
 
@@ -305,11 +305,12 @@ class Orchestrator:
             # Multi-engine bonus stored by _apply_consensus
             multi_bonus = s.metadata.get("_multi_engine_bonus", 0.0)
 
+            # Urgency is the dominant factor — closing-soon markets first
             score = (
-                (s.confidence * 0.3)
-                + (max(s.edge, 0.0) * 0.3)
-                + (urgency_bonus * 0.2)
-                + (multi_bonus * 0.2)
+                (urgency_bonus * 0.40)
+                + (max(s.edge, 0.0) * 0.25)
+                + (s.confidence * 0.20)
+                + (multi_bonus * 0.15)
             )
             # Tie-break with engine priority
             score += engine_priority * 0.01

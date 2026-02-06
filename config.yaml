@@ -132,7 +132,7 @@ orchestrator:
   max_signals_per_cycle: 10         # more signals per cycle (was 5)
   multi_engine_boost: 1.0
   cycle_interval_seconds: 60
-  liquidate_on_startup: true        # NEW: sell all existing positions
+  liquidate_on_startup: false       # Only use for one-time manual cleanup
 
 # Kalshi — primary platform
 kalshi:

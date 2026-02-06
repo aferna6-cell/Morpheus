@@ -239,7 +239,13 @@ class KalshiLLMEngine(BaseEngine):
             filtered_by_sports=filter_stats["sports"],
         )
 
-        # Evaluate remaining markets with ensemble
+        # Sort by close time — soonest-closing markets get evaluated FIRST
+        # This ensures we spend LLM budget on the most time-sensitive opportunities
+        filtered_markets.sort(
+            key=lambda m: m.close_time or datetime.max.replace(tzinfo=timezone.utc),
+        )
+
+        # Evaluate remaining markets with ensemble (soonest-closing first)
         for km in filtered_markets:
             if km.yes_price <= 0 or km.yes_price >= 1:
                 continue
@@ -269,10 +275,14 @@ class KalshiLLMEngine(BaseEngine):
                 token_id = f"{km.ticker}:no"
                 side_str = "buy_no"
 
-            # Same-day markets get higher urgency
-            urgency = "normal"
-            if market.time_to_close_hours is not None and market.time_to_close_hours < 6:
-                urgency = "immediate"
+            # Markets closing sooner get highest priority
+            urgency = "low"
+            if market.time_to_close_hours is not None:
+                if market.time_to_close_hours < 3:
+                    urgency = "immediate"   # closing very soon — top priority
+                elif market.time_to_close_hours < 8:
+                    urgency = "normal"
+                # > 8h = "low"
 
             conviction = getattr(result, "conviction", "medium")
 

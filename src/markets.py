@@ -399,12 +399,14 @@ class MarketDiscovery:
             if market.spread is not None:
                 score *= 1.0 + (0.1 - market.spread) * 10  # Tighter spreads get bonus
 
-            # Penalty for markets closing very soon
+            # BONUS for markets closing soon — we want same-day, fast turnover
             if market.time_to_close_hours is not None:
-                if market.time_to_close_hours < 24:  # Less than 1 day
-                    score *= 0.5
-                elif market.time_to_close_hours < 72:  # Less than 3 days
-                    score *= 0.8
+                if market.time_to_close_hours < 3:
+                    score *= 2.0   # closing very soon — top priority
+                elif market.time_to_close_hours < 8:
+                    score *= 1.5   # closing today — high priority
+                elif market.time_to_close_hours < 24:
+                    score *= 1.2   # closing within a day
 
             return max(0.0, score)
 
