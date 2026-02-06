@@ -27,6 +27,7 @@ from .risk import RiskManager
 from .signals.base import SignalResult, TradingSide
 from .signals.llm_signal import ConvictionLevel, classify_conviction
 from .alerts import send_alert
+from .market_filters import MarketFilters
 from .utils import BotConfig, utc_now
 
 
@@ -85,6 +86,9 @@ class Orchestrator:
         self._dispatched: set = set()
 
         self._running = False
+
+        # Sports filter (defense in depth — catches signals from any engine)
+        self._market_filters = MarketFilters(config)
 
         # Capital management (recycling rules + CLV tracking)
         self._capital_manager: Optional[CapitalManager] = None
@@ -165,6 +169,33 @@ class Orchestrator:
             s for s in all_signals
             if (now - s.timestamp).total_seconds() <= self._signal_ttl
         ]
+
+        if not fresh:
+            return
+
+        # 2b. Sports filter (defense in depth for all engines)
+        filtered = []
+        for s in fresh:
+            meta = s.metadata or {}
+            title = meta.get("title", "") or meta.get("question", "")
+            category = meta.get("category", "")
+            if title or category:
+                result = self._market_filters.check_sports(
+                    market_id=s.market_id,
+                    title=title,
+                    category=category,
+                    is_live=False,
+                )
+                if not result.passed:
+                    self.logger.info(
+                        "orchestrator_sports_blocked",
+                        market_id=s.market_id,
+                        engine=s.engine,
+                        reason=result.reason,
+                    )
+                    continue
+            filtered.append(s)
+        fresh = filtered
 
         if not fresh:
             return

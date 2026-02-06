@@ -43,6 +43,7 @@ class _Tick:
 class _MarketState:
     ticker: str
     title: str
+    category: str
     volume: int
     yes_bid: float = 0.0
     yes_ask: float = 0.0
@@ -179,6 +180,7 @@ class KalshiMonitorEngine(BaseEngine):
                 self._markets[km.ticker] = _MarketState(
                     ticker=km.ticker,
                     title=km.title,
+                    category=km.category,
                     volume=km.volume,
                     yes_bid=km.yes_bid,
                     yes_ask=km.yes_ask,
@@ -329,6 +331,7 @@ class KalshiMonitorEngine(BaseEngine):
                 "yes_ask": state.yes_ask,
                 "volume": state.volume,
                 "title": state.title,
+                "category": state.category,
                 "kalshi_ticker": state.ticker,
             },
             timestamp=datetime.now(timezone.utc),

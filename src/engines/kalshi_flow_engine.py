@@ -154,6 +154,17 @@ class KalshiFlowEngine(BaseEngine):
             if not side:
                 continue
 
+            # Fetch market details for category/title (needed for sports filter)
+            market_title = ""
+            market_category = ""
+            try:
+                market_info = await self.kalshi_client.fetch_market(ticker)
+                if market_info:
+                    market_title = market_info.title
+                    market_category = market_info.category
+            except Exception:
+                pass
+
             # Confidence scales with trade size
             confidence = min(0.7, 0.4 + (count / 500.0) * 0.3)
             edge = 0.05  # meets min_edge threshold
@@ -173,6 +184,8 @@ class KalshiFlowEngine(BaseEngine):
                     "trade_count": count,
                     "trade_price": price,
                     "kalshi_ticker": ticker,
+                    "title": market_title,
+                    "category": market_category,
                 },
             )
 

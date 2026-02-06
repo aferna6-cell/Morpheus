@@ -129,6 +129,15 @@ class KalshiExecutor:
         total_fee = count * self._fee_per_contract
         total_cost = count * entry_cost + total_fee
 
+        # Fee-drag guard: reject if fees exceed 2x expected edge value
+        net_edge = getattr(signal, "net_edge", signal.edge)
+        expected_edge_value = count * entry_cost * abs(net_edge)
+        if expected_edge_value > 0 and total_fee > 2.0 * expected_edge_value:
+            return self._fail(
+                ticker, side, count, price_cents,
+                f"Fee drag too high: ${total_fee:.2f} fee vs ${expected_edge_value:.2f} edge",
+            )
+
         self.logger.info(
             "kalshi_execute",
             ticker=ticker,

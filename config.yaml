@@ -3,10 +3,10 @@
 # Sports: mostly killed (only live events with edge cases).
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_flow", "kalshi_monitor"]
+  enabled_strategies: ["kalshi_llm"]
   min_edge: 0.05                    # 5% minimum edge
   kelly_fraction: 0.25              # quarter-Kelly
-  max_position_pct: 0.01            # 1% of bankroll cap
+  max_position_pct: 0.05            # 5% of bankroll cap (fee drag fix)
   max_position_size: 10.0
   max_total_exposure: 30.0
   min_confidence: 0.5
@@ -18,13 +18,13 @@ strategy:
 
 # Strict market filters
 market_filters:
-  min_volume_24h: 50000             # $50k minimum volume
+  min_volume_24h: 5000              # $5k minimum volume
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 500
   min_liquidity_aggressive: 500
   max_spread_pct: 0.05              # 5% max bid-ask spread
-  min_data_sources: 3               # require 3+ independent sources
+  min_data_sources: 1               # require 1+ independent source
   exclude_closing_within_hours: 2
   max_markets_per_scan: 100
   max_resolution_days: 30           # <=30 days to resolution
@@ -92,7 +92,7 @@ llm:
   monthly_budget_usd: 100.0
   daily_budget_usd: 5.0
   require_data_sources: true
-  min_data_sources: 3
+  min_data_sources: 1
 
 news:
   sources:
@@ -116,7 +116,7 @@ risk:
   cooldown_minutes: 30
   prevent_retrade: true
   use_quarter_kelly: true
-  max_bankroll_pct: 0.01
+  max_bankroll_pct: 0.05
 
 timing:
   loop_interval_seconds: 60
@@ -144,9 +144,9 @@ orchestrator:
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
-  scan_interval_seconds: 600
+  scan_interval_seconds: 300
   fee_per_contract: 0.07
-  min_volume: 50000                 # $50k minimum
+  min_volume: 5000                  # $5k minimum
   max_position_contracts: 50
   categories:
     - "Politics"
