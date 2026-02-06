@@ -249,6 +249,60 @@ class BraveSearchSource:
         return now
 
 
+class GoogleNewsRSSSource:
+    """Google News RSS — free, no API key, reliable. Returns recent headlines."""
+
+    async def search(self, query: str, max_articles: int = 8) -> List[NewsArticle]:
+        try:
+            encoded = quote_plus(query)
+            url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                xml = resp.text
+
+            articles = []
+            # Parse RSS items with regex (avoid xml library dependency)
+            items = re.findall(r"<item>(.*?)</item>", xml, re.DOTALL)
+            for item_xml in items[:max_articles]:
+                title_m = re.search(r"<title>(.*?)</title>", item_xml, re.DOTALL)
+                link_m = re.search(r"<link>(.*?)</link>", item_xml, re.DOTALL)
+                pub_m = re.search(r"<pubDate>(.*?)</pubDate>", item_xml, re.DOTALL)
+                source_m = re.search(r"<source[^>]*>(.*?)</source>", item_xml, re.DOTALL)
+
+                title = title_m.group(1).strip() if title_m else ""
+                link = link_m.group(1).strip() if link_m else ""
+                source_name = source_m.group(1).strip() if source_m else "Google News"
+
+                published = datetime.now(timezone.utc)
+                if pub_m:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        published = parsedate_to_datetime(pub_m.group(1).strip()).replace(
+                            tzinfo=timezone.utc
+                        ) if parsedate_to_datetime(pub_m.group(1).strip()).tzinfo is None else parsedate_to_datetime(pub_m.group(1).strip())
+                    except Exception:
+                        pass
+
+                if title:
+                    articles.append(NewsArticle(
+                        title=title,
+                        summary=title,  # RSS titles are often descriptive
+                        url=link,
+                        published=published,
+                        source=f"Google News ({source_name})",
+                    ))
+
+            return articles
+        except Exception as e:
+            structlog.get_logger().warning("google_news_rss_error", error=str(e))
+            return []
+
+
 class DuckDuckGoSource:
     """DuckDuckGo HTML search — no API key needed, free fallback."""
 
@@ -318,7 +372,7 @@ class NewsAggregator:
         rate_limit_seconds = news_config.get("rate_limit_seconds", 1)
         self.rate_limiter = RateLimiter(60 // max(rate_limit_seconds, 1), 60.0)
 
-        # Initialize sources — Tavily > Brave > DuckDuckGo
+        # Initialize sources — Tavily > Brave > Google News RSS > DuckDuckGo
         self.sources = []
         tavily_key = os.getenv("TAVILY_API_KEY", "")
         brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
@@ -330,9 +384,9 @@ class NewsAggregator:
             self.sources.append(BraveSearchSource(brave_key))
             self.logger.info("news_source_init", source="brave_search")
         else:
+            self.sources.append(GoogleNewsRSSSource())
             self.sources.append(DuckDuckGoSource())
-            self.logger.info("news_source_init", source="duckduckgo_fallback",
-                             msg="Set TAVILY_API_KEY or BRAVE_SEARCH_API_KEY for better results")
+            self.logger.info("news_source_init", source="google_news_rss")
 
     async def get_market_news(self, market: Market) -> List[NewsArticle]:
         """Get news articles relevant to a market, including counterarguments."""
