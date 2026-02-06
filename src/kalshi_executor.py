@@ -22,7 +22,6 @@ from .kalshi_trading_client import KalshiTradingClient
 from .markets import Market
 from .risk import PositionSize, RiskManager
 from .signals.base import SignalResult, TradingSide
-from .signals.llm_signal import ConvictionLevel, classify_conviction
 from .trade_logger import get_trade_logger
 from .utils import BotConfig
 
@@ -162,8 +161,8 @@ class KalshiExecutor:
 
         if not result:
             # Log failed order
-            conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
-            conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
+            conviction = getattr(signal, "conviction", "medium")
+            conv_str = conviction.value if hasattr(conviction, "value") else str(conviction)
             trade_logger.log_order_failed(
                 platform="kalshi",
                 ticker=ticker,
@@ -194,8 +193,8 @@ class KalshiExecutor:
         executed_usd = executed_count * entry_cost
 
         # Log the order to trade history
-        conviction = getattr(signal, "conviction", ConvictionLevel.MEDIUM)
-        conv_str = conviction.value if isinstance(conviction, ConvictionLevel) else str(conviction)
+        conviction = getattr(signal, "conviction", "medium")
+        conv_str = conviction.value if hasattr(conviction, "value") else str(conviction)
         net_edge = getattr(signal, "net_edge", signal.edge)
 
         if is_success:
@@ -229,13 +228,15 @@ class KalshiExecutor:
                 account_label=self.trading_client.label,
             )
 
+        # FIXED: Don't pretend resting orders filled — track actual status
+        # Resting orders will be monitored by FillManager
         execution = KalshiTradeExecution(
             ticker=ticker,
             side=side,
             intended_contracts=count,
-            executed_contracts=executed_count if executed_count > 0 else count,
+            executed_contracts=executed_count,  # 0 if resting, count if executed
             price_cents=price_cents,
-            executed_amount_usd=executed_usd if executed_usd > 0 else count * entry_cost,
+            executed_amount_usd=executed_usd,   # 0 if resting
             average_price=entry_cost,
             order_id=str(order_id),
             was_successful=is_success,

@@ -21,11 +21,11 @@ import structlog
 from .capital_management import get_capital_manager, CapitalManager
 from .engines.base import BaseEngine
 from .engines.signals import TradeSignal
+from .fill_manager import FillManager
 from .kalshi_executor import KalshiExecutor, KalshiTradeExecution
 from .markets import Market
 from .risk import RiskManager
 from .signals.base import SignalResult, TradingSide
-from .signals.llm_signal import ConvictionLevel, classify_conviction
 from .alerts import send_alert
 from .market_filters import MarketFilters
 from .utils import BotConfig, utc_now
@@ -43,10 +43,11 @@ _URGENCY_BONUS: Dict[str, float] = {
 
 _ENGINE_PRIORITY: Dict[str, float] = {
     "kalshi_llm": 0.5,
+    "kalshi_mm": 0.4,
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm", "kalshi_flow", "kalshi_monitor"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm"}
 
 
 class Orchestrator:
@@ -59,11 +60,13 @@ class Orchestrator:
         risk_manager: RiskManager,
         kalshi_executors: Optional[List[KalshiExecutor]] = None,
         executor: Optional[object] = None,  # legacy compat, unused
+        fill_manager: Optional[FillManager] = None,
     ):
         self.config = config
         self.engines = engines
         self.risk_manager = risk_manager
         self.kalshi_executors = kalshi_executors or []
+        self.fill_manager = fill_manager
         self.logger = structlog.get_logger()
 
         orch_cfg = getattr(config, "orchestrator", None) or config.__dict__.get("orchestrator", {})
@@ -428,7 +431,7 @@ class Orchestrator:
             if estimated_prob == 0.5:
                 estimated_prob = trade_price
 
-        first_result: Optional[TradeExecution] = None
+        first_result: Optional[KalshiTradeExecution] = None
         kalshi_trade: Optional[KalshiTradeExecution] = None
 
         for executor in self.kalshi_executors:
@@ -450,10 +453,7 @@ class Orchestrator:
                     timestamp=signal.timestamp.isoformat(),
                 )
 
-                try:
-                    sig_result.conviction = ConvictionLevel(conviction_str)  # type: ignore[attr-defined]
-                except ValueError:
-                    sig_result.conviction = classify_conviction(net_edge)  # type: ignore[attr-defined]
+                sig_result.conviction = conviction_str  # type: ignore[attr-defined]
                 sig_result.net_edge = net_edge  # type: ignore[attr-defined]
 
                 sig_result.metadata = {  # type: ignore[attr-defined]
@@ -486,6 +486,20 @@ class Orchestrator:
                 kalshi_trade = await executor.execute_signal(
                     market_data, sig_result, pos,
                 )
+
+                # Register resting orders with fill manager for tracking
+                if kalshi_trade and kalshi_trade.was_successful and self.fill_manager:
+                    if kalshi_trade.order_id and kalshi_trade.executed_contracts == 0:
+                        # Resting order — needs fill tracking
+                        self.fill_manager.track_order(
+                            order_id=kalshi_trade.order_id,
+                            ticker=kalshi_trade.ticker,
+                            side=kalshi_trade.side,
+                            count=kalshi_trade.intended_contracts,
+                            price_cents=kalshi_trade.price_cents,
+                            account_label=label,
+                            strategy=signal.engine,
+                        )
 
                 if kalshi_trade and kalshi_trade.was_successful and first_result is None:
                     first_result = kalshi_trade

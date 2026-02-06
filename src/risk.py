@@ -1,9 +1,9 @@
-"""Risk management — disciplined mode.
+"""Risk management — tuned for $200 capital, same-day markets.
 
-Position sizing: min(bankroll * 0.01, bankroll * kelly * 0.25)
-- Quarter Kelly for conservative sizing
-- Hard cap at 1% of bankroll per trade
-- Minimum edge requirements
+Position sizing: bankroll * kelly * 0.33 (third-Kelly)
+- Hard cap at 5% of bankroll per trade ($10 on $200)
+- 3% minimum edge
+- No conviction gating
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import structlog
 
 from .markets import Market
 from .signals import SignalResult
-from .signals.llm_signal import ConvictionLevel
 from .utils import BotConfig, calculate_kelly_fraction, load_json_state, save_json_state
 
 
@@ -66,22 +65,22 @@ class RiskManager:
         self.logger = structlog.get_logger()
 
         risk_config = config.risk
-        self.max_loss_per_trade = risk_config.get("max_loss_per_trade", 5.0)
-        self.max_daily_loss = risk_config.get("max_daily_loss", 10.0)
-        self.stop_loss_pct = risk_config.get("stop_loss_pct", 0.25)
-        self.take_profit_pct = risk_config.get("take_profit_pct", 0.40)
-        self.max_position_hold_hours = risk_config.get("max_position_hold_hours", 168)
-        
-        # New: quarter-Kelly with bankroll cap
-        self.use_quarter_kelly = risk_config.get("use_quarter_kelly", True)
-        self.max_bankroll_pct = risk_config.get("max_bankroll_pct", 0.01)  # 1%
+        self.max_loss_per_trade = risk_config.get("max_loss_per_trade", 10.0)
+        self.max_daily_loss = risk_config.get("max_daily_loss", 20.0)
+        self.stop_loss_pct = risk_config.get("stop_loss_pct", 0.35)
+        self.take_profit_pct = risk_config.get("take_profit_pct", 0.30)
+        self.max_position_hold_hours = risk_config.get("max_position_hold_hours", 24)
+
+        # Third-Kelly with 5% bankroll cap
+        self.use_quarter_kelly = risk_config.get("use_quarter_kelly", False)
+        self.max_bankroll_pct = risk_config.get("max_bankroll_pct", 0.05)  # 5%
 
         strategy_config = config.strategy
-        self.kelly_fraction = strategy_config.get("kelly_fraction", 0.25)
-        self.max_position_size = strategy_config.get("max_position_size", 10.0)
-        self.max_total_exposure = strategy_config.get("max_total_exposure", 30.0)
-        self.min_edge = strategy_config.get("min_edge", 0.05)
-        self.min_conviction = strategy_config.get("min_conviction", "medium")
+        self.kelly_fraction = strategy_config.get("kelly_fraction", 0.33)
+        self.max_position_size = strategy_config.get("max_position_size", 15.0)
+        self.max_total_exposure = strategy_config.get("max_total_exposure", 80.0)
+        self.min_edge = strategy_config.get("min_edge", 0.03)
+        self.min_conviction = strategy_config.get("min_conviction", "low")
 
         # HIGH conviction multiplier (reduced from 2x to 1.5x)
         self.high_conviction_multiplier = float(
@@ -132,19 +131,16 @@ class RiskManager:
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, self.kelly_fraction)
                 
-                # NEW: Disciplined position sizing
-                # bet_size = min(bankroll * 0.01, bankroll * kelly * 0.25)
-                if self.use_quarter_kelly:
-                    kelly_bet = available_capital * kelly_f * 0.25  # quarter Kelly
-                    max_bet = available_capital * self.max_bankroll_pct  # 1% cap
-                    position_amount = min(kelly_bet, max_bet)
-                else:
-                    position_amount = available_capital * kelly_f
+                # Third-Kelly with bankroll cap
+                kelly_bet = available_capital * kelly_f * self.kelly_fraction
+                max_bet = available_capital * self.max_bankroll_pct
+                position_amount = min(kelly_bet, max_bet)
 
-            # Conviction adjustment (smaller multiplier now)
-            conviction = getattr(signal, "conviction", ConvictionLevel.NONE)
+            # Conviction-based max (string-based, not enum)
+            conviction = getattr(signal, "conviction", "low")
+            conv_str = conviction.value if hasattr(conviction, "value") else str(conviction).lower()
             effective_max = self.max_position_size
-            if conviction == ConvictionLevel.HIGH:
+            if conv_str == "high":
                 effective_max *= self.high_conviction_multiplier
 
             position_amount = min(
@@ -158,9 +154,7 @@ class RiskManager:
             remaining_exposure = self.max_total_exposure - current_exposure
             position_amount = min(position_amount, max(0, remaining_exposure))
 
-            # Confidence scaling (skip for forced-size signals)
-            if forced_size is None:
-                position_amount *= signal.confidence
+            # No confidence scaling — edge already accounts for uncertainty
 
             risk_level = self._assess_risk_level(
                 position_amount, available_capital, current_exposure, signal
@@ -170,10 +164,9 @@ class RiskManager:
 
             parts = [
                 f"Kelly={kelly_f:.3f}",
-                f"qKelly={kelly_f * 0.25:.4f}" if self.use_quarter_kelly else "",
                 f"edge={abs(signal.edge):.3f}",
                 f"conf={signal.confidence:.2f}",
-                f"conviction={conviction.value}",
+                f"conviction={conv_str}",
                 f"risk={risk_level.value}",
             ]
             parts = [p for p in parts if p]  # remove empty
@@ -185,8 +178,7 @@ class RiskManager:
                 market_id=market.id,
                 amount=position_amount,
                 kelly=kelly_f,
-                quarter_kelly=self.use_quarter_kelly,
-                conviction=conviction.value,
+                conviction=conv_str,
                 forced=forced_size is not None,
             )
 
@@ -224,31 +216,17 @@ class RiskManager:
                 )
                 return False
 
-        # Conviction gate — require minimum conviction level
-        conviction = getattr(signal, "conviction", ConvictionLevel.NONE)
-        conviction_order = {"none": 0, "low": 1, "medium": 2, "high": 3}
-        min_level = conviction_order.get(self.min_conviction.lower(), 2)
-        actual_level = conviction_order.get(conviction.value.lower() if hasattr(conviction, "value") else str(conviction).lower(), 0)
-        
-        if actual_level < min_level:
-            self.logger.debug(
-                "trade_rejected_low_conviction",
-                market_id=market.id,
-                conviction=conviction.value if hasattr(conviction, "value") else str(conviction),
-                min_conviction=self.min_conviction,
-            )
-            return False
+        # No conviction gating — all positive-edge trades approved
+        # No closing-soon rejection — we trade same-day markets
 
-        # Market closing too soon
-        if market.time_to_close_hours is not None and market.time_to_close_hours < 2:
-            self.logger.debug("trade_rejected_closing_soon", market_id=market.id)
-            return False
+        conviction = getattr(signal, "conviction", "low")
+        conv_str = conviction.value if hasattr(conviction, "value") else str(conviction).lower()
 
         self.logger.info(
             "trade_approved",
             market_id=market.id,
             amount=position_size.amount_usd,
-            conviction=conviction.value if hasattr(conviction, "value") else str(conviction),
+            conviction=conv_str,
         )
         return True
 

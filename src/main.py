@@ -80,11 +80,18 @@ async def run(
             from .kalshi_executor import KalshiExecutor
             from .engines.kalshi_llm_engine import KalshiLLMEngine
 
+            from .position_monitor import PositionMonitor
+            from .fill_manager import FillManager
+
             kalshi_read = KalshiReadClient(config)
+
+            # Trading clients for both accounts
+            trading_clients: list[KalshiTradingClient] = []
 
             # Primary Kalshi account
             kalshi_trading = KalshiTradingClient(config, dry_run=dry_run, label="kalshi_primary")
             await kalshi_trading.initialize()
+            trading_clients.append(kalshi_trading)
             kalshi_exec_primary = KalshiExecutor(
                 config=config,
                 trading_client=kalshi_trading,
@@ -102,6 +109,7 @@ async def run(
                     private_key_path=key_path_2,
                 )
                 await kalshi_trading_2.initialize()
+                trading_clients.append(kalshi_trading_2)
                 kalshi_exec_secondary = KalshiExecutor(
                     config=config,
                     trading_client=kalshi_trading_2,
@@ -110,6 +118,38 @@ async def run(
                 kalshi_executors.append(kalshi_exec_secondary)
                 logger.info("kalshi_secondary_account_initialized")
 
+            # Position monitor — enforce exits
+            position_monitor = PositionMonitor(
+                config=config,
+                trading_clients=trading_clients,
+                risk_manager=risk,
+            )
+
+            # Fill manager — track real fills
+            fill_manager = FillManager(
+                config=config,
+                trading_clients=trading_clients,
+            )
+
+            # Wire fill events to position tracking
+            def _on_fill(event):
+                position_monitor.track_position(
+                    ticker=event.ticker,
+                    side=event.side,
+                    count=event.filled_count,
+                    entry_price_cents=event.price_cents,
+                    strategy=event.strategy,
+                    order_id=event.order_id,
+                    account_label=event.account_label,
+                )
+            fill_manager.on_fill(_on_fill)
+
+            # Liquidate existing positions on startup if configured
+            orch_cfg = getattr(config, "orchestrator", {}) or {}
+            if isinstance(orch_cfg, dict) and orch_cfg.get("liquidate_on_startup", False):
+                logger.info("liquidating_all_positions_on_startup")
+                await position_monitor.liquidate_all()
+
             if not no_llm and "kalshi_llm" in enabled:
                 kalshi_engine = KalshiLLMEngine(
                     config=config,
@@ -117,8 +157,8 @@ async def run(
                     cost_tracker=cost_tracker,
                 )
 
-                # Balance gate — skip LLM calls when all accounts are unfunded
-                _kalshi_execs = list(kalshi_executors)  # capture for closure
+                # Balance gate
+                _kalshi_execs = list(kalshi_executors)
                 async def _total_kalshi_balance() -> float:
                     total = 0.0
                     for ex in _kalshi_execs:
@@ -132,25 +172,16 @@ async def run(
                 engines.append(kalshi_engine)
                 logger.info("kalshi_llm_engine_initialized", accounts=len(kalshi_executors))
 
-            # Kalshi flow engine — follow large trades on the tape (no LLM cost)
-            if "kalshi_flow" in enabled:
-                try:
-                    from .engines.kalshi_flow_engine import KalshiFlowEngine
-                    flow_engine = KalshiFlowEngine(config, kalshi_read)
-                    engines.append(flow_engine)
-                    logger.info("kalshi_flow_engine_initialized")
-                except Exception as exc:
-                    logger.warning("kalshi_flow_engine_init_failed", error=str(exc))
-
-            # Kalshi monitor engine — detect price spikes (no LLM cost)
-            if "kalshi_monitor" in enabled:
-                try:
-                    from .engines.kalshi_monitor_engine import KalshiMonitorEngine
-                    monitor_engine = KalshiMonitorEngine(config, kalshi_read)
-                    engines.append(monitor_engine)
-                    logger.info("kalshi_monitor_engine_initialized")
-                except Exception as exc:
-                    logger.warning("kalshi_monitor_engine_init_failed", error=str(exc))
+            # Market making engine (zero maker fees)
+            mm_cfg = getattr(config, "market_making", None) or {}
+            if isinstance(mm_cfg, dict) and mm_cfg.get("enabled", False):
+                from .engines.kalshi_mm_engine import KalshiMMEngine
+                mm_engine = KalshiMMEngine(
+                    config=config,
+                    kalshi_client=kalshi_read,
+                )
+                engines.append(mm_engine)
+                logger.info("kalshi_mm_engine_initialized")
 
             logger.info("kalshi_setup_complete", executors=len(kalshi_executors), engines=[e.name for e in engines])
         except Exception as exc:
@@ -168,19 +199,42 @@ async def run(
         risk_manager=risk,
         executor=None,
         kalshi_executors=kalshi_executors,
+        fill_manager=fill_manager if 'fill_manager' in dir() else None,
     )
 
     logger.info(
-        "orchestrator_mode",
+        "morpheus_v2_started",
         engines=[e.name for e in engines],
         dry_run=dry_run,
+        accounts=len(kalshi_executors),
     )
-    # Only alert on actual trades, not on startup
+    await send_alert(
+        f"Morpheus v2 started | Engines: {[e.name for e in engines]} | "
+        f"Accounts: {len(kalshi_executors)} | Dry run: {dry_run}",
+        config,
+    )
 
     await orchestrator.start_engines()
+
+    # Performance tracker — daily summaries and P&L alerts
+    from .perf_tracker import PerfTracker
+    perf_tracker = PerfTracker(config=config, state_dir=state_dir)
+
+    # Start background services
+    if 'position_monitor' in dir():
+        await position_monitor.start()
+    if 'fill_manager' in dir():
+        await fill_manager.start()
+    await perf_tracker.start()
+
     try:
         await orchestrator.run()
     finally:
+        await perf_tracker.stop()
+        if 'position_monitor' in dir():
+            await position_monitor.stop()
+        if 'fill_manager' in dir():
+            await fill_manager.stop()
         await orchestrator.stop_engines()
 
 

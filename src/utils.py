@@ -79,6 +79,12 @@ class BotConfig(BaseModel):
     # Orchestrator Configuration
     orchestrator: Dict[str, Any] = Field(default_factory=dict)
 
+    # Market Making
+    market_making: Dict[str, Any] = Field(default_factory=dict)
+
+    # Alerts (Telegram)
+    alerts: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,

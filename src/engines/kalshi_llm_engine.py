@@ -1,12 +1,12 @@
-"""Kalshi LLM engine — strict filtering, disciplined trading.
+"""Kalshi LLM engine — ensemble-powered, same-day focus.
 
 Applies:
-- Volume ≥ $50k
-- Spread ≤ 5%
-- Resolution ≤ 30 days
-- Sports blocking (no pre-match moneyline)
-- Data source requirements (≥3 independent sources)
-- Edge ≥ 5%
+- Volume ≥ $500
+- Spread ≤ 8%
+- Resolution ≤ 1 day (same-day markets)
+- Sports blocking
+- Edge ≥ 3%
+- Parallel Claude + GPT-4o ensemble
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ import structlog
 
 from ..cost_tracker import CostTracker
 from ..kalshi_client import KalshiClient, KalshiMarket
-from ..market_filters import MarketFilters, count_data_sources
+from ..market_filters import MarketFilters
 from ..markets import Market, TokenInfo
 from ..signals.base import TradingSide
-from ..signals.llm_signal import LLMSignal, ConvictionLevel
+from ..signals.ensemble_signal import EnsembleSignal
 from ..utils import BotConfig
 from .base import BaseEngine
 from .signals import TradeSignal
@@ -75,54 +75,44 @@ class KalshiLLMEngine(BaseEngine):
         # Market filters
         self._filters = MarketFilters(config)
 
-        # LLM signal
-        self._llm_signal = LLMSignal(config=config)
+        # Ensemble signal (replaces LLMSignal)
+        self._signal = EnsembleSignal(config=config)
         if cost_tracker:
-            self._llm_signal.set_cost_tracker(cost_tracker)
+            self._signal.set_cost_tracker(cost_tracker)
 
         # Kalshi config
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         if isinstance(kalshi_cfg, dict):
-            self._interval = float(kalshi_cfg.get("scan_interval_seconds", 600))
-            self._min_volume = int(kalshi_cfg.get("min_volume", 50000))
+            self._interval = float(kalshi_cfg.get("scan_interval_seconds", 300))
+            self._min_volume = int(kalshi_cfg.get("min_volume", 500))
             self._categories = kalshi_cfg.get("categories", [
                 "Politics", "Economics", "Elections", "Climate and Weather",
+                "Science and Technology", "Companies", "Financials",
             ])
-            self._fee_per_contract = float(kalshi_cfg.get("fee_per_contract", 0.07))
-            self._max_resolution_days = int(kalshi_cfg.get("max_resolution_days", 30))
-            self._max_spread_pct = float(kalshi_cfg.get("max_spread_pct", 0.05))
+            self._fee_per_contract = float(kalshi_cfg.get("fee_per_contract", 0.0))
+            self._max_resolution_days = int(kalshi_cfg.get("max_resolution_days", 1))
+            self._max_spread_pct = float(kalshi_cfg.get("max_spread_pct", 0.08))
         else:
-            self._interval = 600
-            self._min_volume = 50000
+            self._interval = 300
+            self._min_volume = 500
             self._categories = ["Politics", "Economics", "Elections"]
-            self._fee_per_contract = 0.07
-            self._max_resolution_days = 30
-            self._max_spread_pct = 0.05
+            self._fee_per_contract = 0.0
+            self._max_resolution_days = 1
+            self._max_spread_pct = 0.08
 
-        # Strategy config
+        # Strategy config — lowered thresholds
         strategy_cfg = getattr(config, "strategy", {}) or {}
         if isinstance(strategy_cfg, dict):
-            self._min_edge = float(strategy_cfg.get("min_edge", 0.05))
-            self._min_conviction = strategy_cfg.get("min_conviction", "medium")
+            self._min_edge = float(strategy_cfg.get("min_edge", 0.03))
         else:
-            self._min_edge = 0.05
-            self._min_conviction = "medium"
-
-        # LLM config for data sources
-        llm_cfg = getattr(config, "llm", {}) or {}
-        if isinstance(llm_cfg, dict):
-            self._require_data_sources = bool(llm_cfg.get("require_data_sources", True))
-            self._min_data_sources = int(llm_cfg.get("min_data_sources", 3))
-        else:
-            self._require_data_sources = True
-            self._min_data_sources = 3
+            self._min_edge = 0.03
 
         self._pending: List[TradeSignal] = []
         self._task: Optional[asyncio.Task] = None
 
-        # Balance gate — set by orchestrator/main to skip LLM calls when unfunded
-        self._min_trade_balance: float = 1.0  # minimum USD across all accounts
-        self._balance_checker = None  # async callable returning float
+        # Balance gate
+        self._min_trade_balance: float = 1.0
+        self._balance_checker = None
 
         # Stats
         self._markets_scanned = 0
@@ -138,7 +128,6 @@ class KalshiLLMEngine(BaseEngine):
             min_volume=self._min_volume,
             max_spread_pct=self._max_spread_pct,
             min_edge=self._min_edge,
-            min_data_sources=self._min_data_sources,
         )
 
     async def stop(self) -> None:
@@ -192,11 +181,10 @@ class KalshiLLMEngine(BaseEngine):
             except Exception as exc:
                 self.logger.warning("balance_check_failed", error=str(exc))
 
-        # Fetch markets — use lower volume threshold for initial fetch,
-        # we'll apply strict filters ourselves
+        # Fetch same-day markets
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=self._max_resolution_days,
-            min_volume=1000,  # low threshold, we filter strictly below
+            min_volume=100,  # low threshold, we filter below
         )
 
         self.logger.info("kalshi_llm_scan_raw", markets_fetched=len(kalshi_markets))
@@ -251,18 +239,18 @@ class KalshiLLMEngine(BaseEngine):
             filtered_by_sports=filter_stats["sports"],
         )
 
-        # Evaluate remaining markets with LLM
+        # Evaluate remaining markets with ensemble
         for km in filtered_markets:
             if km.yes_price <= 0 or km.yes_price >= 1:
                 continue
 
             market = _kalshi_to_market(km)
-            result = await self._llm_signal.evaluate(market)
+            result = await self._signal.evaluate(market)
 
             if result.recommended_side == TradingSide.HOLD:
                 continue
 
-            # Check edge threshold
+            # Check edge threshold (no conviction gating — all edges welcome)
             net_edge = getattr(result, "net_edge", result.edge)
             if abs(net_edge) < self._min_edge:
                 self.logger.debug(
@@ -273,37 +261,6 @@ class KalshiLLMEngine(BaseEngine):
                 )
                 continue
 
-            # Check conviction level
-            conviction = getattr(result, "conviction", ConvictionLevel.MEDIUM)
-            conviction_order = {"none": 0, "low": 1, "medium": 2, "high": 3}
-            min_conv_level = conviction_order.get(self._min_conviction.lower(), 2)
-            actual_conv_level = conviction_order.get(
-                conviction.value if hasattr(conviction, "value") else str(conviction).lower(),
-                0
-            )
-            if actual_conv_level < min_conv_level:
-                self.logger.debug(
-                    "kalshi_llm_skip_low_conviction",
-                    ticker=km.ticker,
-                    conviction=conviction,
-                    min_conviction=self._min_conviction,
-                )
-                continue
-
-            # Check data sources (from news in result metadata)
-            if self._require_data_sources:
-                metadata = getattr(result, "metadata", {}) or {}
-                news_articles = metadata.get("news_articles", [])
-                source_count = count_data_sources(news_articles)
-                if source_count < self._min_data_sources:
-                    self.logger.info(
-                        "kalshi_llm_skip_insufficient_sources",
-                        ticker=km.ticker,
-                        sources_found=source_count,
-                        min_required=self._min_data_sources,
-                    )
-                    continue
-
             # Build signal
             if result.recommended_side == TradingSide.BUY_YES:
                 token_id = km.ticker
@@ -312,6 +269,13 @@ class KalshiLLMEngine(BaseEngine):
                 token_id = f"{km.ticker}:no"
                 side_str = "buy_no"
 
+            # Same-day markets get higher urgency
+            urgency = "normal"
+            if market.time_to_close_hours is not None and market.time_to_close_hours < 6:
+                urgency = "immediate"
+
+            conviction = getattr(result, "conviction", "medium")
+
             signal = TradeSignal(
                 engine=self.name,
                 market_id=km.ticker,
@@ -319,13 +283,13 @@ class KalshiLLMEngine(BaseEngine):
                 side=side_str,
                 confidence=result.confidence,
                 edge=result.edge,
-                urgency="normal",
+                urgency=urgency,
                 metadata={
                     "platform": "kalshi",
                     "estimated_prob": result.estimated_prob,
                     "market_price": result.market_price,
                     "net_edge": net_edge,
-                    "conviction": conviction.value if hasattr(conviction, "value") else str(conviction),
+                    "conviction": conviction,
                     "reasoning": result.reasoning,
                     "kalshi_ticker": km.ticker,
                     "kalshi_yes_bid": km.yes_bid,
@@ -346,9 +310,10 @@ class KalshiLLMEngine(BaseEngine):
                 side=side_str,
                 edge=result.edge,
                 net_edge=net_edge,
-                conviction=conviction.value if hasattr(conviction, "value") else str(conviction),
+                conviction=conviction,
                 confidence=result.confidence,
+                urgency=urgency,
             )
 
         # Log periodic summary
-        self._llm_signal.log_periodic_summary()
+        self._signal.log_periodic_summary()

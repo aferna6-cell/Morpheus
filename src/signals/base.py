@@ -13,6 +13,8 @@ class TradingSide(Enum):
 
     BUY_YES = "buy_yes"
     BUY_NO = "buy_no"
+    SELL_YES = "sell_yes"
+    SELL_NO = "sell_no"
     HOLD = "hold"
 
 

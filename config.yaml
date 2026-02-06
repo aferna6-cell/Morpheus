@@ -1,41 +1,39 @@
-# Morpheus — Kalshi trading bot.
-# Strict filters: volume, spread, resolution, data sources.
-# Sports: mostly killed (only live events with edge cases).
+# Morpheus v2 — Kalshi trading bot
+# $200 capital (2 accounts × $100), same-day markets only
 
 strategy:
   enabled_strategies: ["kalshi_llm"]
-  min_edge: 0.05                    # 5% minimum edge
-  kelly_fraction: 0.25              # quarter-Kelly
-  max_position_pct: 0.05            # 5% of bankroll cap (fee drag fix)
-  max_position_size: 10.0
-  max_total_exposure: 30.0
-  min_confidence: 0.5
-  min_conviction: "medium"          # require medium+ conviction
+  min_edge: 0.03                    # 3% minimum edge (was 5%)
+  kelly_fraction: 0.33              # third-Kelly (was quarter)
+  max_position_pct: 0.05            # 5% of bankroll cap
+  max_position_size: 15.0           # $15 max (was $10)
+  max_total_exposure: 80.0          # $80 max exposure (was $30)
+  min_confidence: 0.3
+  min_conviction: "low"             # allow all positive-edge trades (was "medium")
   high_conviction_multiplier: 1.5
-  min_payout_ratio: 0.15
-  fee_pct: 0.00
+  min_payout_ratio: 0.12
+  fee_pct: 0.00                     # maker orders = free
   slippage_pct: 0.005
 
-# Strict market filters
+# Market filters — loosened for volume
 market_filters:
-  min_volume_24h: 5000              # $5k minimum volume
+  min_volume_24h: 500               # lowered from 5000
   min_price: 0.05
   max_price: 0.95
-  min_liquidity: 500
-  min_liquidity_aggressive: 500
-  max_spread_pct: 0.05              # 5% max bid-ask spread
-  min_data_sources: 1               # require 1+ independent source
-  exclude_closing_within_hours: 2
-  max_markets_per_scan: 100
-  max_resolution_days: 30           # <=30 days to resolution
+  min_liquidity: 200                # lowered
+  min_liquidity_aggressive: 200
+  max_spread_pct: 0.08              # relaxed from 5%
+  min_data_sources: 0               # no data source requirement
+  exclude_closing_within_hours: 0   # trade right up to close
+  max_markets_per_scan: 200
+  max_resolution_days: 1            # SAME DAY ONLY
   price_move_alert_pct: 0.05
-  max_per_correlation_cluster: 1
+  max_per_correlation_cluster: 2
   focus_enabled: false
-  # Capital recycling: disabled (was blocking trades with empty portfolio)
   max_14d_allocation_pct: 0.0
   max_7d_allocation_pct: 0.0
 
-# Sports market rules — block all sports
+# Sports — still blocked
 sports_filters:
   enabled: true
   blocked_categories:
@@ -62,35 +60,30 @@ sports_filters:
     - "Champion"
     - "MVP"
     - "Gold Medal"
-  allowed_live_only: true            # only trade live/in-play
-  allowed_patterns:                   # edge cases we might trade
+  allowed_live_only: true
+  allowed_patterns:
     - "red card"
     - "injury"
     - "ejection"
-    - "weather delay"
-    - "postponed"
 
-# LLM — strict, calibrated
+# LLM — ensemble mode
 llm:
   model: "gpt-4o"
+  ensemble_anthropic_model: "claude-sonnet-4-20250514"
   temperature: 0.1
   max_tokens: 1000
   timeout_seconds: 30
   screening_enabled: true
   screening_model: "gpt-4o-mini"
   cache_enabled: true
-  cache_ttl_minutes: 360
+  cache_ttl_minutes: 60             # shorter cache for same-day
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
-  calibration_shrink_strength: 0.15
-  consensus_enabled: true
-  consensus_provider: "anthropic"
-  consensus_model: "claude-haiku-4-5-20251001"
-  consensus_max_divergence: 0.12
-  consensus_min_edge: 0.07
-  monthly_budget_usd: 100.0
-  daily_budget_usd: 5.0
+  calibration_shrink_strength: 0.10  # mild shrinkage only (was 0.15)
+  consensus_enabled: false           # replaced by ensemble
+  monthly_budget_usd: 50.0
+  daily_budget_usd: 3.0
   require_data_sources: false
   min_data_sources: 0
 
@@ -99,29 +92,29 @@ news:
     - name: "google_news"
       url: "https://news.google.com/rss/search"
       enabled: true
-  max_articles_per_query: 8
-  article_age_hours: 48
+  max_articles_per_query: 5
+  article_age_hours: 24             # shorter for same-day
   rate_limit_seconds: 1
   fetch_full_articles: true
   max_article_chars: 1500
 
-# Risk — quarter-Kelly, 1% cap
+# Risk — tuned for $100/account
 risk:
-  max_loss_per_trade: 5.0
-  max_daily_loss: 10.0
-  stop_loss_pct: 0.25
-  take_profit_pct: 0.40
-  max_position_hold_hours: 168
-  position_check_interval_minutes: 30
-  cooldown_minutes: 30
+  max_loss_per_trade: 10.0          # $10 max loss per trade
+  max_daily_loss: 20.0              # $20 daily loss limit (10% of total)
+  stop_loss_pct: 0.35               # 35% stop loss (was 25%)
+  take_profit_pct: 0.30             # 30% take profit (was 40%)
+  max_position_hold_hours: 24       # same-day (was 168)
+  position_check_interval_minutes: 5
+  cooldown_minutes: 15              # shorter cooldown
   prevent_retrade: true
-  use_quarter_kelly: true
-  max_bankroll_pct: 0.05
+  use_quarter_kelly: false          # using third-Kelly now
+  max_bankroll_pct: 0.05            # 5% per trade
 
 timing:
   loop_interval_seconds: 60
-  market_scan_interval_minutes: 30
-  signal_refresh_interval_minutes: 60
+  market_scan_interval_minutes: 10  # more frequent (was 30)
+  signal_refresh_interval_minutes: 30
   portfolio_update_interval_minutes: 5
   rate_limit_per_minute: 30
   resolution_check_interval_minutes: 15
@@ -136,17 +129,18 @@ logging:
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 5
+  max_signals_per_cycle: 10         # more signals per cycle (was 5)
   multi_engine_boost: 1.0
   cycle_interval_seconds: 60
+  liquidate_on_startup: true        # NEW: sell all existing positions
 
 # Kalshi — primary platform
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
-  scan_interval_seconds: 300
-  fee_per_contract: 0.07
-  min_volume: 5000                  # $5k minimum
+  scan_interval_seconds: 300        # 5 min scans
+  fee_per_contract: 0.00            # maker = free
+  min_volume: 500                   # lowered from 5000
   max_position_contracts: 50
   categories:
     - "Politics"
@@ -156,36 +150,26 @@ kalshi:
     - "Science and Technology"
     - "Companies"
     - "Financials"
-  max_resolution_days: 30
-  max_spread_pct: 0.05
+  max_resolution_days: 1            # same-day only
+  max_spread_pct: 0.08
 
-# Kalshi flow engine — follow large trades on the public tape (no LLM cost)
-kalshi_flow:
+# Market Making — zero maker fees
+market_making:
   enabled: true
-  poll_interval_seconds: 30          # check trade tape every 30s
-  min_contracts: 50                  # only follow trades >= 50 contracts
-  min_volume: 10000                  # market must have $10k+ volume
-  cooldown_seconds: 300              # 5 min cooldown per ticker
-  lookback_seconds: 120              # look at trades from last 2 min
-  max_price: 0.90                    # skip near-certain markets
-  min_price: 0.10                    # skip near-zero markets
+  max_markets: 3                    # MM on up to 3 markets
+  min_volume: 5000                  # need liquidity for fills
+  min_spread_cents: 3               # 3c minimum spread to capture
+  max_spread_cents: 15              # avoid illiquid markets
+  quote_size: 3                     # 3 contracts per side
+  max_inventory: 15                 # max 15 contracts one-sided
+  max_inventory_usd: 50.0           # $50 max exposure per market
+  inventory_skew_cents: 2           # skew quotes 2c per inventory unit
+  quote_refresh_seconds: 60         # re-quote every minute
+  scan_interval_seconds: 300        # rescan markets every 5 min
+  min_price_cents: 15               # only MM in 15-85 range
+  max_price_cents: 85
 
-# Kalshi price monitor — detect price spikes (no LLM cost)
-kalshi_monitor:
-  enabled: true
-  poll_interval_seconds: 15          # poll orderbooks every 15s
-  market_refresh_seconds: 300        # refresh tracked market list every 5 min
-  min_volume: 20000                  # only monitor markets with $20k+ volume
-  max_tracked_markets: 50            # track top 50 markets by volume
-  cooldown_seconds: 120              # 2 min cooldown per market after signal
-  fast_spike_pct: 0.03              # 3% move in <30s
-  fast_spike_window_seconds: 30
-  medium_spike_pct: 0.05            # 5% move in <5 min
-  medium_spike_window_seconds: 300
-  large_spike_pct: 0.10             # 10% move in <30 min
-  large_spike_window_seconds: 1800
-
-# CLV tracking — non-negotiable
+# CLV tracking
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
@@ -195,10 +179,20 @@ clv_tracking:
   per_type_tracking: true
   per_type_halt_threshold: -0.01
 
-# BotConfig compatibility fields (unused but required by pydantic model)
+# Alerts — Telegram
+alerts:
+  telegram_enabled: true
+  alert_on_trade: true
+  alert_on_profit: true
+  alert_on_exit: true
+  alert_on_error: true
+  daily_summary: true
+  daily_summary_hour: 23            # 11 PM UTC
+
+# Compatibility
 bregman_arb: {}
 
 dev:
   dry_run: false
-  paper_trading_balance: 10000.0
+  paper_trading_balance: 200.0
   enable_debug_logs: false

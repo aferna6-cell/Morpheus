@@ -23,10 +23,12 @@ MODEL_COSTS: Dict[str, Dict[str, float]] = {
     "gpt-4-turbo-preview": {"input": 10.00, "output": 30.00},
     "gpt-4-turbo": {"input": 10.00, "output": 30.00},
     "o3": {"input": 10.00, "output": 40.00},
-    # Anthropic models (consensus)
+    # Anthropic models
     "claude-3-5-haiku-20241022": {"input": 0.25, "output": 1.25},
     "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
     "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
+    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
 }
 
 DEFAULT_COST = {"input": 5.00, "output": 15.00}  # fallback for unknown models

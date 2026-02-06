@@ -1,0 +1,812 @@
+"""Ensemble LLM probability estimation — Claude Sonnet + GPT-4o in parallel.
+
+Replaces the broken single-model approach (mushy-middle hack, abstention zone,
+conviction gating) with a clean parallel ensemble that averages two independent
+probability estimates.
+
+Key differences from llm_signal.py:
+- No mushy-middle calibration hack
+- No abstention zone (25-75% BUY_YES block removed)
+- No conviction gating (all positive-edge trades allowed)
+- Parallel calls to Claude + GPT-4o (not sequential consensus)
+- Lower min_edge: 3% instead of 5%
+- Mild shrinkage toward 0.5 only
+"""
+
+import asyncio
+import json
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
+import structlog
+from openai import AsyncOpenAI
+
+try:
+    from anthropic import AsyncAnthropic
+
+    _HAS_ANTHROPIC = True
+except ImportError:
+    _HAS_ANTHROPIC = False
+
+from pathlib import Path
+
+from ..cost_tracker import CostTracker
+from ..markets import Market
+from ..news import NewsAggregator
+from ..utils import BotConfig, RateLimiter
+from .base import Signal, SignalResult, TradingSide
+
+
+# ---------------------------------------------------------------------------
+# Base rate database (reuse from llm_signal)
+# ---------------------------------------------------------------------------
+
+_BASE_RATES: List[Dict[str, Any]] = []
+
+
+def _load_base_rates() -> List[Dict[str, Any]]:
+    global _BASE_RATES
+    if _BASE_RATES:
+        return _BASE_RATES
+    base_rates_path = Path(__file__).parent.parent / "base_rates.json"
+    if base_rates_path.exists():
+        try:
+            with open(base_rates_path) as f:
+                data = json.load(f)
+            _BASE_RATES = data.get("patterns", [])
+        except Exception:
+            _BASE_RATES = []
+    return _BASE_RATES
+
+
+def lookup_base_rate(question: str, description: str = "") -> Optional[Dict[str, Any]]:
+    rates = _load_base_rates()
+    text = f"{question} {description}".lower()
+    best_match = None
+    best_score = 0
+    for entry in rates:
+        keywords = entry.get("keywords", [])
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_match = entry
+    return best_match if best_score > 0 else None
+
+
+# ---------------------------------------------------------------------------
+# Market type detection (simplified — keep skips for truly random markets)
+# ---------------------------------------------------------------------------
+
+def detect_market_type(question: str) -> str:
+    """Classify market for skip/edge decisions."""
+    q = question.lower()
+
+    # Sports — LLM has no edge
+    sports_signals = [
+        "fantasy" in q,
+        " win " in q
+        and any(
+            w in q
+            for w in [
+                "nba", "nfl", "mlb", "nhl", "super bowl", "championship",
+                "finals", "world series", "premier league", "la liga",
+                "serie a", "bundesliga", "champions league",
+            ]
+        ),
+        any(
+            w in q
+            for w in [
+                "touchdown", "rushing", "quarterback", "points scored",
+                "goals scored", "hat trick",
+            ]
+        ),
+        " fc " in q or " cf " in q,
+        " vs " in q and ("draw" in q or "win" in q),
+        any(
+            w in q
+            for w in [
+                "premier league", "la liga", "serie a", "bundesliga",
+                "champions league", "europa league", "mls ", "ufc ",
+                "f1 ", "formula 1", "grand prix", "nascar",
+            ]
+        ),
+    ]
+    if any(sports_signals):
+        return "sports"
+
+    # Coin flips — truly random
+    coin_flip_signals = [
+        any(w in q for w in ["explode", "crash", "malfunction", "abort"])
+        and any(w in q for w in ["spacex", "starship", "rocket", "launch"]),
+        "coin flip" in q or "coin toss" in q,
+        "roulette" in q or "lottery" in q,
+    ]
+    if any(coin_flip_signals):
+        return "coin_flip"
+
+    # Price range — near-random for narrow ranges
+    if "price" in q and "between" in q:
+        return "price_range"
+
+    return "normal"
+
+
+# Markets to skip entirely
+_SKIP_TYPES = {"sports", "coin_flip"}
+
+# Min edge by market type
+_MIN_EDGE_BY_TYPE = {
+    "sports": 0.99,       # effectively skip
+    "coin_flip": 0.99,    # effectively skip
+    "price_range": 0.06,  # allow but require more edge
+    "normal": 0.03,       # default: 3%
+}
+
+
+# ---------------------------------------------------------------------------
+# Simple calibration — mild shrinkage only, NO mushy-middle hack
+# ---------------------------------------------------------------------------
+
+def calibrate_probability(
+    p: float,
+    *,
+    shrink_strength: float = 0.10,
+    floor: float = 0.05,
+    ceiling: float = 0.95,
+) -> float:
+    """Apply mild symmetric shrinkage toward 0.5.
+
+    No mushy-middle hack. No asymmetric boosts. Just shrinkage.
+    """
+    p = p * (1.0 - shrink_strength) + 0.5 * shrink_strength
+    p = max(floor, min(ceiling, p))
+    return round(p, 4)
+
+
+# ---------------------------------------------------------------------------
+# LLM response validation
+# ---------------------------------------------------------------------------
+
+def _validate_llm_response(data: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(data, dict):
+        return "response is not a dict"
+    p_yes = data.get("p_yes")
+    if p_yes is None:
+        return "missing p_yes"
+    if not isinstance(p_yes, (int, float)):
+        return f"p_yes is not a number: {type(p_yes)}"
+    if not (0.0 <= float(p_yes) <= 1.0):
+        return f"p_yes out of range: {p_yes}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Result cache
+# ---------------------------------------------------------------------------
+
+def _round_price(price: float, step: float = 0.02) -> float:
+    return round(round(price / step) * step, 4)
+
+
+def _cache_key(market_id: str, question: str, price: float) -> str:
+    return f"{market_id}:{question}:{_round_price(price)}"
+
+
+class _ResultCache:
+    def __init__(self, ttl_seconds: float = 1800.0, enabled: bool = True):
+        self.ttl = ttl_seconds
+        self.enabled = enabled
+        self._store: Dict[str, Tuple[float, SignalResult]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> Optional[SignalResult]:
+        if not self.enabled:
+            return None
+        entry = self._store.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        ts, result = entry
+        if time.monotonic() - ts > self.ttl:
+            del self._store[key]
+            self.misses += 1
+            return None
+        self.hits += 1
+        return result
+
+    def put(self, key: str, result: SignalResult) -> None:
+        if not self.enabled:
+            return
+        self._store[key] = (time.monotonic(), result)
+
+    def evict_expired(self) -> int:
+        now = time.monotonic()
+        expired = [k for k, (ts, _) in self._store.items() if now - ts > self.ttl]
+        for k in expired:
+            del self._store[k]
+        return len(expired)
+
+    def reset_stats(self) -> Tuple[int, int]:
+        h, m = self.hits, self.misses
+        self.hits = self.misses = 0
+        return h, m
+
+
+# ---------------------------------------------------------------------------
+# JSON extraction helper
+# ---------------------------------------------------------------------------
+
+def _extract_json_object(text: str) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "").strip()
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(cleaned)):
+        if cleaned[i] == "{":
+            depth += 1
+        elif cleaned[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return cleaned[start : i + 1]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Ensemble Signal
+# ---------------------------------------------------------------------------
+
+class EnsembleSignal(Signal):
+    """Parallel Claude + GPT-4o ensemble for probability estimation."""
+
+    def __init__(self, config: BotConfig):
+        super().__init__("Ensemble")
+        self.config = config
+        self.logger = structlog.get_logger()
+
+        # LLM configuration
+        llm_config = config.llm
+        self.openai_model = llm_config.get("model", "gpt-4o")
+        self.anthropic_model = llm_config.get("ensemble_anthropic_model", "claude-sonnet-4-20250514")
+        self.temperature = llm_config.get("temperature", 0.1)
+        self.max_tokens = llm_config.get("max_tokens", 1000)
+        self.timeout = llm_config.get("timeout_seconds", 30)
+
+        # Screening config
+        self.screening_enabled = llm_config.get("screening_enabled", True)
+        self.screening_model = llm_config.get("screening_model", "gpt-4o-mini")
+
+        # Clients
+        self.openai_client = AsyncOpenAI(timeout=self.timeout)
+        self._anthropic_client = None
+        if _HAS_ANTHROPIC:
+            try:
+                self._anthropic_client = AsyncAnthropic(timeout=self.timeout)
+            except Exception:
+                self.logger.warning("anthropic_client_init_failed")
+
+        # News aggregator
+        self.news_aggregator = NewsAggregator(config)
+
+        # Rate limiting
+        self.rate_limiter = RateLimiter(50, 60.0)
+
+        # Edge parameters
+        strategy = config.strategy
+        self.fee_pct = float(strategy.get("fee_pct", 0.0))
+        self.slippage_pct = float(strategy.get("slippage_pct", 0.005))
+
+        # Market quality
+        self.min_market_liquidity = float(
+            config.market_filters.get("min_liquidity_aggressive", 200.0)
+        )
+
+        # Cost tracking
+        self.cost_tracker: Optional[CostTracker] = None
+        self._monthly_budget = float(llm_config.get("monthly_budget_usd", 50.0))
+        self._daily_budget = float(llm_config.get("daily_budget_usd", 3.0))
+
+        # Cache
+        cache_ttl = float(llm_config.get("cache_ttl_minutes", 30)) * 60.0
+        cache_enabled = llm_config.get("cache_enabled", True)
+        self._cache = _ResultCache(ttl_seconds=cache_ttl, enabled=cache_enabled)
+
+        # Calibration
+        self.calibration_shrink = float(
+            llm_config.get("calibration_shrink_strength", 0.10)
+        )
+
+        # Stats
+        self._screened_total = 0
+        self._screened_passed = 0
+        self._cache_served = 0
+
+    def set_cost_tracker(self, tracker: CostTracker) -> None:
+        self.cost_tracker = tracker
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def evaluate(self, market: Market) -> SignalResult:
+        """Evaluate market using parallel ensemble of Claude + GPT-4o."""
+        try:
+            self.logger.info(
+                "ensemble_evaluate_start",
+                market_id=market.id,
+                question=market.question[:120],
+            )
+
+            # Budget check
+            if self.cost_tracker and not self.cost_tracker.check_budget():
+                return self._hold(market, "LLM budget exceeded")
+
+            # Market type skip
+            mtype = detect_market_type(market.question)
+            if mtype in _SKIP_TYPES:
+                return self._hold(market, f"Skipped market type '{mtype}'")
+
+            market_price = market.midpoint_price
+            if market_price is None:
+                return self._hold(market, "No market price available")
+
+            # Market quality gate
+            if market.liquidity < self.min_market_liquidity:
+                return self._hold(
+                    market,
+                    f"Liquidity ${market.liquidity:,.0f} < ${self.min_market_liquidity:,.0f}",
+                )
+
+            # Cache check
+            ck = _cache_key(market.id, market.question or "", market_price)
+            cached = self._cache.get(ck)
+            if cached is not None:
+                self._cache_served += 1
+                return cached
+
+            # Tier 1: screening
+            if self.screening_enabled:
+                self._screened_total += 1
+                passed = await self._screen_market(market, market_price)
+                if not passed:
+                    return self._hold(market, "Screened out by tier-1 model")
+                self._screened_passed += 1
+
+            # Get news context
+            news_articles = await self.news_aggregator.get_market_news(market)
+            news_context = self.news_aggregator.format_news_context(news_articles)
+
+            # Build prompt (same for both models)
+            prompt = self._build_prompt(market, news_context, market_price)
+            system = self._system_prompt()
+
+            # Call both models in parallel
+            openai_task = self._call_openai(system, prompt)
+            anthropic_task = self._call_anthropic(system, prompt)
+
+            results = await asyncio.gather(
+                openai_task, anthropic_task, return_exceptions=True
+            )
+
+            openai_result = results[0] if not isinstance(results[0], Exception) else None
+            anthropic_result = results[1] if not isinstance(results[1], Exception) else None
+
+            if isinstance(results[0], Exception):
+                self.logger.warning("openai_call_failed", error=str(results[0]))
+            if isinstance(results[1], Exception):
+                self.logger.warning("anthropic_call_failed", error=str(results[1]))
+
+            # Extract probabilities
+            p_values = []
+            model_details = {}
+
+            if openai_result and _validate_llm_response(openai_result) is None:
+                p_openai = float(openai_result["p_yes"])
+                p_openai = max(0.001, min(0.999, p_openai))
+                p_values.append(p_openai)
+                model_details["openai_p_yes"] = p_openai
+
+            if anthropic_result and _validate_llm_response(anthropic_result) is None:
+                p_anthropic = float(anthropic_result["p_yes"])
+                p_anthropic = max(0.001, min(0.999, p_anthropic))
+                p_values.append(p_anthropic)
+                model_details["anthropic_p_yes"] = p_anthropic
+
+            if not p_values:
+                return self._hold(market, "Both LLM calls failed")
+
+            # Average probabilities
+            p_yes_raw = sum(p_values) / len(p_values)
+
+            # Mild calibration — shrinkage only, no mushy-middle hack
+            p_yes = calibrate_probability(
+                p_yes_raw,
+                shrink_strength=self.calibration_shrink,
+            )
+
+            self.logger.info(
+                "ensemble_probabilities",
+                market_id=market.id,
+                **model_details,
+                raw_avg=round(p_yes_raw, 4),
+                calibrated=p_yes,
+                models_used=len(p_values),
+            )
+
+            # Get metadata from whichever response succeeded
+            primary = openai_result or anthropic_result or {}
+            uncertainty = primary.get("uncertainty", "medium")
+            key_facts = primary.get("key_facts", [])
+            disqualifiers = primary.get("disqualifiers", [])
+            rationale = primary.get("rationale", "")
+
+            # Disqualifiers
+            if disqualifiers:
+                result = self._hold(
+                    market,
+                    f"Disqualifiers: {'; '.join(disqualifiers)}",
+                )
+                self._cache.put(ck, result)
+                return result
+
+            # Compute edge
+            raw_edge = p_yes - market_price
+            net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+
+            # Category min edge
+            min_edge = _MIN_EDGE_BY_TYPE.get(mtype, 0.03)
+            if net_edge < min_edge:
+                result = self._hold(
+                    market,
+                    f"Net edge {net_edge:.3f} < min {min_edge:.3f} (type={mtype})",
+                )
+                self._cache.put(ck, result)
+                return result
+
+            # Determine side — NO abstention zone, just edge-based
+            if raw_edge > 0 and net_edge > 0:
+                side = TradingSide.BUY_YES
+            elif raw_edge < 0 and net_edge > 0:
+                side = TradingSide.BUY_NO
+            else:
+                side = TradingSide.HOLD
+
+            # Payout ratio filter — don't buy $0.95 contracts to win $0.05
+            if side != TradingSide.HOLD:
+                entry_cost = market_price if side == TradingSide.BUY_YES else (1.0 - market_price)
+                payout_ratio = (1.0 - entry_cost) / entry_cost if entry_cost > 0 else 0
+                if payout_ratio < 0.12:
+                    side = TradingSide.HOLD
+                    self.logger.debug(
+                        "payout_ratio_reject",
+                        market_id=market.id,
+                        payout_ratio=f"{payout_ratio:.3f}",
+                    )
+
+            # Confidence from uncertainty
+            confidence_map = {"low": 0.9, "medium": 0.75, "high": 0.55}
+            confidence = confidence_map.get(uncertainty, 0.75)
+
+            # Boost confidence when both models agree closely
+            if len(p_values) == 2:
+                divergence = abs(p_values[0] - p_values[1])
+                if divergence < 0.05:
+                    confidence = min(1.0, confidence + 0.10)
+                elif divergence > 0.15:
+                    confidence = max(0.3, confidence - 0.15)
+
+            reasoning = (
+                f"{rationale} | "
+                f"p_yes={p_yes:.3f} mkt={market_price:.3f} "
+                f"raw_edge={raw_edge:+.3f} net_edge={net_edge:+.3f} "
+                f"models={len(p_values)} uncertainty={uncertainty}"
+            )
+            if key_facts:
+                reasoning += f" | facts: {'; '.join(key_facts[:3])}"
+
+            result = SignalResult(
+                estimated_prob=p_yes,
+                confidence=confidence,
+                edge=raw_edge,
+                recommended_side=side,
+                reasoning=reasoning,
+                signal_name=self.name,
+                market_price=market_price,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            # Attach extras for downstream
+            result.net_edge = net_edge  # type: ignore[attr-defined]
+            result.conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"  # type: ignore[attr-defined]
+
+            self.logger.info(
+                "ensemble_signal",
+                market_id=market.id,
+                p_yes=p_yes,
+                market_price=market_price,
+                raw_edge=raw_edge,
+                net_edge=net_edge,
+                side=side.value,
+                confidence=confidence,
+                models_used=len(p_values),
+            )
+
+            self._cache.put(ck, result)
+            return result
+
+        except Exception as e:
+            self.logger.error("ensemble_evaluate_error", market_id=market.id, error=str(e))
+            return self._hold(market, f"Error: {e}")
+
+    def log_periodic_summary(self) -> None:
+        cache_hits, cache_misses = self._cache.reset_stats()
+        self.logger.info(
+            "ensemble_cost_summary",
+            screened_total=self._screened_total,
+            screened_passed=self._screened_passed,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
+            cache_served=self._cache_served,
+        )
+        self._screened_total = 0
+        self._screened_passed = 0
+        self._cache_served = 0
+        self._cache.evict_expired()
+
+    # ------------------------------------------------------------------
+    # Screening (tier 1 — cheap model)
+    # ------------------------------------------------------------------
+
+    async def _screen_market(self, market: Market, market_price: float) -> bool:
+        end_date_str = "Unknown"
+        if market.end_date:
+            end_date_str = market.end_date.strftime("%Y-%m-%d")
+
+        prompt = (
+            f"Q: {market.question}\n"
+            f"Current price: {market_price:.0%} YES\n"
+            f"Ends: {end_date_str} | Volume: ${market.volume_24h:,.0f}\n\n"
+            "Is this market likely mispriced by >3%? "
+            'Reply JSON: {{"worth_evaluating": true/false, "reason": "..."}}'
+        )
+
+        try:
+            await self.rate_limiter.acquire()
+            response = await self.openai_client.chat.completions.create(
+                model=self.screening_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You screen prediction markets for mispricing opportunities. "
+                            "Output ONLY valid JSON. Be aggressive — look for edge."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=100,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    self.screening_model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return True
+            data = json.loads(content)
+            return bool(data.get("worth_evaluating", True))
+
+        except Exception as e:
+            self.logger.warning("screening_error", error=str(e))
+            return True  # fail open
+
+    # ------------------------------------------------------------------
+    # LLM calls
+    # ------------------------------------------------------------------
+
+    async def _call_openai(self, system: str, prompt: str) -> Optional[Dict[str, Any]]:
+        try:
+            await self.rate_limiter.acquire()
+            response = await self.openai_client.chat.completions.create(
+                model=self.openai_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    self.openai_model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return None
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(content)
+                return json.loads(extracted) if extracted else None
+
+        except Exception as e:
+            self.logger.error("openai_call_error", error=str(e))
+            return None
+
+    async def _call_anthropic(self, system: str, prompt: str) -> Optional[Dict[str, Any]]:
+        if not self._anthropic_client:
+            return None
+        try:
+            response = await self._anthropic_client.messages.create(
+                model=self.anthropic_model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            content = response.content[0].text if response.content else None
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    self.anthropic_model,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                )
+
+            if not content:
+                return None
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(content)
+                return json.loads(extracted) if extracted else None
+
+        except Exception as e:
+            self.logger.warning("anthropic_call_error", error=str(e))
+            return None
+
+    # ------------------------------------------------------------------
+    # Prompt
+    # ------------------------------------------------------------------
+
+    def _build_prompt(self, market: Market, news_context: str, market_price: float) -> str:
+        end_date_str = "Unknown"
+        time_remaining = "Unknown"
+
+        if market.end_date:
+            end_date_str = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
+            now = datetime.now(timezone.utc)
+            delta = market.end_date - now
+            days = delta.days
+            hours = delta.seconds // 3600
+            minutes = (delta.seconds % 3600) // 60
+            if days > 0:
+                time_remaining = f"{days}d {hours}h"
+            elif hours > 0:
+                time_remaining = f"{hours}h {minutes}m"
+            else:
+                time_remaining = f"{minutes}m"
+
+        # Base rate lookup
+        base_rate_entry = lookup_base_rate(market.question, market.description)
+        base_rate_context = ""
+        if base_rate_entry:
+            base_rate_context = (
+                f"\nEMPIRICAL BASE RATE DATA (use as starting anchor):\n"
+                f"  Base rate: {base_rate_entry['base_rate']:.0%}\n"
+                f"  Reference class: {base_rate_entry['reference_class']}\n"
+                f"  Source: {base_rate_entry['source']}\n"
+            )
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        return f"""
+You are a superforecaster estimating the TRUE probability of YES for this prediction market.
+
+Current date/time: {today}
+
+Question: {market.question}
+Description: {market.description}
+Category: {market.category}
+End date: {end_date_str} ({time_remaining} remaining)
+Current market price: {market_price:.0%} YES
+24h volume: ${market.volume_24h:,.0f}
+Liquidity: ${market.liquidity:,.0f}
+{base_rate_context}
+{news_context}
+
+Follow this structured forecasting methodology:
+
+STEP 1 — BASE RATE (Reference Class Forecasting):
+{"Use the EMPIRICAL BASE RATE DATA above as your starting point." if base_rate_entry else "Identify the most relevant reference class. What is the historical base rate?"} Start your estimate here.
+
+STEP 2 — EVIDENCE ADJUSTMENT:
+List specific evidence that moves probability UP or DOWN from base rate.
+Be explicit: "+5% because polling shows…", "-10% because timeline…".
+
+STEP 3 — DECOMPOSITION:
+If the event depends on multiple factors, decompose:
+P(event) = P(factor_A) × P(factor_B | factor_A) × …
+
+STEP 4 — MARKET PRICE CHECK:
+The market currently prices this at {market_price:.0%}. Consider why the market might
+be right or wrong. Is there information the market is missing? Or are you missing
+something the market knows?
+
+STEP 5 — FINAL ESTIMATE:
+Combine everything into your final p_yes.
+
+Output STRICT JSON (no commentary outside JSON):
+{{
+  "p_yes": <float 0.0-1.0>,
+  "base_rate": <float>,
+  "base_rate_reference_class": "description",
+  "adjustments": ["+0.05: reason", "-0.03: reason"],
+  "key_facts": ["fact1", "fact2"],
+  "uncertainty": "low" | "medium" | "high",
+  "disqualifiers": [],
+  "rationale": "one-paragraph final reasoning"
+}}
+
+Rules:
+- p_yes is your best point estimate of P(YES)
+- uncertainty: low = strong evidence, high = guessing
+- disqualifiers: reasons NOT to trade (ambiguous resolution, etc). Empty if tradeable.
+- Avoid round numbers (0.50, 0.70) — real probabilities are rarely round.
+- Consider the current date when assessing time-sensitive information.
+""".strip()
+
+    def _system_prompt(self) -> str:
+        return (
+            "You are an elite superforecaster for prediction markets, trained in "
+            "Philip Tetlock's Good Judgment methodology. "
+            "You output ONLY valid JSON matching the requested schema. "
+            "Start with base rates from the most relevant reference class, "
+            "then adjust based on specific evidence. Decompose complex events. "
+            "You are aggressive about finding mispriced markets — look for edge. "
+            "Do not hedge; give your best point estimate. "
+            "Avoid round numbers. Consider base rates, news, time remaining, "
+            "and information quality."
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _hold(self, market: Market, reason: str) -> SignalResult:
+        mp = market.midpoint_price or 0.5
+        self.logger.debug(
+            "ensemble_hold",
+            market_id=market.id,
+            reason=reason[:120],
+        )
+        result = SignalResult(
+            estimated_prob=mp,
+            confidence=0.0,
+            edge=0.0,
+            recommended_side=TradingSide.HOLD,
+            reasoning=reason,
+            signal_name=self.name,
+            market_price=mp,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        result.net_edge = 0.0  # type: ignore[attr-defined]
+        result.conviction = "none"  # type: ignore[attr-defined]
+        return result
