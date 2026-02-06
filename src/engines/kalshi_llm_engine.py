@@ -255,12 +255,12 @@ class KalshiLLMEngine(BaseEngine):
 
         # Evaluate remaining markets with ensemble (soonest-closing first)
         cooldown_skipped = 0
+        now_ts = time.monotonic()
         for km in filtered_markets:
             if km.yes_price <= 0 or km.yes_price >= 1:
                 continue
 
             # Scan cooldown: skip recently evaluated markets unless price moved
-            now_ts = time.monotonic()
             prev = self._recently_evaluated.get(km.ticker)
             if prev is not None:
                 prev_ts, prev_price = prev
