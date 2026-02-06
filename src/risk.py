@@ -87,6 +87,15 @@ class RiskManager:
             strategy_config.get("high_conviction_multiplier", 1.5)
         )
 
+        # Per-strategy position limits
+        contrarian_cfg = getattr(config, "contrarian", None) or {}
+        if isinstance(contrarian_cfg, dict):
+            self._contrarian_max_position = float(contrarian_cfg.get("max_position_size", 25.0))
+            self._contrarian_max_exposure = float(contrarian_cfg.get("max_total_exposure", 100.0))
+        else:
+            self._contrarian_max_position = 25.0
+            self._contrarian_max_exposure = 100.0
+
         from pathlib import Path
         self.state_file = str(Path(self.state_dir) / "risk_state.json")
         self.daily_pnl = 0.0
@@ -139,7 +148,14 @@ class RiskManager:
             # Conviction-based max (string-based, not enum)
             conviction = getattr(signal, "conviction", "low")
             conv_str = conviction.value if hasattr(conviction, "value") else str(conviction).lower()
-            effective_max = self.max_position_size
+
+            # Per-strategy position limits
+            meta = getattr(signal, "metadata", None) or {}
+            strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
+            if strategy == "contrarian":
+                effective_max = self._contrarian_max_position
+            else:
+                effective_max = self.max_position_size
             if conv_str == "high":
                 effective_max *= self.high_conviction_multiplier
 
@@ -228,6 +244,35 @@ class RiskManager:
             amount=position_size.amount_usd,
             conviction=conv_str,
         )
+        return True
+
+    @staticmethod
+    def extract_event_prefix(ticker: str) -> str:
+        """Extract event prefix from ticker for correlation checking."""
+        import re
+        match = re.match(r'^(.+?-\d+[A-Z]*\d*)-T[\d.]+$', ticker)
+        if match:
+            return match.group(1)
+        return ticker
+
+    def check_event_correlation(
+        self, market_id: str, current_positions: Dict[str, float], max_event_exposure: float = 30.0
+    ) -> bool:
+        """Check if adding a position would exceed per-event exposure limits."""
+        event_prefix = self.extract_event_prefix(market_id)
+        event_exposure = sum(
+            exp for ticker, exp in current_positions.items()
+            if self.extract_event_prefix(ticker) == event_prefix
+        )
+        if event_exposure >= max_event_exposure:
+            self.logger.info(
+                "event_correlation_block",
+                market_id=market_id,
+                event_prefix=event_prefix,
+                event_exposure=event_exposure,
+                max_event_exposure=max_event_exposure,
+            )
+            return False
         return True
 
     def update_daily_pnl(self, pnl_change: float) -> None:

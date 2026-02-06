@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 
 import structlog
 
@@ -114,10 +115,17 @@ class KalshiLLMEngine(BaseEngine):
         self._min_trade_balance: float = 1.0
         self._balance_checker = None
 
+        # Scan cooldown: skip recently evaluated markets (save LLM budget)
+        import time as _time
+        self._recently_evaluated: Dict[str, Tuple[float, float]] = {}  # ticker -> (timestamp, price_at_eval)
+        self._eval_cooldown_seconds: float = 1800.0  # 30 minutes
+        self._price_change_threshold: float = 0.05   # re-evaluate if price moved 5%+
+
         # Stats
         self._markets_scanned = 0
         self._markets_filtered = 0
         self._signals_generated = 0
+        self._markets_cooldown_skipped = 0
 
     async def start(self) -> None:
         await self.kalshi_client.start()
@@ -246,12 +254,27 @@ class KalshiLLMEngine(BaseEngine):
         )
 
         # Evaluate remaining markets with ensemble (soonest-closing first)
+        cooldown_skipped = 0
         for km in filtered_markets:
             if km.yes_price <= 0 or km.yes_price >= 1:
                 continue
 
+            # Scan cooldown: skip recently evaluated markets unless price moved
+            now_ts = time.monotonic()
+            prev = self._recently_evaluated.get(km.ticker)
+            if prev is not None:
+                prev_ts, prev_price = prev
+                elapsed = now_ts - prev_ts
+                price_moved = abs(km.yes_price - prev_price)
+                if elapsed < self._eval_cooldown_seconds and price_moved < self._price_change_threshold:
+                    cooldown_skipped += 1
+                    continue
+
             market = _kalshi_to_market(km)
             result = await self._signal.evaluate(market)
+
+            # Record evaluation timestamp and price
+            self._recently_evaluated[km.ticker] = (now_ts, km.yes_price)
 
             if result.recommended_side == TradingSide.HOLD:
                 continue
@@ -324,6 +347,20 @@ class KalshiLLMEngine(BaseEngine):
                 confidence=result.confidence,
                 urgency=urgency,
             )
+
+        if cooldown_skipped:
+            self._markets_cooldown_skipped += cooldown_skipped
+            self.logger.info(
+                "kalshi_llm_cooldown_skipped",
+                skipped=cooldown_skipped,
+                total_skipped=self._markets_cooldown_skipped,
+            )
+
+        # Clean up old cooldown entries (>2x cooldown period)
+        stale_cutoff = now_ts - (self._eval_cooldown_seconds * 2)
+        stale_keys = [k for k, (ts, _) in self._recently_evaluated.items() if ts < stale_cutoff]
+        for k in stale_keys:
+            del self._recently_evaluated[k]
 
         # Log periodic summary
         self._signal.log_periodic_summary()

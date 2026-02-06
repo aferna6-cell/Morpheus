@@ -42,12 +42,30 @@ _URGENCY_BONUS: Dict[str, float] = {
 }
 
 _ENGINE_PRIORITY: Dict[str, float] = {
+    "kalshi_contrarian": 0.6,  # contrarian gets highest priority
     "kalshi_llm": 0.5,
     "kalshi_mm": 0.4,
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian"}
+
+
+def _extract_event_prefix(ticker: str) -> str:
+    """Extract event prefix from a Kalshi ticker for correlation grouping.
+
+    Examples:
+        KXBTC-25FEB07-T65749 -> KXBTC-25FEB07
+        KXETHD-26FEB0617-T1699.99 -> KXETHD-26FEB0617
+        INX-25FEB07-T5999.99 -> INX-25FEB07
+        PRES-2028-DEM -> PRES-2028-DEM (no threshold suffix)
+    """
+    import re
+    # Match ticker-date-Tvalue pattern (threshold markets)
+    match = re.match(r'^(.+?-\d+[A-Z]*\d*)-T[\d.]+$', ticker)
+    if match:
+        return match.group(1)
+    return ticker
 
 
 class Orchestrator:
@@ -87,6 +105,14 @@ class Orchestrator:
         # Dedup: track (market_id, side, engine) combos already dispatched
         # Prevents the same arb opportunity from being re-traded every scan cycle
         self._dispatched: set = set()
+
+        # Event-level dedup: track (event_prefix, side) to prevent correlated trades
+        # e.g., buying NO on 5 different BTC threshold tickers simultaneously
+        self._event_dispatched: Dict[str, int] = {}  # event_prefix -> count
+        self._max_per_event = int(
+            getattr(config, "market_filters", {}).get("max_per_correlation_cluster", 2)
+            if isinstance(getattr(config, "market_filters", None), dict) else 2
+        )
 
         self._running = False
 
@@ -232,11 +258,27 @@ class Orchestrator:
                 )
                 continue
 
+            # Event-level dedup: prevent correlated trades
+            # (e.g., NO on 5 different BTC threshold tickers)
+            event_prefix = _extract_event_prefix(signal.market_id)
+            event_count = self._event_dispatched.get(event_prefix, 0)
+            if event_count >= self._max_per_event:
+                self.logger.info(
+                    "dispatch_event_dedup_skip",
+                    market_id=signal.market_id,
+                    event_prefix=event_prefix,
+                    event_count=event_count,
+                    max_per_event=self._max_per_event,
+                )
+                continue
+
             try:
                 trade = await self._dispatch(signal)
                 if trade and trade.was_successful:
                     executed += 1
                     self._dispatched.add(dedup_key)
+                    # Track event-level for correlation limiting
+                    self._event_dispatched[event_prefix] = self._event_dispatched.get(event_prefix, 0) + 1
 
                     # Register position with capital manager for recycling/CLV tracking
                     if self._capital_manager:
@@ -314,6 +356,15 @@ class Orchestrator:
             )
             # Tie-break with engine priority
             score += engine_priority * 0.01
+
+            # Contrarian boost: high-conviction contrarian signals get a bonus
+            if s.metadata.get("strategy") == "contrarian":
+                conv = s.metadata.get("conviction", "low")
+                if conv == "high" and abs(s.edge) >= 0.10:
+                    score += 0.30
+                elif conv == "medium":
+                    score += 0.10
+
             return score
 
         return sorted(signals, key=_score, reverse=True)
@@ -460,6 +511,7 @@ class Orchestrator:
                 sig_result.metadata = {  # type: ignore[attr-defined]
                     "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
                     "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
+                    "strategy": signal.metadata.get("strategy", "standard"),
                 }
 
                 # Each account sizes independently based on its own balance
@@ -472,6 +524,11 @@ class Orchestrator:
                         exposure[p.ticker] = p.market_exposure
                 except Exception:
                     pass
+
+                # Correlation guard: block if too much exposure on same event
+                if not self.risk_manager.check_event_correlation(signal.market_id, exposure):
+                    self.logger.debug("kalshi_dispatch_correlation_block", label=label, market_id=signal.market_id)
+                    continue
 
                 pos = self.risk_manager.calculate_position_size(
                     signal=sig_result,

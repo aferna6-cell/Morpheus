@@ -125,6 +125,11 @@ class KalshiExecutor:
         raw_count = math.floor(position_size.amount_usd / entry_cost)
         count = min(max(raw_count, 1), self._max_contracts)
 
+        # Dollar-cost guard: ensure actual cost doesn't exceed approved position size
+        actual_cost = count * entry_cost
+        if actual_cost > position_size.amount_usd * 1.1 and count > 1:
+            count = max(1, math.floor(position_size.amount_usd / entry_cost))
+
         total_fee = count * self._fee_per_contract
         total_cost = count * entry_cost + total_fee
 

@@ -172,6 +172,19 @@ async def run(
                 engines.append(kalshi_engine)
                 logger.info("kalshi_llm_engine_initialized", accounts=len(kalshi_executors))
 
+            # Contrarian engine (bet against overconfident crowds)
+            contrarian_cfg = getattr(config, "contrarian", None) or {}
+            if isinstance(contrarian_cfg, dict) and contrarian_cfg.get("enabled", False):
+                if "kalshi_contrarian" in enabled:
+                    from .engines.kalshi_contrarian_engine import KalshiContrarianEngine
+                    contrarian_engine = KalshiContrarianEngine(
+                        config=config,
+                        kalshi_client=kalshi_read,
+                        cost_tracker=cost_tracker,
+                    )
+                    engines.append(contrarian_engine)
+                    logger.info("kalshi_contrarian_engine_initialized")
+
             # Market making engine (zero maker fees)
             mm_cfg = getattr(config, "market_making", None) or {}
             if isinstance(mm_cfg, dict) and mm_cfg.get("enabled", False):

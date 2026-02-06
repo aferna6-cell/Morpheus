@@ -82,6 +82,9 @@ class BotConfig(BaseModel):
     # Market Making
     market_making: Dict[str, Any] = Field(default_factory=dict)
 
+    # Contrarian Strategy
+    contrarian: Dict[str, Any] = Field(default_factory=dict)
+
     # Alerts (Telegram)
     alerts: Dict[str, Any] = Field(default_factory=dict)
 

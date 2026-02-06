@@ -460,8 +460,14 @@ class EnsembleSignal(Signal):
             raw_edge = p_yes - market_price
             net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
 
-            # Category min edge
+            # Category min edge + price-tiered adjustment
+            # Extreme prices (>85% or <15%) need higher edge to be meaningful
             min_edge = _MIN_EDGE_BY_TYPE.get(mtype, 0.03)
+            if mtype == "normal":
+                if market_price > 0.85 or market_price < 0.15:
+                    min_edge = 0.08  # 8% for extreme prices
+                elif market_price > 0.75 or market_price < 0.25:
+                    min_edge = 0.05  # 5% for moderate extremes
             if net_edge < min_edge:
                 result = self._hold(
                     market,
@@ -784,6 +790,208 @@ Rules:
             "Do not hedge; give your best point estimate. "
             "Avoid round numbers. Consider base rates, news, time remaining, "
             "and information quality."
+        )
+
+    # ------------------------------------------------------------------
+    # Contrarian evaluation
+    # ------------------------------------------------------------------
+
+    async def evaluate_contrarian(self, market: Market) -> SignalResult:
+        """Evaluate a market for contrarian opportunity.
+
+        Used by the contrarian engine for markets where crowd consensus
+        is at 80-95%. Uses a specialized prompt asking Claude to identify
+        cases where the crowd is wrong.
+        """
+        try:
+            market_price = market.midpoint_price
+            if market_price is None:
+                return self._hold(market, "No market price")
+
+            # Budget check
+            if self.cost_tracker and not self.cost_tracker.check_budget():
+                return self._hold(market, "LLM budget exceeded")
+
+            # Market type skip
+            mtype = detect_market_type(market.question)
+            if mtype in _SKIP_TYPES:
+                return self._hold(market, f"Skipped market type '{mtype}'")
+
+            # Get news context
+            news_articles = await self.news_aggregator.get_market_news(market)
+            news_context = self.news_aggregator.format_news_context(news_articles)
+
+            # Build contrarian-specific prompt
+            prompt = self._build_contrarian_prompt(market, news_context, market_price)
+            system = self._contrarian_system_prompt()
+
+            # Use Claude Sonnet only for contrarian (better at nuanced reasoning)
+            result = await self._call_anthropic(system, prompt)
+
+            if result is None or _validate_llm_response(result) is not None:
+                # Fallback to OpenAI
+                result = await self._call_openai(system, prompt)
+
+            if result is None or _validate_llm_response(result) is not None:
+                return self._hold(market, "Contrarian LLM call failed")
+
+            p_yes = float(result["p_yes"])
+            p_yes = max(0.001, min(0.999, p_yes))
+
+            # Mild calibration
+            p_yes = calibrate_probability(p_yes, shrink_strength=self.calibration_shrink)
+
+            # Compute contrarian edge
+            raw_edge = p_yes - market_price
+            net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+
+            crowd_wrong_reason = result.get("crowd_wrong_reason", "")
+            contrarian_thesis = result.get("contrarian_thesis", "")
+            confidence_str = result.get("confidence", "medium")
+
+            # Confidence mapping
+            confidence_map = {"low": 0.5, "medium": 0.7, "high": 0.9}
+            confidence = confidence_map.get(confidence_str, 0.7)
+
+            # Determine side
+            if raw_edge > 0 and net_edge > 0:
+                side = TradingSide.BUY_YES
+            elif raw_edge < 0 and net_edge > 0:
+                side = TradingSide.BUY_NO
+            else:
+                side = TradingSide.HOLD
+
+            # Conviction from confidence + edge
+            conviction = "high" if confidence_str == "high" and net_edge >= 0.10 else (
+                "medium" if net_edge >= 0.05 else "low"
+            )
+
+            reasoning = (
+                f"CONTRARIAN: {contrarian_thesis} | "
+                f"Crowd wrong because: {crowd_wrong_reason} | "
+                f"p_yes={p_yes:.3f} mkt={market_price:.3f} "
+                f"raw_edge={raw_edge:+.3f} net_edge={net_edge:+.3f}"
+            )
+
+            self.logger.info(
+                "contrarian_signal",
+                market_id=market.id,
+                p_yes=p_yes,
+                market_price=market_price,
+                raw_edge=raw_edge,
+                net_edge=net_edge,
+                side=side.value,
+                confidence=confidence,
+                conviction=conviction,
+                crowd_wrong_reason=crowd_wrong_reason[:100],
+            )
+
+            sig = SignalResult(
+                estimated_prob=p_yes,
+                confidence=confidence,
+                edge=raw_edge,
+                recommended_side=side,
+                reasoning=reasoning,
+                signal_name="Contrarian",
+                market_price=market_price,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            sig.net_edge = net_edge  # type: ignore[attr-defined]
+            sig.conviction = conviction  # type: ignore[attr-defined]
+            sig.contrarian_thesis = contrarian_thesis  # type: ignore[attr-defined]
+            sig.crowd_wrong_reason = crowd_wrong_reason  # type: ignore[attr-defined]
+            return sig
+
+        except Exception as e:
+            self.logger.error("contrarian_evaluate_error", market_id=market.id, error=str(e))
+            return self._hold(market, f"Error: {e}")
+
+    def _build_contrarian_prompt(self, market: Market, news_context: str, market_price: float) -> str:
+        end_date_str = "Unknown"
+        time_remaining = "Unknown"
+        if market.end_date:
+            end_date_str = market.end_date.strftime("%Y-%m-%d %H:%M UTC")
+            now = datetime.now(timezone.utc)
+            delta = market.end_date - now
+            days = delta.days
+            hours = delta.seconds // 3600
+            if days > 0:
+                time_remaining = f"{days}d {hours}h"
+            elif hours > 0:
+                time_remaining = f"{hours}h"
+            else:
+                time_remaining = f"{(delta.seconds % 3600) // 60}m"
+
+        # Determine crowd belief
+        if market_price > 0.5:
+            crowd_belief = f"YES is very likely ({market_price:.0%})"
+            minority_side = "NO"
+            minority_cost = f"{(1.0 - market_price):.0%}"
+        else:
+            crowd_belief = f"NO is very likely ({1.0 - market_price:.0%})"
+            minority_side = "YES"
+            minority_cost = f"{market_price:.0%}"
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        return f"""You are a contrarian analyst. Your job is to find cases where crowd consensus is WRONG.
+
+Current date/time: {today}
+
+Market: {market.question}
+Category: {market.category}
+Ends: {end_date_str} ({time_remaining} remaining)
+Current crowd price: {market_price:.0%} YES
+Volume: ${market.volume_24h:,.0f}
+
+The crowd believes: {crowd_belief}
+Betting {minority_side} costs {minority_cost} and pays $1 if correct.
+
+{news_context}
+
+Your analysis:
+
+1. WHY does the crowd think this? What headlines, data, or narrative are they anchored to?
+
+2. What SPECIFIC scenario would prove the crowd wrong?
+   - Be concrete: name the trigger event, policy change, data release, or surprise
+   - How plausible is each scenario?
+
+3. Is the crowd making a systematic error? Consider:
+   - HERDING: Is everyone copying the same narrative without independent analysis?
+   - RECENCY BIAS: Is the crowd extrapolating a recent trend that could reverse?
+   - ANCHORING: Are they stuck on a number/prediction that's now outdated?
+   - NEGLECTED INFORMATION: Is there data or a factor the crowd is ignoring?
+   - OVERCONFIDENCE: Is {market_price:.0%} really justified, or is 60-70% more honest?
+
+4. What is YOUR independent probability estimate? Ignore the market price.
+   Think from first principles about what actually has to happen for YES/NO to resolve.
+
+Output STRICT JSON (no commentary outside JSON):
+{{
+  "p_yes": <float 0.0-1.0>,
+  "confidence": "low" | "medium" | "high",
+  "crowd_wrong_reason": "one sentence: why the crowd may be wrong",
+  "contrarian_thesis": "one paragraph: your independent analysis",
+  "key_scenarios": ["scenario 1 that proves crowd wrong", "scenario 2"]
+}}
+
+Rules:
+- Be genuinely independent. Don't just invert the crowd price.
+- If the crowd IS right, say so (p_yes close to market_price).
+- Only output a contrarian view if you have a specific, articulable reason.
+- High confidence = you have strong evidence the crowd is wrong.
+""".strip()
+
+    def _contrarian_system_prompt(self) -> str:
+        return (
+            "You are an elite contrarian analyst for prediction markets. "
+            "Your specialty is identifying cases where crowd consensus is wrong. "
+            "You output ONLY valid JSON matching the requested schema. "
+            "You are intellectually honest — if the crowd is right, you say so. "
+            "But when you spot herding, anchoring, or neglected information, "
+            "you bet against the crowd with conviction. "
+            "Think independently. Question every assumption."
         )
 
     # ------------------------------------------------------------------

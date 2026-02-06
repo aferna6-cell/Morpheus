@@ -2,7 +2,7 @@
 # $200 capital (2 accounts × $100), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian"]
   min_edge: 0.03                    # 3% minimum edge (was 5%)
   kelly_fraction: 0.33              # third-Kelly (was quarter)
   max_position_pct: 0.05            # 5% of bankroll cap
@@ -152,6 +152,27 @@ kalshi:
     - "Financials"
   max_resolution_days: 1            # same-day only
   max_spread_pct: 0.08
+
+# Contrarian strategy — bet against overconfident crowds
+contrarian:
+  enabled: true
+  scan_interval_seconds: 600    # 10 min scans
+  min_crowd_confidence: 0.80    # market must be 80%+ one side
+  max_crowd_confidence: 0.95    # don't bet against 95%+ (usually right)
+  min_contrarian_edge: 0.10     # LLM must disagree by 10%+
+  min_conviction: "high"        # only high-conviction contrarian bets
+  max_position_size: 25.0       # $25 per contrarian trade
+  max_total_exposure: 100.0     # $100 total contrarian exposure
+  max_resolution_days: 7        # 1-7 day markets (not just same-day)
+  min_volume_24h: 5000          # real crowd consensus, not illiquid
+  categories:
+    - "Politics"
+    - "Economics"
+    - "Elections"
+    - "Climate and Weather"
+    - "Science and Technology"
+    - "Companies"
+    - "Financials"
 
 # Market Making — zero maker fees
 market_making:
