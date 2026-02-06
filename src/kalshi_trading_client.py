@@ -364,25 +364,32 @@ class KalshiTradingClient:
     # ------------------------------------------------------------------
 
     async def get_positions(self) -> List[KalshiPosition]:
-        """Return current positions."""
+        """Return current positions.
+
+        Uses the raw HTTP response because the kalshi_python SDK model
+        doesn't parse ``market_positions`` correctly (the ``positions``
+        attribute is always None).
+        """
         if self.dry_run:
             return []
 
         await self._ensure_init()
         try:
-            result = await self._run_in_executor(self._portfolio.get_positions)
-            positions_raw = (
-                result.market_positions
-                if hasattr(result, "market_positions")
-                else []
+            import json as _json
+            raw = await self._run_in_executor(
+                self._portfolio.get_positions_without_preload_content
             )
+            body = raw.read().decode() if hasattr(raw, "read") else str(raw.data)
+            data = _json.loads(body)
+            positions_raw = data.get("market_positions") or []
             return [
                 KalshiPosition(
-                    ticker=getattr(p, "ticker", ""),
-                    count=getattr(p, "position", 0),
-                    market_exposure=abs(getattr(p, "market_exposure", 0)) / 100.0,
+                    ticker=p.get("ticker", ""),
+                    count=p.get("position", 0),
+                    market_exposure=abs(p.get("market_exposure", 0)) / 100.0,
                 )
                 for p in positions_raw
+                if p.get("position", 0) != 0
             ]
         except Exception as exc:
             self.logger.error("kalshi_get_positions_failed", label=self.label, error=str(exc))
