@@ -58,6 +58,10 @@ class PositionMonitor:
         self._tracked: Dict[str, TrackedPosition] = {}
         self._task: Optional[asyncio.Task] = None
 
+        # Exit retry tracking: key -> (attempt_count, last_attempt_time)
+        self._exit_retries: Dict[str, tuple[int, float]] = {}
+        self._max_exit_retries = 3
+
     def track_position(
         self,
         ticker: str,
@@ -247,7 +251,30 @@ class PositionMonitor:
         tracked: TrackedPosition,
         reason: str,
     ) -> None:
-        """Exit a position by selling."""
+        """Exit a position by selling. Max 3 retries with exponential backoff."""
+        import time as _time
+
+        key = f"{client.label}:{pos.ticker}"
+
+        # Check retry count — stop retrying after max attempts
+        retry_count, last_attempt = self._exit_retries.get(key, (0, 0.0))
+        if retry_count >= self._max_exit_retries:
+            self.logger.warning(
+                "exit_retry_exhausted",
+                ticker=pos.ticker,
+                account=client.label,
+                attempts=retry_count,
+                reason=reason,
+            )
+            return
+
+        # Exponential backoff: wait 5min, 15min, 45min between retries
+        if retry_count > 0:
+            backoff_seconds = 300 * (3 ** (retry_count - 1))  # 300, 900, 2700
+            elapsed = _time.monotonic() - last_attempt
+            if elapsed < backoff_seconds:
+                return  # Not enough time has passed since last attempt
+
         side = "yes" if pos.count > 0 else "no"
         count = abs(pos.count)
 
@@ -261,15 +288,40 @@ class PositionMonitor:
             count=count,
             reason=reason,
             account=client.label,
+            attempt=retry_count + 1,
         )
 
-        result = await client.place_order(
-            ticker=pos.ticker,
-            side=side,
-            count=count,
-            price_cents=sell_price,
-            order_type="limit",
-        )
+        try:
+            result = await client.place_order(
+                ticker=pos.ticker,
+                side=side,
+                count=count,
+                price_cents=sell_price,
+                order_type="limit",
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            # Detect insufficient_balance — stop retrying immediately
+            if "insufficient" in error_str or "balance" in error_str:
+                self.logger.error(
+                    "exit_insufficient_balance",
+                    ticker=pos.ticker,
+                    account=client.label,
+                    error=str(e),
+                )
+                # Max out retry counter to prevent further attempts
+                self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
+                return
+            # Other errors — record retry attempt
+            self._exit_retries[key] = (retry_count + 1, _time.monotonic())
+            self.logger.warning(
+                "exit_order_failed",
+                ticker=pos.ticker,
+                account=client.label,
+                attempt=retry_count + 1,
+                error=str(e),
+            )
+            return
 
         if result:
             # Calculate approximate P&L
@@ -277,8 +329,8 @@ class PositionMonitor:
             exit_cost = pos.market_exposure
             pnl = exit_cost - entry_cost
 
-            key = f"{client.label}:{pos.ticker}"
             self._tracked.pop(key, None)
+            self._exit_retries.pop(key, None)  # Clear retry tracker on success
 
             # Update daily P&L
             self.risk_manager.update_daily_pnl(pnl)
@@ -297,4 +349,13 @@ class PositionMonitor:
                 pnl=pnl,
                 reason=reason,
                 account=client.label,
+            )
+        else:
+            # Order returned None/falsy — record as failed attempt
+            self._exit_retries[key] = (retry_count + 1, _time.monotonic())
+            self.logger.warning(
+                "exit_order_no_result",
+                ticker=pos.ticker,
+                account=client.label,
+                attempt=retry_count + 1,
             )

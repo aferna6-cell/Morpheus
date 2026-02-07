@@ -28,6 +28,24 @@ class FilterResult:
     market_id: str
 
 
+# Ticker prefixes that indicate junk markets where LLMs have no edge.
+# These are checked before any other filter to save LLM budget.
+_JUNK_TICKER_PREFIXES = [
+    # NBA/NCAA announcer mentions (e.g., KXNBAMENTION-*, KXNCAAB-*)
+    "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION",
+    # Crypto daily price ranges (e.g., KXBTCD-*, KXETHD-*, KXDOGE-*)
+    "KXBTCD", "KXETHD", "KXDOGE", "KXSOLD", "KXBNBD",
+    "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
+    "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",
+    # Weather temperature highs/lows/rain (e.g., KXHIGH-*, KXLOW-*, KXRAIN-*)
+    "KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP",
+    # Word/phrase mention markets
+    "KXWOMENTION", "KXWMENTION",
+    # Stock intraday ranges
+    "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+]
+
+
 class MarketFilters:
     """Applies strict market quality filters."""
 
@@ -44,6 +62,12 @@ class MarketFilters:
         self.max_spread_pct = float(mf.get("max_spread_pct", 0.05))
         self.max_resolution_days = int(mf.get("max_resolution_days", 30))
         self.min_data_sources = int(mf.get("min_data_sources", 3))
+
+        # Ticker prefix blocklist (from config or default)
+        self.blocked_ticker_prefixes = list(_JUNK_TICKER_PREFIXES)
+        extra_blocked = mf.get("blocked_ticker_prefixes", [])
+        if extra_blocked:
+            self.blocked_ticker_prefixes.extend(extra_blocked)
 
         # Sports filter config
         sf = getattr(config, "sports_filters", {}) or {}
@@ -198,6 +222,18 @@ class MarketFilters:
             market_id=market_id,
         )
 
+    def check_ticker_prefix(self, market_id: str) -> FilterResult:
+        """Block markets by ticker prefix (junk markets with no LLM edge)."""
+        ticker_upper = market_id.upper()
+        for prefix in self.blocked_ticker_prefixes:
+            if ticker_upper.startswith(prefix.upper()):
+                return FilterResult(
+                    passed=False,
+                    reason=f"Blocked ticker prefix: {prefix}",
+                    market_id=market_id,
+                )
+        return FilterResult(passed=True, reason="ok", market_id=market_id)
+
     def check_all(
         self,
         market_id: str,
@@ -210,6 +246,16 @@ class MarketFilters:
         is_live: bool = False,
     ) -> FilterResult:
         """Run all filters and return first failure or success."""
+        # Ticker prefix check first — cheapest filter, saves LLM budget
+        ticker_result = self.check_ticker_prefix(market_id)
+        if not ticker_result.passed:
+            self.logger.debug(
+                "market_filtered",
+                market_id=market_id,
+                reason=ticker_result.reason,
+            )
+            return ticker_result
+
         checks = [
             self.check_volume(market_id, volume),
             self.check_spread(market_id, bid, ask),

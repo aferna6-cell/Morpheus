@@ -1,7 +1,7 @@
-"""Resolution tracker — polls Gamma API for resolved markets.
+"""Resolution tracker — polls Kalshi API for resolved markets.
 
 Reads predictions from state_dir/predictions.jsonl, checks resolution
-status via the Gamma API, and writes outcomes to state_dir/resolutions.jsonl.
+status via the Kalshi public API, and writes outcomes to state_dir/resolutions.jsonl.
 
 Usage:
     python3 -m src.resolution_tracker [--state-dir state]
@@ -50,12 +50,10 @@ async def check_resolutions(
     *,
     dry_run: bool = False,
 ) -> int:
-    """Check all unresolved predictions for resolution status.
+    """Check all unresolved predictions for resolution status via Kalshi API.
 
     Returns the number of newly resolved markets.
     """
-    from .bankroll import log_bankroll_event  # local import to avoid circular
-
     logger = structlog.get_logger()
     state_path = Path(state_dir)
 
@@ -77,16 +75,25 @@ async def check_resolutions(
         logger.debug("resolution_tracker_all_resolved")
         return 0
 
-    gamma_url = config.polymarket.get(
-        "gamma_url", "https://gamma-api.polymarket.com"
-    )
+    # Kalshi public API base URL
+    kalshi_cfg = getattr(config, "kalshi", None) or {}
+    if isinstance(kalshi_cfg, dict):
+        kalshi_base_url = kalshi_cfg.get(
+            "base_url", "https://api.elections.kalshi.com/trade-api/v2"
+        )
+    else:
+        kalshi_base_url = "https://api.elections.kalshi.com/trade-api/v2"
 
     newly_resolved = 0
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(
+        base_url=kalshi_base_url,
+        timeout=20.0,
+        headers={"Accept": "application/json"},
+    ) as client:
         for market_id, pred in unresolved.items():
             try:
-                r = await client.get(f"{gamma_url}/markets/{market_id}")
+                r = await client.get(f"/markets/{market_id}")
                 if r.status_code != 200:
                     logger.warning(
                         "resolution_tracker_api_error",
@@ -96,45 +103,46 @@ async def check_resolutions(
                     continue
 
                 data = r.json()
+                market_data = data.get("market", data)
 
-                # Gamma API fields for resolution
-                closed = data.get("closed", False)
-                resolved = data.get("resolved", False)
+                # Kalshi market status: "open", "closed", "settled"
+                status = market_data.get("status", "").lower()
 
-                if not (closed or resolved):
+                if status not in ("settled", "closed"):
                     continue
 
-                # Determine outcome
-                # Gamma stores resolution in various fields; try common ones
-                outcome_str = (
-                    data.get("resolutionOutcome")
-                    or data.get("resolution")
-                    or data.get("outcome")
+                # Determine outcome from Kalshi's result field
+                # Kalshi uses "result": "yes" or "result": "no"
+                result_str = (
+                    market_data.get("result", "")
+                    or market_data.get("resolution", "")
                     or ""
                 ).strip().lower()
 
-                if outcome_str in ("yes", "true", "1"):
+                if result_str in ("yes", "true", "1"):
                     actual_outcome = 1.0
-                elif outcome_str in ("no", "false", "0"):
+                elif result_str in ("no", "false", "0"):
                     actual_outcome = 0.0
                 else:
-                    # Try outcome prices: if YES token = 1.0, resolved YES
-                    outcome_prices = data.get("outcomePrices")
-                    if outcome_prices:
-                        if isinstance(outcome_prices, str):
-                            try:
-                                outcome_prices = json.loads(outcome_prices)
-                            except json.JSONDecodeError:
-                                continue
-                        if isinstance(outcome_prices, list) and len(outcome_prices) >= 1:
-                            yes_price = float(outcome_prices[0])
-                            if yes_price >= 0.99:
-                                actual_outcome = 1.0
-                            elif yes_price <= 0.01:
-                                actual_outcome = 0.0
-                            else:
-                                # Not clearly resolved
-                                continue
+                    # Check if settled by looking at final prices
+                    # If settled, yes_price should be ~1.0 or ~0.0
+                    last_price = market_data.get("last_price", -1)
+                    if isinstance(last_price, (int, float)):
+                        # Kalshi prices in cents (0-100) or dollars (0-1)
+                        price_val = last_price / 100.0 if last_price > 1 else last_price
+                        if price_val >= 0.99:
+                            actual_outcome = 1.0
+                        elif price_val <= 0.01:
+                            actual_outcome = 0.0
+                        elif status == "settled":
+                            # Settled but price unclear — skip for now
+                            logger.debug(
+                                "resolution_unclear",
+                                market_id=market_id,
+                                result=result_str,
+                                last_price=last_price,
+                            )
+                            continue
                         else:
                             continue
                     else:
@@ -150,6 +158,7 @@ async def check_resolutions(
                     "conviction": pred.get("conviction", "unknown"),
                     "timestamp": pred.get("timestamp", ""),
                     "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    "platform": "kalshi",
                 }
 
                 # Include features_active if present
@@ -182,7 +191,7 @@ async def check_resolutions(
                     clv_val = entry_price - closing_price
 
                 trade_logger.log_market_resolution(
-                    platform="polymarket",
+                    platform="kalshi",
                     ticker=market_id,
                     outcome=outcome_str_log,
                     held_side=side_val,
@@ -227,12 +236,12 @@ def _log_resolution_payout(
 
         if won:
             # Payout is 1.0 per share; profit = 1.0 - entry_price per share
-            payout_per_dollar = 1.0 / entry_price  # shares per dollar * $1 payout
+            payout_per_dollar = 1.0 / entry_price if entry_price > 0 else 1.0
             log_bankroll_event(
                 str(state_path),
                 market_id=market_id,
                 side=side,
-                amount_usdc=payout_per_dollar,  # normalized to $1 entry
+                amount_usdc=payout_per_dollar,
                 price=1.0,
                 fee_estimate=0.0,
                 event_type="resolution_payout",

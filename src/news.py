@@ -372,21 +372,21 @@ class NewsAggregator:
         rate_limit_seconds = news_config.get("rate_limit_seconds", 1)
         self.rate_limiter = RateLimiter(60 // max(rate_limit_seconds, 1), 60.0)
 
-        # Initialize sources — Tavily > Brave > Google News RSS > DuckDuckGo
+        # Initialize sources — Brave Search > Google News RSS > DuckDuckGo
+        # Tavily disabled (HTTP 432 errors on every call since late 2025)
         self.sources = []
-        tavily_key = os.getenv("TAVILY_API_KEY", "")
         brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
 
-        if tavily_key:
-            self.sources.append(TavilySource(tavily_key))
-            self.logger.info("news_source_init", source="tavily")
-        elif brave_key:
+        if brave_key:
             self.sources.append(BraveSearchSource(brave_key))
             self.logger.info("news_source_init", source="brave_search")
-        else:
-            self.sources.append(GoogleNewsRSSSource())
+        # Google News RSS as fallback (free, no API key)
+        self.sources.append(GoogleNewsRSSSource())
+        if not brave_key:
             self.sources.append(DuckDuckGoSource())
-            self.logger.info("news_source_init", source="google_news_rss")
+            self.logger.info("news_source_init", source="google_news_rss+ddg_fallback")
+        else:
+            self.logger.info("news_source_init", fallback="google_news_rss")
 
     async def get_market_news(self, market: Market) -> List[NewsArticle]:
         """Get news articles relevant to a market, including counterarguments."""

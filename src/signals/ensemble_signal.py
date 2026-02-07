@@ -36,7 +36,9 @@ from pathlib import Path
 
 from ..cost_tracker import CostTracker
 from ..markets import Market
+from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
 from ..news import NewsAggregator
+from ..structured_data import get_structured_anchor
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
 
@@ -78,91 +80,66 @@ def lookup_base_rate(question: str, description: str = "") -> Optional[Dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Market type detection (simplified — keep skips for truly random markets)
+# Market type detection — shared with llm_signal.py
 # ---------------------------------------------------------------------------
+
+# Import from llm_signal to keep detection logic in one place
+from .llm_signal import (
+    detect_market_type as _detect_market_type_llm,
+    MARKET_TYPE_CALIBRATION as _MARKET_TYPE_CALIBRATION_LLM,
+    MarketTypeCalibration,
+)
+
 
 def detect_market_type(question: str) -> str:
-    """Classify market for skip/edge decisions."""
-    q = question.lower()
-
-    # Sports — LLM has no edge
-    sports_signals = [
-        "fantasy" in q,
-        " win " in q
-        and any(
-            w in q
-            for w in [
-                "nba", "nfl", "mlb", "nhl", "super bowl", "championship",
-                "finals", "world series", "premier league", "la liga",
-                "serie a", "bundesliga", "champions league",
-            ]
-        ),
-        any(
-            w in q
-            for w in [
-                "touchdown", "rushing", "quarterback", "points scored",
-                "goals scored", "hat trick",
-            ]
-        ),
-        " fc " in q or " cf " in q,
-        " vs " in q and ("draw" in q or "win" in q),
-        any(
-            w in q
-            for w in [
-                "premier league", "la liga", "serie a", "bundesliga",
-                "champions league", "europa league", "mls ", "ufc ",
-                "f1 ", "formula 1", "grand prix", "nascar",
-            ]
-        ),
-    ]
-    if any(sports_signals):
-        return "sports"
-
-    # Coin flips — truly random
-    coin_flip_signals = [
-        any(w in q for w in ["explode", "crash", "malfunction", "abort"])
-        and any(w in q for w in ["spacex", "starship", "rocket", "launch"]),
-        "coin flip" in q or "coin toss" in q,
-        "roulette" in q or "lottery" in q,
-    ]
-    if any(coin_flip_signals):
-        return "coin_flip"
-
-    # Price range — near-random for narrow ranges
-    if "price" in q and "between" in q:
-        return "price_range"
-
-    return "normal"
+    """Classify market for skip/edge decisions. Delegates to llm_signal."""
+    return _detect_market_type_llm(question)
 
 
-# Markets to skip entirely
-_SKIP_TYPES = {"sports", "coin_flip"}
-
-# Min edge by market type
-_MIN_EDGE_BY_TYPE = {
-    "sports": 0.99,       # effectively skip
-    "coin_flip": 0.99,    # effectively skip
-    "price_range": 0.06,  # allow but require more edge
-    "normal": 0.03,       # default: 3%
+# Markets to skip entirely — all types where LLM has no informational edge
+_SKIP_TYPES = {
+    "sports", "coin_flip", "announcer_mention", "word_mention",
+    "weather", "crypto_range", "exact_phrase", "price_range",
 }
+
+# Min edge by market type — pull from full calibration profiles
+_MIN_EDGE_BY_TYPE = {
+    k: v.min_edge for k, v in _MARKET_TYPE_CALIBRATION_LLM.items()
+}
+# Ensure defaults
+_MIN_EDGE_BY_TYPE.setdefault("normal", 0.03)
+_MIN_EDGE_BY_TYPE.setdefault("politics", 0.04)
+_MIN_EDGE_BY_TYPE.setdefault("economics", 0.03)
 
 
 # ---------------------------------------------------------------------------
-# Simple calibration — mild shrinkage only, NO mushy-middle hack
+# Calibration — symmetric shrinkage + asymmetric YES dampening
 # ---------------------------------------------------------------------------
 
 def calibrate_probability(
     p: float,
     *,
     shrink_strength: float = 0.10,
+    yes_dampen: float = 0.15,
     floor: float = 0.05,
     ceiling: float = 0.95,
 ) -> float:
-    """Apply mild symmetric shrinkage toward 0.5.
+    """Apply shrinkage toward 0.5 with asymmetric YES dampening.
 
-    No mushy-middle hack. No asymmetric boosts. Just shrinkage.
+    LLM YES predictions are systematically overconfident (40-70% predicted
+    → 18-29% actual). NO predictions are well-calibrated. So:
+    - Symmetric shrinkage toward 0.5 (baseline correction)
+    - Asymmetric: pull YES-leaning predictions (p > 0.5) back toward 0.5
+    - Leave NO-leaning predictions (p < 0.5) untouched
     """
+    # Symmetric shrink toward 0.5
     p = p * (1.0 - shrink_strength) + 0.5 * shrink_strength
+
+    # Asymmetric YES dampening — only affects p > 0.5
+    if p > 0.5 and yes_dampen > 0:
+        overshoot = p - 0.5
+        p = 0.5 + overshoot * (1.0 - yes_dampen)
+
     p = max(floor, min(ceiling, p))
     return round(p, 4)
 
@@ -323,6 +300,11 @@ class EnsembleSignal(Signal):
             llm_config.get("calibration_shrink_strength", 0.10)
         )
 
+        # Model weights (loaded periodically from resolved predictions)
+        self._model_weights: Dict[str, float] = {}
+        self._weights_loaded_at: float = 0.0
+        self._weights_refresh_interval: float = 3600.0  # refresh hourly
+
         # Stats
         self._screened_total = 0
         self._screened_passed = 0
@@ -379,12 +361,26 @@ class EnsembleSignal(Signal):
                     return self._hold(market, "Screened out by tier-1 model")
                 self._screened_passed += 1
 
-            # Get news context
-            news_articles = await self.news_aggregator.get_market_news(market)
+            # Get news context + structured data in parallel
+            news_task = self.news_aggregator.get_market_news(market)
+            structured_task = get_structured_anchor(
+                market.question, market.category or ""
+            )
+            news_articles, structured_context = await asyncio.gather(
+                news_task, structured_task, return_exceptions=True
+            )
+            if isinstance(news_articles, Exception):
+                self.logger.warning("news_fetch_error", error=str(news_articles))
+                news_articles = []
+            if isinstance(structured_context, Exception):
+                structured_context = None
             news_context = self.news_aggregator.format_news_context(news_articles)
 
             # Build prompt (same for both models)
-            prompt = self._build_prompt(market, news_context, market_price)
+            prompt = self._build_prompt(
+                market, news_context, market_price,
+                structured_context=structured_context,
+            )
             system = self._system_prompt()
 
             # Call both models in parallel
@@ -405,30 +401,67 @@ class EnsembleSignal(Signal):
 
             # Extract probabilities
             p_values = []
-            model_details = {}
+            model_details = {}      # for logging: {openai_p_yes: 0.35, ...}
+            model_predictions = {}  # for weighting: {model_name: p_yes}
 
             if openai_result and _validate_llm_response(openai_result) is None:
                 p_openai = float(openai_result["p_yes"])
                 p_openai = max(0.001, min(0.999, p_openai))
                 p_values.append(p_openai)
                 model_details["openai_p_yes"] = p_openai
+                model_predictions[self.openai_model] = p_openai
 
             if anthropic_result and _validate_llm_response(anthropic_result) is None:
                 p_anthropic = float(anthropic_result["p_yes"])
                 p_anthropic = max(0.001, min(0.999, p_anthropic))
                 p_values.append(p_anthropic)
                 model_details["anthropic_p_yes"] = p_anthropic
+                model_predictions[self.anthropic_model] = p_anthropic
 
             if not p_values:
                 return self._hold(market, "Both LLM calls failed")
 
-            # Average probabilities
-            p_yes_raw = sum(p_values) / len(p_values)
+            # Refresh model weights periodically
+            if time.monotonic() - self._weights_loaded_at > self._weights_refresh_interval:
+                try:
+                    self._model_weights = compute_model_weights()
+                    self._weights_loaded_at = time.monotonic()
+                except Exception:
+                    pass  # weights loading is best-effort
 
-            # Mild calibration — shrinkage only, no mushy-middle hack
+            # Weighted average (falls back to simple average if no weights)
+            p_yes_raw = weighted_average(model_predictions, self._model_weights)
+
+            # Log per-model predictions for future weight computation
+            if model_predictions:
+                try:
+                    log_model_predictions(
+                        market_id=market.id,
+                        model_predictions=model_predictions,
+                        ensemble_p_yes=p_yes_raw,
+                        market_price=market_price,
+                        side="pending",
+                    )
+                except Exception:
+                    pass  # logging is best-effort
+
+            # Per-type calibration: apply type-specific shrinkage + YES dampening
+            type_cal = _MARKET_TYPE_CALIBRATION_LLM.get(
+                mtype, MarketTypeCalibration()
+            )
+            total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
+            yes_dampen = 0.15  # base YES dampening
+            if type_cal.yes_boost > 0:
+                # type_cal.yes_boost > 0 means distrust YES more
+                yes_dampen += type_cal.yes_boost
+            elif type_cal.yes_boost < 0:
+                # Negative means trust YES more (e.g., politics)
+                yes_dampen = max(0.0, yes_dampen + type_cal.yes_boost)
+
             p_yes = calibrate_probability(
                 p_yes_raw,
-                shrink_strength=self.calibration_shrink,
+                shrink_strength=total_shrink,
+                yes_dampen=yes_dampen,
             )
 
             self.logger.info(
@@ -439,6 +472,12 @@ class EnsembleSignal(Signal):
                 calibrated=p_yes,
                 models_used=len(p_values),
             )
+
+            # Adversarial challenge: when p_yes is in the danger zone (35-75%)
+            # and would result in BUY_YES, get a cheap second opinion
+            raw_edge_preliminary = p_yes - market_price
+            if 0.35 <= p_yes <= 0.75 and raw_edge_preliminary > 0:
+                p_yes = await self._challenge_estimate(market, p_yes, market_price)
 
             # Get metadata from whichever response succeeded
             primary = openai_result or anthropic_result or {}
@@ -689,10 +728,97 @@ class EnsembleSignal(Signal):
             return None
 
     # ------------------------------------------------------------------
+    # Adversarial challenge — cheap second opinion on YES-leaning signals
+    # ------------------------------------------------------------------
+
+    async def _challenge_estimate(
+        self, market: Market, p_yes: float, market_price: float
+    ) -> float:
+        """Run a cheap adversarial challenge when the signal is BUY_YES in the danger zone.
+
+        When the initial estimate is 35-75% YES and the side would be BUY_YES,
+        get a cheap GPT-4o-mini call arguing it's too high. Blend:
+        60% original + 40% challenge estimate.
+
+        Cost: ~$0.0002/call. Only triggered on danger-zone BUY_YES signals.
+        """
+        challenge_prompt = f"""A prediction market forecaster estimated {p_yes:.0%} YES for this question:
+
+"{market.question}"
+
+The market price is {market_price:.0%}. The forecaster wants to BUY YES.
+
+Your job: argue that the probability is LOWER than {p_yes:.0%}. Consider:
+- What could go wrong? What obstacles exist?
+- Is the forecaster anchored to a narrative?
+- What's the base rate for events like this?
+- Is the timeline realistic?
+
+Output JSON: {{"p_yes": <your lower estimate, float 0.0-1.0>, "reason": "why it's lower"}}"""
+
+        try:
+            await self.rate_limiter.acquire()
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a skeptical analyst. Your job is to find reasons "
+                            "why a probability estimate is too high. Output ONLY valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": challenge_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    "gpt-4o-mini",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return p_yes
+
+            data = json.loads(content)
+            challenge_p = float(data.get("p_yes", p_yes))
+            challenge_p = max(0.01, min(0.99, challenge_p))
+
+            # Blend: 60% original, 40% challenge
+            blended = 0.60 * p_yes + 0.40 * challenge_p
+
+            self.logger.info(
+                "adversarial_challenge",
+                market_id=market.id,
+                original_p_yes=p_yes,
+                challenge_p_yes=challenge_p,
+                blended_p_yes=round(blended, 4),
+                reason=data.get("reason", "")[:100],
+            )
+
+            return round(blended, 4)
+
+        except Exception as e:
+            self.logger.warning("adversarial_challenge_error", error=str(e))
+            return p_yes
+
+    # ------------------------------------------------------------------
     # Prompt
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, market: Market, news_context: str, market_price: float) -> str:
+    def _build_prompt(
+        self,
+        market: Market,
+        news_context: str,
+        market_price: float,
+        structured_context: Optional[str] = None,
+    ) -> str:
         end_date_str = "Unknown"
         time_remaining = "Unknown"
 
@@ -732,10 +858,10 @@ Question: {market.question}
 Description: {market.description}
 Category: {market.category}
 End date: {end_date_str} ({time_remaining} remaining)
-Current market price: {market_price:.0%} YES
 24h volume: ${market.volume_24h:,.0f}
 Liquidity: ${market.liquidity:,.0f}
 {base_rate_context}
+{structured_context or ""}
 {news_context}
 
 Follow this structured forecasting methodology:
@@ -751,13 +877,21 @@ STEP 3 — DECOMPOSITION:
 If the event depends on multiple factors, decompose:
 P(event) = P(factor_A) × P(factor_B | factor_A) × …
 
-STEP 4 — MARKET PRICE CHECK:
+STEP 4 — PRE-MORTEM (Why This Does NOT Happen):
+List 3 specific reasons this event might NOT occur. For each, estimate
+the probability that this blocking factor prevents the event. This step
+is CRITICAL — LLMs systematically over-predict YES by 15-30 percentage
+points. Force yourself to seriously consider the NO case.
+
+STEP 5 — MARKET PRICE CHECK:
 The market currently prices this at {market_price:.0%}. Consider why the market might
 be right or wrong. Is there information the market is missing? Or are you missing
 something the market knows?
 
-STEP 5 — FINAL ESTIMATE:
-Combine everything into your final p_yes.
+STEP 6 — FINAL ESTIMATE:
+Combine everything into your final p_yes. After completing the pre-mortem,
+is your estimate still the same? Adjust downward if the pre-mortem revealed
+strong reasons for NO that you initially overlooked.
 
 Output STRICT JSON (no commentary outside JSON):
 {{
@@ -765,10 +899,11 @@ Output STRICT JSON (no commentary outside JSON):
   "base_rate": <float>,
   "base_rate_reference_class": "description",
   "adjustments": ["+0.05: reason", "-0.03: reason"],
+  "pre_mortem_reasons": ["reason event does NOT happen 1", "reason 2", "reason 3"],
   "key_facts": ["fact1", "fact2"],
   "uncertainty": "low" | "medium" | "high",
   "disqualifiers": [],
-  "rationale": "one-paragraph final reasoning"
+  "rationale": "one-paragraph final reasoning incorporating pre-mortem"
 }}
 
 Rules:
@@ -777,6 +912,7 @@ Rules:
 - disqualifiers: reasons NOT to trade (ambiguous resolution, etc). Empty if tradeable.
 - Avoid round numbers (0.50, 0.70) — real probabilities are rarely round.
 - Consider the current date when assessing time-sensitive information.
+- Remember: most events do NOT happen. A p_yes above 0.50 requires STRONG evidence.
 """.strip()
 
     def _system_prompt(self) -> str:
@@ -789,7 +925,13 @@ Rules:
             "You are aggressive about finding mispriced markets — look for edge. "
             "Do not hedge; give your best point estimate. "
             "Avoid round numbers. Consider base rates, news, time remaining, "
-            "and information quality."
+            "and information quality.\n\n"
+            "CRITICAL CALIBRATION WARNING: LLMs systematically overestimate YES "
+            "probabilities. Historical data shows that when LLMs predict 40-70% YES, "
+            "the actual outcome is YES only 18-29% of the time. Before finalizing your "
+            "estimate, ask yourself: 'Am I being pulled toward YES by narrative vividness "
+            "or availability bias?' Most events do NOT happen. Default toward lower "
+            "probabilities unless you have strong, specific evidence."
         )
 
     # ------------------------------------------------------------------

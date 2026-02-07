@@ -28,6 +28,7 @@ from .risk import RiskManager
 from .signals.base import SignalResult, TradingSide
 from .alerts import send_alert
 from .market_filters import MarketFilters
+from .runlog import log_prediction
 from .utils import BotConfig, utc_now
 
 
@@ -315,6 +316,21 @@ class Orchestrator:
                         f"{question[:100]}"
                     )
                     await send_alert(alert_msg, self.config)
+
+                    # Log prediction for resolution tracking + accuracy analysis
+                    try:
+                        log_prediction(
+                            state_dir="state",
+                            market_id=signal.market_id,
+                            predicted_p_yes=signal.metadata.get("estimated_prob", 0.5),
+                            market_price_at_entry=signal.metadata.get("market_price", trade.average_price),
+                            side=signal.side,
+                            edge=signal.edge,
+                            conviction=str(conviction),
+                            net_edge=signal.metadata.get("net_edge", 0.0),
+                        )
+                    except Exception:
+                        self.logger.warning("prediction_log_failed", market_id=signal.market_id)
             except Exception as exc:
                 self.logger.error(
                     "dispatch_error",

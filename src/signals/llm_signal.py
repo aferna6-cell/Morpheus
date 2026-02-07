@@ -146,14 +146,70 @@ def detect_market_type(question: str) -> str:
     """Classify a market question into a type for calibration adjustments.
 
     Certain market types systematically fool LLMs:
+    - announcer_mention: "Will NBA announcer say X" — random speech, no data
+    - word_mention: "Will X mention Y" — can't predict exact words in speeches
+    - crypto_range: "Will BTC close between $X-$Y" — narrow intraday = near-random
+    - weather: temperature/rain markets — pro weather models already price this
     - exact_phrase: "Will X say Y" — LLM can't predict exact words
     - price_range: "Will BTC be between $X-$Y" — narrow ranges are near-random
     - sports: athletic outcomes — LLM has no real sports analytics
     - wild_card: Trump/volatile actor doing unpredictable things
     - politics: political events — LLM systematically underestimates YES
+    - economics: data-driven markets — LLM does well here
     - normal: everything else
     """
     q = question.lower()
+
+    # Announcer/commentator mention markets — random speech patterns, zero edge
+    announcer_signals = [
+        any(w in q for w in ["announcer", "commentator", "broadcaster", "analyst"]) and
+        any(w in q for w in ["say", "mention", "use the word", "use the phrase"]),
+        "during" in q and any(w in q for w in ["broadcast", "commentary", "coverage"]) and
+        any(w in q for w in ["say", "mention"]),
+    ]
+    if any(announcer_signals):
+        return "announcer_mention"
+
+    # Word/phrase mention markets — "will X say the word Y during Z"
+    word_mention_signals = [
+        "say the word" in q or "use the word" in q or "use the phrase" in q,
+        "mention" in q and any(w in q for w in [
+            "during", "speech", "address", "conference", "interview",
+            "broadcast", "show", "program", "segment",
+        ]),
+        # Generic "will X say Y" without political context
+        " say " in q and " during " in q and not any(w in q for w in [
+            "congress", "senate", "president", "hearing", "testimony",
+        ]),
+    ]
+    if any(word_mention_signals):
+        return "word_mention"
+
+    # Weather markets — professional models already price these efficiently
+    weather_signals = [
+        any(w in q for w in [
+            "temperature", "high temperature", "low temperature",
+            "degrees fahrenheit", "degrees celsius",
+            "rainfall", "inches of rain", "snowfall", "inches of snow",
+            "wind speed", "humidity",
+        ]),
+        "weather" in q and any(w in q for w in ["above", "below", "between", "reach"]),
+        any(w in q for w in ["heat wave", "cold snap", "freeze warning"]),
+    ]
+    if any(weather_signals):
+        return "weather"
+
+    # Crypto daily price range markets — narrow intraday ranges are near-random
+    crypto_range_signals = [
+        any(w in q for w in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+                             "dogecoin", "doge", "xrp", "crypto"]) and
+        any(w in q for w in ["between", "close above", "close below", "close between",
+                             "end above", "end below", "price at"]),
+        "$" in q and any(w in q for w in ["crypto", "bitcoin", "ethereum", "btc", "eth"]) and
+        any(w in q for w in ["-", "to $", "between", "range"]),
+    ]
+    if any(crypto_range_signals):
+        return "crypto_range"
 
     # Exact phrase / specific behavior markets
     phrase_signals = [
@@ -164,11 +220,10 @@ def detect_market_type(question: str) -> str:
     if any(phrase_signals):
         return "exact_phrase"
 
-    # Narrow price range markets
+    # Narrow price range markets (non-crypto)
     price_signals = [
         "price" in q and "between" in q,
-        ("bitcoin" in q or "ethereum" in q or "solana" in q) and ("between" in q or "above" in q or "below" in q),
-        "$" in q and ("-" in q or "to $" in q) and ("price" in q or "btc" in q or "eth" in q),
+        "$" in q and ("-" in q or "to $" in q) and "price" in q,
     ]
     if any(price_signals):
         return "price_range"
@@ -252,8 +307,16 @@ class MarketTypeCalibration:
 
 
 MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
+    # Announcer/commentator mentions — random speech, zero data to forecast
+    "announcer_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
+    # Word/phrase mention markets — can't predict exact words in speeches
+    "word_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
+    # Weather markets — professional models already price efficiently
+    "weather":     MarketTypeCalibration(skip=True, min_edge=0.99),
+    # Crypto daily price ranges — narrow intraday ranges are near-random
+    "crypto_range": MarketTypeCalibration(skip=True, min_edge=0.99),
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)
-    "exact_phrase": MarketTypeCalibration(skip=False, yes_boost=0.10, min_edge=0.08),
+    "exact_phrase": MarketTypeCalibration(skip=True, min_edge=0.99),
     # Narrow price ranges are near-random → SKIP (backtest: 0.56 avg Brier)
     "price_range": MarketTypeCalibration(skip=True, min_edge=0.10),
     # LLM has no real sports analytics → SKIP (backtest: 0.64+ Brier)
