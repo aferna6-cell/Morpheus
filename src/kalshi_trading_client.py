@@ -123,6 +123,31 @@ class KalshiTradingClient:
         self._halt_reason = None
         self.logger.info("kalshi_trading_resumed", label=self.label)
 
+    async def check_and_resume(self, min_balance: float = 1.0) -> bool:
+        """Check balance and auto-resume trading if sufficient funds available.
+
+        Returns True if trading was resumed, False otherwise.
+        """
+        if not self._trading_halted:
+            return False
+        try:
+            balance = await self.get_balance()
+            if balance >= min_balance:
+                self.resume_trading()
+                self.logger.info(
+                    "kalshi_auto_resumed",
+                    label=self.label,
+                    balance=balance,
+                )
+                return True
+        except Exception as e:
+            self.logger.debug(
+                "kalshi_resume_check_failed",
+                label=self.label,
+                error=str(e),
+            )
+        return False
+
     # ------------------------------------------------------------------
     # Private key loading
     # ------------------------------------------------------------------
@@ -218,6 +243,7 @@ class KalshiTradingClient:
         price_cents: int,
         *,
         order_type: str = "limit",
+        is_exit: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Place a limit (or market) order on Kalshi.
 
@@ -234,8 +260,8 @@ class KalshiTradingClient:
         if count <= 0:
             return None
 
-        # Check if trading is halted
-        if self._trading_halted:
+        # Check if trading is halted (exit orders always go through)
+        if self._trading_halted and not is_exit:
             self.logger.warning(
                 "kalshi_order_skipped_halted",
                 label=self.label,
@@ -243,6 +269,12 @@ class KalshiTradingClient:
                 reason=self._halt_reason,
             )
             return None
+        if self._trading_halted and is_exit:
+            self.logger.info(
+                "kalshi_exit_order_despite_halt",
+                label=self.label,
+                ticker=ticker,
+            )
 
         self.logger.info(
             "kalshi_place_order",

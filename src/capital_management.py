@@ -161,6 +161,24 @@ class CapitalManager:
         except Exception as e:
             self.logger.warning("capital_state_load_error", error=str(e))
 
+        self._purge_expired()
+
+    def _purge_expired(self) -> None:
+        """Remove positions whose resolution_time has already passed."""
+        now = datetime.now(timezone.utc)
+        expired = [
+            mid for mid, pos in self._positions.items()
+            if pos.resolution_time is not None and pos.resolution_time < now
+        ]
+        if not expired:
+            return
+        for mid in expired:
+            self.logger.info("purged_expired_position", market_id=mid,
+                             resolution_time=self._positions[mid].resolution_time.isoformat())
+            del self._positions[mid]
+        self.logger.info("purge_expired_complete", count=len(expired))
+        self._save_state()
+
     def _save_state(self) -> None:
         """Persist state to disk."""
         try:

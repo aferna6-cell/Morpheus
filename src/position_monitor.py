@@ -146,6 +146,7 @@ class PositionMonitor:
                         count=count,
                         price_cents=sell_price,
                         order_type="limit",
+                        is_exit=True,
                     )
 
                     if result:
@@ -185,6 +186,11 @@ class PositionMonitor:
 
     async def _check_all_positions(self) -> None:
         """Check all positions across all accounts for exit conditions."""
+        # Auto-resume halted clients if balance has recovered
+        for client in self.trading_clients:
+            if client.is_halted:
+                await client.check_and_resume()
+
         for client in self.trading_clients:
             try:
                 positions = await client.get_positions()
@@ -298,6 +304,7 @@ class PositionMonitor:
                 count=count,
                 price_cents=sell_price,
                 order_type="limit",
+                is_exit=True,
             )
         except Exception as e:
             error_str = str(e).lower()

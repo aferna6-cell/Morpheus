@@ -19,6 +19,7 @@ import httpx
 import structlog
 
 from .trade_logger import get_trade_logger
+from .capital_management import get_capital_manager
 from .utils import BotConfig, append_jsonl, load_config
 
 
@@ -268,6 +269,13 @@ async def check_resolutions(
                     entry_probability=entry_prob,
                     clv=round(clv_val, 4),
                 )
+
+                # Remove from capital manager's open positions
+                try:
+                    cm = get_capital_manager()
+                    cm.remove_position(market_id, closing_price=actual_outcome)
+                except Exception:
+                    pass  # Capital manager may not be initialized
 
                 # Log bankroll payout if not dry-run
                 if not dry_run:
