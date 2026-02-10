@@ -85,6 +85,9 @@ class BotConfig(BaseModel):
     # Contrarian Strategy
     contrarian: Dict[str, Any] = Field(default_factory=dict)
 
+    # Survival Mode
+    survival: Dict[str, Any] = Field(default_factory=dict)
+
     # Alerts (Telegram)
     alerts: Dict[str, Any] = Field(default_factory=dict)
 

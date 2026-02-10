@@ -21,6 +21,7 @@ import structlog
 from ..engines.base import BaseEngine
 from ..engines.signals import TradeSignal
 from ..kalshi_client import KalshiClient, KalshiMarket
+from ..market_filters import MarketFilters
 from ..utils import BotConfig
 
 
@@ -66,6 +67,7 @@ class KalshiMMEngine(BaseEngine):
         self.config = config
         self.kalshi_client = kalshi_client
         self.logger = structlog.get_logger()
+        self._filters = MarketFilters(config)
 
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         mm_cfg = getattr(config, "market_making", None) or {}
@@ -151,6 +153,11 @@ class KalshiMMEngine(BaseEngine):
         candidates: List[KalshiMarket] = []
 
         for m in all_markets:
+            # Ticker prefix filter (junk markets — crypto ranges, mentions, etc.)
+            prefix_result = self._filters.check_ticker_prefix(m.ticker)
+            if not prefix_result.passed:
+                continue
+
             # Must have decent volume
             if m.volume < self._min_volume:
                 continue

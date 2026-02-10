@@ -234,6 +234,17 @@ async def run(
     from .perf_tracker import PerfTracker
     perf_tracker = PerfTracker(config=config, state_dir=state_dir)
 
+    # Survival tracker — self-sustainability gate
+    from .survival import SurvivalTracker
+    survival_tracker = SurvivalTracker(
+        config=config,
+        perf_tracker=perf_tracker,
+        cost_tracker=cost_tracker,
+        state_dir=state_dir,
+    )
+    perf_tracker.set_survival_tracker(survival_tracker)
+    orchestrator.survival_tracker = survival_tracker
+
     # Resolution tracker — periodic background task
     _resolution_task: asyncio.Task | None = None
 

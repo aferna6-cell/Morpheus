@@ -17,7 +17,7 @@ strategy:
 
 # Market filters — loosened for volume
 market_filters:
-  min_volume_24h: 500               # lowered from 5000
+  min_volume_24h: 5000              # raised back — filter out illiquid junk
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 200                # lowered
@@ -140,7 +140,7 @@ kalshi:
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 300        # 5 min scans
   fee_per_contract: 0.00            # maker = free
-  min_volume: 500                   # lowered from 5000
+  min_volume: 5000                  # raised back — filter out illiquid junk
   max_position_contracts: 50
   categories:
     - "Politics"
@@ -152,6 +152,15 @@ kalshi:
     - "Financials"
   max_resolution_days: 1            # same-day only
   max_spread_pct: 0.08
+
+# Survival mode — self-sustainability gate
+survival:
+  enabled: true
+  vps_cost_daily: 0.33
+  reduced_window_days: 7
+  halted_window_days: 14
+  reduced_multiplier: 0.5
+  grace_period_days: 7
 
 # Contrarian strategy — bet against overconfident crowds
 contrarian:

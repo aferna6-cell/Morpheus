@@ -201,6 +201,11 @@ class KalshiContrarianEngine(BaseEngine):
                 if hours_left < 6:
                     continue
 
+            # Ticker prefix filter (junk markets — crypto ranges, mentions, etc.)
+            prefix_result = self._filters.check_ticker_prefix(km.ticker)
+            if not prefix_result.passed:
+                continue
+
             # Market type skip (sports, coin flips)
             mtype = detect_market_type(km.title)
             if mtype in _SKIP_TYPES:

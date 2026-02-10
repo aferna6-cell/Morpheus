@@ -44,6 +44,13 @@ class PerfTracker:
         self._task: Optional[asyncio.Task] = None
         self._last_summary_date: Optional[str] = None
 
+        # Survival tracker reference (set via set_survival_tracker)
+        self._survival_tracker = None
+
+    def set_survival_tracker(self, tracker) -> None:
+        """Attach a SurvivalTracker for daily summary status line."""
+        self._survival_tracker = tracker
+
     async def start(self) -> None:
         self._task = asyncio.create_task(self._summary_loop())
         self.logger.info("perf_tracker_started")
@@ -202,6 +209,10 @@ class PerfTracker:
                 msg += f"{strat}: {data['count']} trades, ${s_pnl:+.2f}\n"
 
         msg += f"---\nAvg edge: {stats_1d['avg_edge']:+.3f} | Cost: ${stats_1d['total_cost']:.2f}"
+
+        # Survival mode status
+        if self._survival_tracker:
+            msg += f"\n---\n{self._survival_tracker.format_status_line()}"
 
         await send_alert(msg, self.config)
         self.logger.info("daily_summary_sent", pnl_1d=pnl_1d, trades_1d=stats_1d["total_trades"])

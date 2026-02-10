@@ -37,12 +37,15 @@ _JUNK_TICKER_PREFIXES = [
     "KXBTCD", "KXETHD", "KXDOGE", "KXSOLD", "KXBNBD",
     "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
     "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",
-    # Weather temperature highs/lows/rain (e.g., KXHIGH-*, KXLOW-*, KXRAIN-*)
-    "KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP",
+    # Weather markets — now traded with NOAA anchors (removed from junk list)
     # Word/phrase mention markets
     "KXWOMENTION", "KXWMENTION",
     # Stock intraday ranges
     "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+    # Entertainment / pop culture — LLMs have no edge on celebrity/media outcomes
+    "KXSUPERBOWLAD", "KXRT", "KXSPOTIFY", "KXSPOTIFYD", "KXSPOTIFYGLOBALD",
+    "KXSBADAPPEARANCES", "KXTOPSONG", "KXTOPALBUM", "KXALBUMDEBUT",
+    "KXFIRSTSUPERBOWLSONG", "KXAAAGASW", "KXNEXTTEAMNFL",
 ]
 
 

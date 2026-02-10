@@ -251,6 +251,21 @@ def detect_market_type(question: str) -> str:
     if any(sports_signals):
         return "sports"
 
+    # Entertainment / pop culture — celebrity appearances, streaming charts, ads
+    entertainment_signals = [
+        any(w in q for w in ["spotify", "top song", "top album", "album debut",
+                             "streaming", "billboard", "chart"]),
+        any(w in q for w in ["rotten tomatoes", "tomatometer", "audience score",
+                             "box office"]),
+        any(w in q for w in ["super bowl ad", "super bowl commercial",
+                             "halftime show", "halftime performer"]),
+        any(w in q for w in ["celebrity", "appearance", "red carpet", "award show",
+                             "grammy", "oscar", "emmy", "golden globe"]),
+        any(w in q for w in ["tiktok", "instagram", "follower", "subscriber count"]),
+    ]
+    if any(entertainment_signals):
+        return "entertainment"
+
     # Physical/engineering outcomes the LLM can't predict — coin flips
     coin_flip_signals = [
         any(w in q for w in ["explode", "crash", "malfunction", "abort", "fail"]) and
@@ -311,8 +326,8 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     "announcer_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
     # Word/phrase mention markets — can't predict exact words in speeches
     "word_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
-    # Weather markets — professional models already price efficiently
-    "weather":     MarketTypeCalibration(skip=True, min_edge=0.99),
+    # Weather markets — now traded with NOAA anchors, conservative edge
+    "weather":     MarketTypeCalibration(skip=False, min_edge=0.05, extra_shrink=0.05),
     # Crypto daily price ranges — narrow intraday ranges are near-random
     "crypto_range": MarketTypeCalibration(skip=True, min_edge=0.99),
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)
@@ -321,6 +336,8 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     "price_range": MarketTypeCalibration(skip=True, min_edge=0.10),
     # LLM has no real sports analytics → SKIP (backtest: 0.64+ Brier)
     "sports":      MarketTypeCalibration(skip=True, min_edge=0.10),
+    # Entertainment / pop culture — unpredictable celebrity/media outcomes
+    "entertainment": MarketTypeCalibration(skip=True, min_edge=0.99),
     # Physical outcomes / coin flips — LLM has zero edge
     "coin_flip":   MarketTypeCalibration(skip=True, min_edge=0.10),
     # Trump/volatile actors — LLM underestimates chaos; require higher edge

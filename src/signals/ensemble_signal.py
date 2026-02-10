@@ -99,7 +99,7 @@ def detect_market_type(question: str) -> str:
 # Markets to skip entirely — all types where LLM has no informational edge
 _SKIP_TYPES = {
     "sports", "coin_flip", "announcer_mention", "word_mention",
-    "weather", "crypto_range", "exact_phrase", "price_range",
+    "crypto_range", "exact_phrase", "price_range", "entertainment",
 }
 
 # Min edge by market type — pull from full calibration profiles

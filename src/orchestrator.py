@@ -29,6 +29,7 @@ from .signals.base import SignalResult, TradingSide
 from .alerts import send_alert
 from .market_filters import MarketFilters
 from .runlog import log_prediction
+from .survival import SurvivalMode, SurvivalTracker
 from .utils import BotConfig, utc_now
 
 
@@ -80,12 +81,14 @@ class Orchestrator:
         kalshi_executors: Optional[List[KalshiExecutor]] = None,
         executor: Optional[object] = None,  # legacy compat, unused
         fill_manager: Optional[FillManager] = None,
+        survival_tracker: Optional[SurvivalTracker] = None,
     ):
         self.config = config
         self.engines = engines
         self.risk_manager = risk_manager
         self.kalshi_executors = kalshi_executors or []
         self.fill_manager = fill_manager
+        self.survival_tracker = survival_tracker
         self.logger = structlog.get_logger()
 
         orch_cfg = getattr(config, "orchestrator", None) or config.__dict__.get("orchestrator", {})
@@ -181,6 +184,15 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def _run_cycle(self, cycle: int) -> None:
+        # 0. Survival mode check
+        if self.survival_tracker:
+            survival_mode = self.survival_tracker.evaluate()
+            self.risk_manager.set_survival_multiplier(self.survival_tracker.multiplier)
+            if survival_mode == SurvivalMode.HALTED:
+                if cycle % 60 == 1:  # log once per ~hour
+                    self.logger.warning("survival_halted_skip_cycle", mode="halted")
+                return
+
         # 1. Gather signals from all engines
         all_signals: List[TradeSignal] = []
         for engine in self.engines:

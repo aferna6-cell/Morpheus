@@ -87,6 +87,9 @@ class RiskManager:
             strategy_config.get("high_conviction_multiplier", 1.5)
         )
 
+        # Survival mode multiplier (set by SurvivalTracker)
+        self._survival_multiplier: float = 1.0
+
         # Per-strategy position limits
         contrarian_cfg = getattr(config, "contrarian", None) or {}
         if isinstance(contrarian_cfg, dict):
@@ -102,6 +105,10 @@ class RiskManager:
         self.daily_pnl_date = datetime.now(timezone.utc).date()
         self.trading_halted = False
         self._load_state()
+
+    def set_survival_multiplier(self, multiplier: float) -> None:
+        """Set the survival-mode sizing multiplier (0.0 to 1.0)."""
+        self._survival_multiplier = max(0.0, min(1.0, multiplier))
 
     def calculate_position_size(
         self,
@@ -144,6 +151,10 @@ class RiskManager:
                 kelly_bet = available_capital * kelly_f * self.kelly_fraction
                 max_bet = available_capital * self.max_bankroll_pct
                 position_amount = min(kelly_bet, max_bet)
+
+            # Apply survival mode multiplier
+            if self._survival_multiplier < 1.0:
+                position_amount *= self._survival_multiplier
 
             # Conviction-based max (string-based, not enum)
             conviction = getattr(signal, "conviction", "low")
