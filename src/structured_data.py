@@ -26,7 +26,9 @@ _FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 logger = structlog.get_logger()
 
 
-async def get_structured_anchor(question: str, category: str = "") -> Optional[str]:
+async def get_structured_anchor(
+    question: str, category: str = "", market_id: str = ""
+) -> Optional[str]:
     """Get structured data context for a market question.
 
     Returns a formatted string for prompt injection, or None if no data available.
@@ -49,11 +51,11 @@ async def get_structured_anchor(question: str, category: str = "") -> Optional[s
         return await _get_polling_context(question)
 
     # Weather markets — NOAA NWS forecast data
-    if any(w in q for w in ["temperature", "high temperature", "low temperature",
+    if any(w in q for w in ["temperature", "high temp", "low temp",
                              "degrees fahrenheit", "degrees celsius",
                              "rainfall", "inches of rain", "snowfall", "inches of snow",
                              "wind speed", "heat wave", "cold snap"]):
-        return await _get_weather_context(question)
+        return await _get_weather_context(question, market_id)
 
     return None
 
@@ -589,6 +591,31 @@ _WEATHER_CITIES: Dict[str, Tuple[float, float]] = {
     "salt lake city": (40.7608, -111.8910),
 }
 
+# Aliases for city name matching (Kalshi uses abbreviations in titles)
+_CITY_ALIASES: Dict[str, str] = {
+    "nyc": "new york", "ny": "new york",
+    "la": "los angeles", "lax": "los angeles",
+    "chi": "chicago",
+    "phx": "phoenix",
+    "philly": "philadelphia",
+    "sf": "san francisco", "sfo": "san francisco",
+    "dc": "washington", "d.c.": "washington",
+    "nola": "new orleans",
+    "lv": "las vegas", "vegas": "las vegas",
+    "atl": "atlanta",
+    "slc": "salt lake city",
+    "kc": "kansas city",
+    "stl": "st. louis", "st louis": "st. louis",
+    "okc": "oklahoma city",
+    "jax": "jacksonville",
+    "min": "minneapolis",
+    "aus": "austin",
+    "den": "denver",
+    "sea": "seattle",
+    "bos": "boston",
+    "mia": "miami",
+}
+
 # Cache for NWS gridpoint URLs (permanent — grid doesn't change)
 _gridpoint_cache: Dict[str, str] = {}
 
@@ -598,14 +625,31 @@ _FORECAST_CACHE_TTL = 3600.0  # 1 hour
 
 
 def _parse_city(question: str) -> Optional[str]:
-    """Extract city name from market question using longest-match."""
+    """Extract city name from market question using longest-match.
+
+    Checks both canonical city names and common aliases/abbreviations.
+    Uses word-boundary matching for short aliases to avoid false positives.
+    """
     q = question.lower()
     best_match = None
     best_len = 0
+
+    # Check canonical city names (longest match wins)
     for city in _WEATHER_CITIES:
         if city in q and len(city) > best_len:
             best_match = city
             best_len = len(city)
+
+    # If no canonical match, try aliases with word-boundary check
+    if best_match is None:
+        for alias, canonical in _CITY_ALIASES.items():
+            # Word-boundary match to avoid "la" matching "plan" etc.
+            pattern = rf"\b{re.escape(alias)}\b"
+            if re.search(pattern, q):
+                if len(alias) > best_len:
+                    best_match = canonical
+                    best_len = len(alias)
+
     return best_match
 
 
@@ -712,10 +756,50 @@ async def _get_nws_forecast(forecast_url: str) -> Optional[Dict]:
     return None
 
 
+def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
+    """Parse weather market question for threshold type and value.
+
+    Returns (type, threshold) where type is 'high', 'low', 'precip', etc.
+    Examples:
+      "Will the high temp be >65°" → ("high", 65.0)
+      "Will the high temp in LA be 63-64°" → ("high_bracket", 63.5)
+      "Will the minimum temperature be <54°" → ("low", 54.0)
+    """
+    q = question.lower()
+
+    # High temperature threshold: ">65°", "<65°", "above 65", "below 65"
+    if "high" in q or "maximum" in q:
+        # Bracket: "63-64°" or "63.5-64.5"
+        m = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)°", q)
+        if m:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            return ("high_bracket", (lo + hi) / 2)
+        # Threshold: ">65°", "<65°", ">65", "<65"
+        m = re.search(r"[><]\s*(\d+\.?\d*)", q)
+        if m:
+            return ("high", float(m.group(1)))
+        # "above 65" / "below 65"
+        m = re.search(r"(?:above|over|exceed)\s+(\d+\.?\d*)", q)
+        if m:
+            return ("high", float(m.group(1)))
+
+    if "low" in q or "minimum" in q:
+        m = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)°", q)
+        if m:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            return ("low_bracket", (lo + hi) / 2)
+        m = re.search(r"[><]\s*(\d+\.?\d*)", q)
+        if m:
+            return ("low", float(m.group(1)))
+
+    return None
+
+
 def _format_weather_anchor(
     city: str,
     periods: List[Dict],
     target_date: Optional[datetime],
+    question: str = "",
 ) -> str:
     """Format NWS forecast periods into a structured anchor string."""
     context = f"\nSTRUCTURED DATA ANCHOR — NOAA/NWS Forecast for {city.title()}:\n"
@@ -752,6 +836,54 @@ def _format_weather_anchor(
             line += f" — {short_forecast}"
         context += line + "\n"
 
+    # Threshold analysis — compare NWS forecast to market question
+    threshold_info = _parse_weather_threshold(question) if question else None
+    if threshold_info and relevant:
+        t_type, t_value = threshold_info
+        # Get forecast high/low temperatures
+        forecast_temps = []
+        for p in relevant:
+            t = p.get("temperature")
+            if isinstance(t, (int, float)):
+                forecast_temps.append((p.get("name", ""), float(t)))
+
+        if forecast_temps:
+            # For high temp markets, use daytime period; for low, use nighttime
+            if "high" in t_type:
+                day_temps = [(n, t) for n, t in forecast_temps if "night" not in n.lower()]
+                forecast_temp = day_temps[0][1] if day_temps else forecast_temps[0][1]
+            else:
+                night_temps = [(n, t) for n, t in forecast_temps if "night" in n.lower()]
+                forecast_temp = night_temps[0][1] if night_temps else forecast_temps[-1][1]
+
+            diff = forecast_temp - t_value
+            abs_diff = abs(diff)
+
+            if "bracket" in t_type:
+                # For bracket markets, distance from bracket center
+                if abs_diff < 1.5:
+                    label = "CLOSE to bracket range"
+                elif abs_diff < 4:
+                    label = "well outside bracket range"
+                else:
+                    label = "FAR OUTSIDE bracket range"
+            else:
+                if abs_diff >= 8:
+                    label = "FAR ABOVE" if diff > 0 else "FAR BELOW"
+                elif abs_diff >= 4:
+                    label = "well above" if diff > 0 else "well below"
+                elif abs_diff >= 2:
+                    label = "slightly above" if diff > 0 else "slightly below"
+                else:
+                    label = "CLOSE to threshold"
+
+            context += (
+                f"\n  THRESHOLD ANALYSIS:\n"
+                f"    NWS forecast: {forecast_temp:.0f}°F\n"
+                f"    Market threshold: {t_value:.1f}°F\n"
+                f"    Assessment: Forecast is {label} threshold ({diff:+.1f}°F)\n"
+            )
+
     context += (
         "  Source: NOAA National Weather Service (official US government forecast)\n"
         "  Use this forecast data as your starting anchor for weather markets.\n"
@@ -759,11 +891,51 @@ def _format_weather_anchor(
     return context
 
 
-async def _get_weather_context(question: str) -> Optional[str]:
+def _parse_city_from_ticker(ticker: str) -> Optional[str]:
+    """Extract city from Kalshi weather ticker (e.g., KXHIGHTSFO → san francisco)."""
+    # Kalshi weather tickers: KXHIGH{T}{CODE}-date-params or KXLOW{T}{CODE}-date
+    # Extract 2-4 char city code after KXHIGH/KXHIGHT/KXLOW/KXLOWT
+    t = ticker.upper()
+    code = None
+    for prefix in ("KXHIGHT", "KXHIGH", "KXLOWT", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP"):
+        if t.startswith(prefix):
+            rest = t[len(prefix):]
+            # Extract code before the dash (e.g., "SFO" from "SFO-26FEB10-B56.5")
+            code = rest.split("-")[0] if "-" in rest else rest
+            break
+    if not code:
+        return None
+
+    # Map Kalshi city codes to canonical city names
+    _TICKER_CODE_MAP = {
+        "SFO": "san francisco", "LAX": "los angeles", "CHI": "chicago",
+        "AUS": "austin", "ATL": "atlanta", "NOLA": "new orleans",
+        "DEN": "denver", "MIN": "minneapolis", "LV": "las vegas",
+        "SEA": "seattle", "MIA": "miami", "NYC": "new york",
+        "PHX": "phoenix", "BOS": "boston", "DFW": "dallas",
+        "HOU": "houston", "PHL": "philadelphia", "DET": "detroit",
+        "MSP": "minneapolis", "TPA": "tampa", "CLE": "cleveland",
+        "PIT": "pittsburgh", "CIN": "cincinnati", "STL": "st. louis",
+        "MEM": "memphis", "NAS": "nashville", "OKC": "oklahoma city",
+        "JAX": "jacksonville", "SLC": "salt lake city", "RAL": "raleigh",
+        "MIL": "milwaukee", "BAL": "baltimore", "ALB": "albuquerque",
+        "TUC": "tucson", "FRE": "fresno", "POR": "portland",
+        "IND": "indianapolis", "CLT": "charlotte", "COL": "columbus",
+        "FTW": "fort worth", "EP": "el paso", "LOU": "louisville",
+        "KC": "kansas city", "SA": "san antonio", "SD": "san diego",
+        "SJ": "san jose",
+    }
+    return _TICKER_CODE_MAP.get(code)
+
+
+async def _get_weather_context(question: str, market_id: str = "") -> Optional[str]:
     """Get NOAA NWS forecast data for weather market questions."""
     city = _parse_city(question)
+    # Fallback: extract city from ticker if not in question text
+    if not city and market_id:
+        city = _parse_city_from_ticker(market_id)
     if not city:
-        logger.debug("weather_no_city_match", question=question[:80])
+        logger.debug("weather_no_city_match", question=question[:80], ticker=market_id)
         return None
 
     coords = _WEATHER_CITIES[city]
@@ -783,7 +955,7 @@ async def _get_weather_context(question: str) -> Optional[str]:
     if not periods:
         return None
 
-    anchor = _format_weather_anchor(city, periods, target_date)
+    anchor = _format_weather_anchor(city, periods, target_date, question)
 
     logger.info(
         "noaa_weather_anchor",

@@ -326,8 +326,8 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     "announcer_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
     # Word/phrase mention markets — can't predict exact words in speeches
     "word_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
-    # Weather markets — now traded with NOAA anchors, conservative edge
-    "weather":     MarketTypeCalibration(skip=True, min_edge=0.99),
+    # Weather markets — traded with NOAA NWS forecast anchors, conservative
+    "weather":     MarketTypeCalibration(skip=False, min_edge=0.05, extra_shrink=0.05),
     # Crypto daily price ranges — narrow intraday ranges are near-random
     "crypto_range": MarketTypeCalibration(skip=True, min_edge=0.99),
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)

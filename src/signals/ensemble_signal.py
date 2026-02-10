@@ -369,7 +369,7 @@ class EnsembleSignal(Signal):
             # Get news context + structured data in parallel
             news_task = self.news_aggregator.get_market_news(market)
             structured_task = get_structured_anchor(
-                market.question, market.category or ""
+                market.question, market.category or "", market.id
             )
             news_articles, structured_context = await asyncio.gather(
                 news_task, structured_task, return_exceptions=True
