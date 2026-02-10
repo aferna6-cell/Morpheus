@@ -38,7 +38,7 @@ MANIFEST
 
 # Logs
 *.log
-logs/
+/logs/
 
 # Bot runs/artifacts
 runs/*
