@@ -9,6 +9,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,10 @@ async def check_resolutions(
         for market_id, pred in unresolved.items():
             try:
                 r = await client.get(f"/markets/{market_id}")
+                if r.status_code == 429:
+                    logger.debug("resolution_tracker_rate_limited", market_id=market_id)
+                    await asyncio.sleep(2.0)
+                    continue
                 if r.status_code != 200:
                     logger.warning(
                         "resolution_tracker_api_error",
@@ -212,6 +217,9 @@ async def check_resolutions(
                     market_id=market_id,
                     error=str(e),
                 )
+
+            # Rate-limit: ~1 request per 0.5s to stay under Kalshi limits
+            await asyncio.sleep(0.5)
 
     logger.info("resolution_check_complete", newly_resolved=newly_resolved)
     return newly_resolved
