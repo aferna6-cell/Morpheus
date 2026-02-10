@@ -913,7 +913,7 @@ def _parse_city_from_ticker(ticker: str) -> Optional[str]:
         "DEN": "denver", "MIN": "minneapolis", "LV": "las vegas",
         "SEA": "seattle", "MIA": "miami", "NYC": "new york",
         "PHX": "phoenix", "BOS": "boston", "DFW": "dallas",
-        "HOU": "houston", "PHL": "philadelphia", "DET": "detroit",
+        "HOU": "houston", "PHL": "philadelphia", "PHIL": "philadelphia", "DET": "detroit",
         "MSP": "minneapolis", "TPA": "tampa", "CLE": "cleveland",
         "PIT": "pittsburgh", "CIN": "cincinnati", "STL": "st. louis",
         "MEM": "memphis", "NAS": "nashville", "OKC": "oklahoma city",

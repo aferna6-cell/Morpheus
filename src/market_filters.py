@@ -69,6 +69,8 @@ class MarketFilters:
         self.max_spread_pct = float(mf.get("max_spread_pct", 0.05))
         self.max_resolution_days = int(mf.get("max_resolution_days", 30))
         self.min_data_sources = int(mf.get("min_data_sources", 3))
+        self.min_price = float(mf.get("min_price", 0.05))
+        self.max_price = float(mf.get("max_price", 0.95))
 
         # Ticker prefix blocklist (from config or default)
         self.blocked_ticker_prefixes = list(_JUNK_TICKER_PREFIXES)
@@ -229,6 +231,31 @@ class MarketFilters:
             market_id=market_id,
         )
 
+    def check_price(
+        self,
+        market_id: str,
+        bid: float,
+        ask: float,
+    ) -> FilterResult:
+        """Skip markets with extreme prices where LLM has no edge."""
+        if bid <= 0 or ask <= 0:
+            return FilterResult(passed=True, reason="ok", market_id=market_id)
+
+        mid = (bid + ask) / 2
+        if mid < self.min_price:
+            return FilterResult(
+                passed=False,
+                reason=f"Price {mid:.0%} below {self.min_price:.0%} min (too certain NO)",
+                market_id=market_id,
+            )
+        if mid > self.max_price:
+            return FilterResult(
+                passed=False,
+                reason=f"Price {mid:.0%} above {self.max_price:.0%} max (too certain YES)",
+                market_id=market_id,
+            )
+        return FilterResult(passed=True, reason="ok", market_id=market_id)
+
     def check_ticker_prefix(self, market_id: str) -> FilterResult:
         """Block markets by ticker prefix (junk markets with no LLM edge)."""
         ticker_upper = market_id.upper()
@@ -264,6 +291,7 @@ class MarketFilters:
             return ticker_result
 
         checks = [
+            self.check_price(market_id, bid, ask),
             self.check_volume(market_id, volume),
             self.check_spread(market_id, bid, ask),
             self.check_resolution_time(market_id, close_time),

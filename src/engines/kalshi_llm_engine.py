@@ -225,7 +225,9 @@ class KalshiLLMEngine(BaseEngine):
                 self._markets_filtered += 1
                 # Track why markets are filtered
                 reason = filter_result.reason.lower()
-                if "volume" in reason:
+                if "price" in reason:
+                    filter_stats["price"] += 1
+                elif "volume" in reason:
                     filter_stats["volume"] += 1
                 elif "spread" in reason:
                     filter_stats["spread"] += 1
@@ -241,6 +243,7 @@ class KalshiLLMEngine(BaseEngine):
         self.logger.info(
             "kalshi_llm_scan_filtered",
             markets_passed=len(filtered_markets),
+            filtered_by_price=filter_stats.get("price", 0),
             filtered_by_volume=filter_stats["volume"],
             filtered_by_spread=filter_stats["spread"],
             filtered_by_resolution=filter_stats["resolution"],
