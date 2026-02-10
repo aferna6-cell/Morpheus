@@ -45,6 +45,59 @@ def _resolved_market_ids(state_dir: Path) -> Set[str]:
     return {r["market_id"] for r in resolutions if "market_id" in r}
 
 
+def _build_order_lookup(state_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """Build market_id -> list of order_placed events from trade history."""
+    trades = _read_jsonl(state_dir / "trade_history.jsonl")
+    lookup: Dict[str, List[Dict[str, Any]]] = {}
+    for t in trades:
+        if t.get("event") != "order_placed":
+            continue
+        # ticker in trade history may have ":yes"/":no" suffix — strip it
+        ticker = t.get("ticker", "")
+        market_id = ticker.split(":")[0] if ":" in ticker else ticker
+        if market_id:
+            lookup.setdefault(market_id, []).append(t)
+    return lookup
+
+
+def _compute_pnl(
+    orders: List[Dict[str, Any]],
+    actual_outcome: float,
+) -> tuple[float, int]:
+    """Compute dollar P&L and total contract count from orders + outcome.
+
+    Kalshi binary: buy side at price_cents. If your side wins, payout = 100c/contract.
+    If your side loses, payout = 0.
+
+    Returns (pnl_usd, total_count).
+    """
+    total_pnl = 0.0
+    total_count = 0
+    outcome_yes = actual_outcome >= 0.5
+
+    for order in orders:
+        count = int(order.get("count") or 0)
+        price_cents = float(order.get("price_cents") or 0)
+        side = (order.get("side") or "").lower()
+
+        if count <= 0 or price_cents <= 0:
+            continue
+
+        total_count += count
+        cost = count * price_cents / 100.0  # dollars spent
+
+        # Did our side win?
+        won = (side == "yes" and outcome_yes) or (side == "no" and not outcome_yes)
+
+        if won:
+            payout = count * 1.00  # $1 per contract
+            total_pnl += payout - cost
+        else:
+            total_pnl -= cost
+
+    return round(total_pnl, 2), total_count
+
+
 async def check_resolutions(
     config: BotConfig,
     state_dir: str | Path,
@@ -64,6 +117,7 @@ async def check_resolutions(
         return 0
 
     already_resolved = _resolved_market_ids(state_path)
+    order_lookup = _build_order_lookup(state_path)
 
     # Collect unique unresolved market ids
     unresolved: Dict[str, Dict[str, Any]] = {}
@@ -153,6 +207,10 @@ async def check_resolutions(
                     else:
                         continue
 
+                # Compute dollar P&L from actual orders
+                orders = order_lookup.get(market_id, [])
+                pnl_usd, total_count = _compute_pnl(orders, actual_outcome)
+
                 resolution_record = {
                     "market_id": market_id,
                     "predicted_p_yes": pred.get("predicted_p_yes", 0.5),
@@ -164,6 +222,8 @@ async def check_resolutions(
                     "timestamp": pred.get("timestamp", ""),
                     "resolved_at": datetime.now(timezone.utc).isoformat(),
                     "platform": "kalshi",
+                    "pnl_usd": pnl_usd,
+                    "total_count": total_count,
                 }
 
                 # Include features_active if present
@@ -179,6 +239,8 @@ async def check_resolutions(
                     actual_outcome=actual_outcome,
                     predicted_p_yes=pred.get("predicted_p_yes"),
                     side=pred.get("side"),
+                    pnl_usd=pnl_usd,
+                    contracts=total_count,
                 )
 
                 # Log to trade history
@@ -200,6 +262,8 @@ async def check_resolutions(
                     ticker=market_id,
                     outcome=outcome_str_log,
                     held_side=side_val,
+                    held_count=total_count,
+                    pnl_usd=pnl_usd,
                     closing_probability=closing_price,
                     entry_probability=entry_prob,
                     clv=round(clv_val, 4),
