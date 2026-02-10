@@ -187,9 +187,16 @@ class BraveSearchSource:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
+        self._last_call: float = 0.0  # monotonic timestamp of last request
 
     async def search(self, query: str, max_articles: int = 8) -> List[NewsArticle]:
         try:
+            # Enforce 1.1s minimum between Brave calls to avoid 429s
+            now = asyncio.get_event_loop().time()
+            elapsed = now - self._last_call
+            if elapsed < 1.1:
+                await asyncio.sleep(1.1 - elapsed)
+            self._last_call = asyncio.get_event_loop().time()
             headers = {
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",

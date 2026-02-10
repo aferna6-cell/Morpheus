@@ -12,12 +12,15 @@ Sources:
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
 import structlog
+
+_FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
 logger = structlog.get_logger()
 
@@ -53,19 +56,21 @@ async def _get_fedwatch_context() -> Optional[str]:
     Uses the CME website's public data or financial news for current
     Fed rate probabilities implied by futures markets.
     """
+    if not _FRED_API_KEY:
+        return None
+
     try:
-        # Try to get Fed funds futures data from a public financial API
+        # Fetch Fed funds futures data from FRED API
         async with httpx.AsyncClient(
             timeout=10.0,
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
             follow_redirects=True,
         ) as client:
-            # Use FRED API for current federal funds rate (free, no key needed for some endpoints)
             resp = await client.get(
                 "https://api.stlouisfed.org/fred/series/observations",
                 params={
                     "series_id": "DFEDTARU",  # Federal funds target rate upper
-                    "api_key": "DEMO_KEY",    # FRED demo key
+                    "api_key": _FRED_API_KEY,
                     "file_type": "json",
                     "sort_order": "desc",
                     "limit": 1,
@@ -122,12 +127,15 @@ async def _get_econ_calendar_context(question: str) -> Optional[str]:
         if not series_id:
             return None
 
+        if not _FRED_API_KEY:
+            return None
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 "https://api.stlouisfed.org/fred/series/observations",
                 params={
                     "series_id": series_id,
-                    "api_key": "DEMO_KEY",
+                    "api_key": _FRED_API_KEY,
                     "file_type": "json",
                     "sort_order": "desc",
                     "limit": 3,
