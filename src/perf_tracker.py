@@ -102,19 +102,28 @@ class PerfTracker:
                 "total_fees": 0.0,
             }
 
+        def _safe_float(val, default=0.0) -> float:
+            """Convert to float, treating None as default."""
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
         # Separate orders placed vs fills vs exits
         orders = [t for t in trades if t.get("event") == "order_placed"]
         exits = [t for t in trades if t.get("event") == "position_exit"]
 
-        total_cost = sum(float(t.get("cost_usd", 0)) for t in orders)
-        total_fees = sum(float(t.get("fee_usd", 0)) for t in orders)
-        total_pnl = sum(float(t.get("pnl", 0)) for t in exits)
+        total_cost = sum(_safe_float(t.get("cost_usd")) for t in orders)
+        total_fees = sum(_safe_float(t.get("fee_usd")) for t in orders)
+        total_pnl = sum(_safe_float(t.get("pnl")) for t in exits)
 
-        wins = sum(1 for t in exits if float(t.get("pnl", 0)) > 0)
-        losses = sum(1 for t in exits if float(t.get("pnl", 0)) <= 0)
+        wins = sum(1 for t in exits if _safe_float(t.get("pnl")) > 0)
+        losses = sum(1 for t in exits if _safe_float(t.get("pnl")) <= 0)
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
 
-        edges = [float(t.get("edge", 0)) for t in orders if t.get("edge")]
+        edges = [_safe_float(t.get("edge")) for t in orders if t.get("edge") is not None]
         avg_edge = sum(edges) / len(edges) if edges else 0.0
 
         # Per-strategy breakdown

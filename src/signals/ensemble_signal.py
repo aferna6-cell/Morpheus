@@ -340,6 +340,17 @@ class EnsembleSignal(Signal):
             if mtype in _SKIP_TYPES:
                 return self._hold(market, f"Skipped market type '{mtype}'")
 
+            # Weather time-of-day filter: skip weather markets closing within
+            # 8 hours — by then temps are already observed at weather stations,
+            # so the market reflects actual data while the bot only has forecasts.
+            if mtype == "weather" and market.time_to_close_hours is not None:
+                if market.time_to_close_hours < 8:
+                    return self._hold(
+                        market,
+                        f"Weather market closing in {market.time_to_close_hours:.1f}h "
+                        f"(temps already observed)",
+                    )
+
             market_price = market.midpoint_price
             if market_price is None:
                 return self._hold(market, "No market price available")
@@ -493,7 +504,7 @@ class EnsembleSignal(Signal):
                 yes_dampen = max(0.0, yes_dampen + type_cal.yes_boost)
 
             # Reduce calibration when structured data shows extreme confidence.
-            # Hard FRED data should override generic LLM overconfidence adjustments.
+            # Hard FRED/NOAA data should override generic LLM overconfidence adjustments.
             if isinstance(structured_context, str):
                 if "FAR ABOVE" in structured_context or "FAR BELOW" in structured_context:
                     total_shrink *= 0.15
@@ -508,6 +519,34 @@ class EnsembleSignal(Signal):
                     yes_dampen = min(yes_dampen, 0.10)
                     self.logger.info(
                         "calibration_reduced_strong_data",
+                        market_id=market.id,
+                        effective_shrink=round(total_shrink, 3),
+                    )
+                elif mtype == "weather" and (
+                    "CLOSE to threshold" in structured_context
+                    or "CLOSE to bracket range" in structured_context
+                    or "slightly above" in structured_context
+                    or "slightly below" in structured_context
+                ):
+                    # NOAA forecast is within ~4°F of the market threshold/bracket.
+                    # NWS forecasts have ±2-3°F accuracy, so this is within
+                    # error margin — the market likely has better data. Skip.
+                    self.logger.info(
+                        "weather_skip_near_threshold",
+                        market_id=market.id,
+                        reason="NOAA forecast near threshold (within error margin)",
+                    )
+                    return self._hold(
+                        market,
+                        "Weather: NOAA forecast near threshold (within NWS error margin)",
+                    )
+                elif mtype == "weather" and "FAR OUTSIDE bracket range" in structured_context:
+                    # NOAA forecast is 4°F+ from the bracket — genuine disagreement.
+                    # Trust the data, reduce calibration to let the prediction through.
+                    total_shrink *= 0.25
+                    yes_dampen = min(yes_dampen, 0.05)
+                    self.logger.info(
+                        "calibration_reduced_weather_far_outside",
                         market_id=market.id,
                         effective_shrink=round(total_shrink, 3),
                     )
@@ -1012,6 +1051,14 @@ Rules:
             mtype = detect_market_type(market.question)
             if mtype in _SKIP_TYPES:
                 return self._hold(market, f"Skipped market type '{mtype}'")
+
+            # Weather time-of-day filter (same as evaluate())
+            if mtype == "weather" and market.time_to_close_hours is not None:
+                if market.time_to_close_hours < 8:
+                    return self._hold(
+                        market,
+                        f"Weather market closing in {market.time_to_close_hours:.1f}h",
+                    )
 
             # Get news context
             news_articles = await self.news_aggregator.get_market_news(market)
