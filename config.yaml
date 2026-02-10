@@ -22,7 +22,7 @@ market_filters:
   max_price: 0.95
   min_liquidity: 200                # lowered
   min_liquidity_aggressive: 200
-  max_spread_pct: 0.08              # relaxed from 5%
+  max_spread_pct: 0.12              # relaxed — 8c at 90c mid = 8.4%, need headroom
   min_data_sources: 0               # no data source requirement
   exclude_closing_within_hours: 0   # trade right up to close
   max_markets_per_scan: 200
@@ -151,7 +151,7 @@ kalshi:
     - "Companies"
     - "Financials"
   max_resolution_days: 1            # same-day only
-  max_spread_pct: 0.08
+  max_spread_pct: 0.12              # matches market_filters
 
 # Survival mode — self-sustainability gate
 survival:
