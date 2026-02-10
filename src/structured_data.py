@@ -285,6 +285,31 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
     return context
 
 
+def _safe_float(val: str) -> Optional[float]:
+    """Parse FRED value, returning None for missing data (e.g., '.')."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _find_valid_pair(obs: List[Dict], offset: int = 1) -> Optional[Tuple[float, float, str]]:
+    """Find a valid (current, previous) pair skipping missing values.
+
+    Returns (current_value, prev_value, as_of_date) or None.
+    """
+    values = []
+    for o in obs:
+        v = _safe_float(o.get("value", ""))
+        if v is not None:
+            values.append((v, o.get("date", "?")))
+        if len(values) >= offset + 1:
+            break
+    if len(values) >= offset + 1:
+        return values[0][0], values[offset][0], values[0][1]
+    return None
+
+
 async def _get_cpi_threshold_analysis(question: str) -> Optional[str]:
     """Compare the question's threshold to actual FRED data.
 
@@ -309,32 +334,34 @@ async def _get_cpi_threshold_analysis(question: str) -> Optional[str]:
         return await _analyze_combo_threshold(q)
 
     if is_yoy:
-        # YoY CPI — compare to CPALTT01USM657N
-        obs = await _fetch_fred_series("CPALTT01USM657N", limit=3)
-        if not obs:
+        # YoY CPI — compute from CPIAUCSL index (13 months)
+        # Don't use CPALTT01USM657N — it's stale/monthly, not annual
+        series_id = "CPILFESL" if is_core else "CPIAUCSL"
+        obs = await _fetch_fred_series(series_id, limit=14)
+        if not obs or len(obs) < 13:
             return None
-        try:
-            current_val = float(obs[0]["value"])
-            as_of = obs[0].get("date", "?")
-        except (ValueError, KeyError):
+        # Find current and 12-months-ago values, skipping missing data
+        current_vals = [(o, _safe_float(o.get("value", ""))) for o in obs]
+        valid = [(o, v) for o, v in current_vals if v is not None]
+        if len(valid) < 13:
             return None
+        curr_val = valid[0][1]
+        year_ago_val = valid[12][1]
+        as_of = valid[0][0].get("date", "?")
+        current_val = round(((curr_val / year_ago_val) - 1) * 100, 2)
 
         gap = current_val - threshold
-        series_label = "CPI All Items YoY"
-        volatility = 0.2  # typical MoM change in YoY CPI
+        series_label = "CPI YoY (computed from index)"
+        volatility = 0.2  # typical month-to-month change in YoY CPI
 
     elif is_core:
         # Core CPI MoM — compute from CPILFESL index
-        obs = await _fetch_fred_series("CPILFESL", limit=3)
-        if not obs or len(obs) < 2:
+        obs = await _fetch_fred_series("CPILFESL", limit=4)
+        pair = _find_valid_pair(obs or [])
+        if not pair:
             return None
-        try:
-            curr_idx = float(obs[0]["value"])
-            prev_idx = float(obs[1]["value"])
-            current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 2)
-            as_of = obs[0].get("date", "?")
-        except (ValueError, KeyError):
-            return None
+        curr_idx, prev_idx, as_of = pair
+        current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 3)
 
         gap = current_val - threshold
         series_label = "Core CPI MoM change"
@@ -342,16 +369,12 @@ async def _get_cpi_threshold_analysis(question: str) -> Optional[str]:
 
     else:
         # Headline CPI MoM — compute from CPIAUCSL index
-        obs = await _fetch_fred_series("CPIAUCSL", limit=3)
-        if not obs or len(obs) < 2:
+        obs = await _fetch_fred_series("CPIAUCSL", limit=4)
+        pair = _find_valid_pair(obs or [])
+        if not pair:
             return None
-        try:
-            curr_idx = float(obs[0]["value"])
-            prev_idx = float(obs[1]["value"])
-            current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 2)
-            as_of = obs[0].get("date", "?")
-        except (ValueError, KeyError):
-            return None
+        curr_idx, prev_idx, as_of = pair
+        current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 3)
 
         gap = current_val - threshold
         series_label = "Headline CPI MoM change"
@@ -411,29 +434,27 @@ async def _analyze_combo_threshold(question: str) -> Optional[str]:
     mom_threshold = float(mom_match.group(1))
     yoy_threshold = float(yoy_match.group(1))
 
-    # Fetch both series
-    headline_obs = await _fetch_fred_series("CPIAUCSL", limit=3)
-    yoy_obs = await _fetch_fred_series("CPALTT01USM657N", limit=3)
+    # Fetch headline CPI index (14 months for MoM + YoY)
+    headline_obs = await _fetch_fred_series("CPIAUCSL", limit=14)
 
     ctx = f"\n  COMBO THRESHOLD ANALYSIS:\n"
 
-    if headline_obs and len(headline_obs) >= 2:
-        try:
-            curr = float(headline_obs[0]["value"])
-            prev = float(headline_obs[1]["value"])
-            mom_val = round(((curr - prev) / prev) * 100, 2)
+    if headline_obs:
+        # MoM from index
+        pair = _find_valid_pair(headline_obs)
+        if pair:
+            curr, prev, as_of = pair
+            mom_val = round(((curr - prev) / prev) * 100, 3)
             mom_gap = mom_val - mom_threshold
-            ctx += f"    MoM CPI threshold: {mom_threshold}% | Latest MoM: {mom_val}% | Gap: {mom_gap:+.2f}pp\n"
-        except (ValueError, KeyError):
-            pass
+            ctx += f"    MoM CPI threshold: {mom_threshold}% | Latest MoM: {mom_val}% | Gap: {mom_gap:+.3f}pp\n"
 
-    if yoy_obs:
-        try:
-            yoy_val = float(yoy_obs[0]["value"])
+        # YoY from index (need 13+ months)
+        valid = [(o, _safe_float(o.get("value", ""))) for o in headline_obs]
+        valid = [(o, v) for o, v in valid if v is not None]
+        if len(valid) >= 13:
+            yoy_val = round(((valid[0][1] / valid[12][1]) - 1) * 100, 2)
             yoy_gap = yoy_val - yoy_threshold
             ctx += f"    YoY CPI threshold: {yoy_threshold}% | Latest YoY: {yoy_val}% | Gap: {yoy_gap:+.2f}pp\n"
-        except (ValueError, KeyError):
-            pass
 
     ctx += "    COMBO requires BOTH conditions to be true. Estimate each independently, then multiply.\n"
     return ctx
