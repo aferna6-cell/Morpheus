@@ -256,6 +256,11 @@ class EnsembleSignal(Signal):
         self.max_tokens = llm_config.get("max_tokens", 1000)
         self.timeout = llm_config.get("timeout_seconds", 30)
 
+        # Ensemble mode: "both", "openai_only", "anthropic_only"
+        # Data shows Claude Sonnet Brier=0.30 (worse than random) while
+        # GPT-4o Brier=0.13. Default to openai_only to save costs + accuracy.
+        self.ensemble_mode = llm_config.get("ensemble_mode", "openai_only")
+
         # Screening config
         self.screening_enabled = llm_config.get("screening_enabled", True)
         self.screening_model = llm_config.get("screening_model", "gpt-4o-mini")
@@ -383,21 +388,33 @@ class EnsembleSignal(Signal):
             )
             system = self._system_prompt()
 
-            # Call both models in parallel
-            openai_task = self._call_openai(system, prompt)
-            anthropic_task = self._call_anthropic(system, prompt)
+            # Call models based on ensemble_mode
+            openai_result = None
+            anthropic_result = None
 
-            results = await asyncio.gather(
-                openai_task, anthropic_task, return_exceptions=True
-            )
-
-            openai_result = results[0] if not isinstance(results[0], Exception) else None
-            anthropic_result = results[1] if not isinstance(results[1], Exception) else None
-
-            if isinstance(results[0], Exception):
-                self.logger.warning("openai_call_failed", error=str(results[0]))
-            if isinstance(results[1], Exception):
-                self.logger.warning("anthropic_call_failed", error=str(results[1]))
+            if self.ensemble_mode == "both":
+                openai_task = self._call_openai(system, prompt)
+                anthropic_task = self._call_anthropic(system, prompt)
+                results = await asyncio.gather(
+                    openai_task, anthropic_task, return_exceptions=True
+                )
+                openai_result = results[0] if not isinstance(results[0], Exception) else None
+                anthropic_result = results[1] if not isinstance(results[1], Exception) else None
+                if isinstance(results[0], Exception):
+                    self.logger.warning("openai_call_failed", error=str(results[0]))
+                if isinstance(results[1], Exception):
+                    self.logger.warning("anthropic_call_failed", error=str(results[1]))
+            elif self.ensemble_mode == "anthropic_only":
+                try:
+                    anthropic_result = await self._call_anthropic(system, prompt)
+                except Exception as e:
+                    self.logger.warning("anthropic_call_failed", error=str(e))
+            else:
+                # openai_only (default)
+                try:
+                    openai_result = await self._call_openai(system, prompt)
+                except Exception as e:
+                    self.logger.warning("openai_call_failed", error=str(e))
 
             # Extract probabilities
             p_values = []
