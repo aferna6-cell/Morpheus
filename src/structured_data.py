@@ -104,40 +104,11 @@ async def _get_fedwatch_context() -> Optional[str]:
     return None
 
 
-async def _get_econ_calendar_context(question: str) -> Optional[str]:
-    """Get consensus forecasts for upcoming economic releases."""
+async def _fetch_fred_series(series_id: str, limit: int = 6) -> List[Dict]:
+    """Fetch recent observations from a FRED series. Returns list of {date, value}."""
+    if not _FRED_API_KEY:
+        return []
     try:
-        q = question.lower()
-
-        # Map market question to economic indicator
-        indicator = None
-        if any(w in q for w in ["cpi", "inflation"]):
-            indicator = "CPI"
-        elif any(w in q for w in ["jobs", "nonfarm", "payroll", "unemployment"]):
-            indicator = "Employment Situation"
-        elif "gdp" in q:
-            indicator = "GDP"
-        elif "ppi" in q:
-            indicator = "PPI"
-
-        if not indicator:
-            return None
-
-        # Use FRED for latest values as anchors
-        series_map = {
-            "CPI": ("CPIAUCSL", "Consumer Price Index"),
-            "Employment Situation": ("UNRATE", "Unemployment Rate"),
-            "GDP": ("GDP", "Gross Domestic Product"),
-            "PPI": ("PPIACO", "Producer Price Index"),
-        }
-
-        series_id, description = series_map.get(indicator, (None, None))
-        if not series_id:
-            return None
-
-        if not _FRED_API_KEY:
-            return None
-
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 "https://api.stlouisfed.org/fred/series/observations",
@@ -146,32 +117,167 @@ async def _get_econ_calendar_context(question: str) -> Optional[str]:
                     "api_key": _FRED_API_KEY,
                     "file_type": "json",
                     "sort_order": "desc",
-                    "limit": 3,
+                    "limit": limit,
                 },
             )
             if resp.status_code == 200:
-                data = resp.json()
-                observations = data.get("observations", [])
-                if observations:
-                    latest = observations[0]
-                    prev = observations[1] if len(observations) > 1 else None
+                return resp.json().get("observations", [])
+    except Exception as e:
+        logger.debug("fred_fetch_error", series_id=series_id, error=str(e))
+    return []
 
-                    context = (
-                        f"\nSTRUCTURED DATA ANCHOR — {description}:\n"
-                        f"  Latest value: {latest.get('value', '?')} (as of {latest.get('date', '?')})\n"
-                    )
-                    if prev:
-                        context += f"  Previous value: {prev.get('value', '?')} (as of {prev.get('date', '?')})\n"
-                    context += (
-                        f"  Historical pattern: ~50% of releases beat consensus, ~50% miss.\n"
-                        f"  Use this data as your starting anchor.\n"
-                    )
-                    return context
+
+async def _get_econ_calendar_context(question: str) -> Optional[str]:
+    """Get consensus forecasts for upcoming economic releases.
+
+    For CPI markets, fetches multiple related series to give the LLM
+    a comprehensive data anchor: headline CPI, core CPI, CPI YoY, and
+    recent trend data.
+    """
+    try:
+        q = question.lower()
+
+        # CPI gets special deep treatment — it's our strongest category
+        if any(w in q for w in ["cpi", "inflation"]):
+            return await _get_cpi_deep_context(question)
+
+        # Map other indicators to FRED series
+        indicator = None
+        if any(w in q for w in ["jobs", "nonfarm", "payroll"]):
+            indicator = "Employment Situation"
+        elif "unemployment" in q:
+            indicator = "Unemployment"
+        elif "gdp" in q:
+            indicator = "GDP"
+        elif "ppi" in q:
+            indicator = "PPI"
+
+        if not indicator:
+            return None
+
+        series_map = {
+            "Employment Situation": [
+                ("PAYEMS", "Total Nonfarm Payrolls (thousands)"),
+                ("UNRATE", "Unemployment Rate (%)"),
+            ],
+            "Unemployment": [
+                ("UNRATE", "Unemployment Rate (%)"),
+                ("U6RATE", "U-6 Unemployment Rate (%)"),
+            ],
+            "GDP": [
+                ("GDP", "Gross Domestic Product (billions $)"),
+                ("A191RL1Q225SBEA", "Real GDP Growth Rate (%)"),
+            ],
+            "PPI": [
+                ("PPIACO", "Producer Price Index"),
+                ("PPIFIS", "PPI Final Demand"),
+            ],
+        }
+
+        series_list = series_map.get(indicator, [])
+        if not series_list:
+            return None
+
+        context = f"\nSTRUCTURED DATA ANCHOR — {indicator}:\n"
+        for series_id, label in series_list:
+            obs = await _fetch_fred_series(series_id, limit=3)
+            if obs:
+                latest = obs[0]
+                prev = obs[1] if len(obs) > 1 else None
+                val = latest.get("value", "?")
+                dt = latest.get("date", "?")
+                context += f"  {label}: {val} (as of {dt})"
+                if prev:
+                    prev_val = prev.get("value", "?")
+                    try:
+                        change = float(val) - float(prev_val)
+                        context += f" | prev: {prev_val} (change: {change:+.1f})"
+                    except (ValueError, TypeError):
+                        context += f" | prev: {prev_val}"
+                context += "\n"
+
+        context += (
+            "  Historical pattern: ~50% of releases beat consensus, ~50% miss.\n"
+            "  Use this data as your starting anchor.\n"
+        )
+        return context
 
     except Exception as e:
         logger.debug("econ_calendar_fetch_error", error=str(e))
 
     return None
+
+
+async def _get_cpi_deep_context(question: str) -> Optional[str]:
+    """Deep CPI data anchor — multiple FRED series for CPI markets.
+
+    CPI is the bot's strongest category. Fetch:
+    - CPIAUCSL: Headline CPI (seasonally adjusted, index)
+    - CPILFESL: Core CPI (ex food & energy, index)
+    - CPALTT01USM657N: CPI YoY % change
+    - MEDCPIM158SFRBCLE: Median CPI (Cleveland Fed)
+    Last 6 months of data to show the trend.
+    """
+    if not _FRED_API_KEY:
+        return None
+
+    series = [
+        ("CPIAUCSL", "Headline CPI Index (SA)"),
+        ("CPILFESL", "Core CPI Index (ex food/energy, SA)"),
+        ("CPALTT01USM657N", "CPI All Items YoY %"),
+        ("MEDCPIM158SFRBCLE", "Median CPI (Cleveland Fed, annualized %)"),
+    ]
+
+    context = "\nSTRUCTURED DATA ANCHOR — CPI Deep Dive:\n"
+    has_data = False
+
+    for series_id, label in series:
+        obs = await _fetch_fred_series(series_id, limit=6)
+        if not obs:
+            continue
+        has_data = True
+
+        # Show latest value + trend
+        latest = obs[0]
+        val = latest.get("value", "?")
+        dt = latest.get("date", "?")
+        context += f"  {label}: {val} (as of {dt})\n"
+
+        # Show MoM change for index series
+        if len(obs) >= 2 and series_id in ("CPIAUCSL", "CPILFESL"):
+            try:
+                curr = float(obs[0]["value"])
+                prev = float(obs[1]["value"])
+                mom_pct = ((curr - prev) / prev) * 100
+                context += f"    MoM change: {mom_pct:+.2f}%\n"
+                # 3-month trend
+                if len(obs) >= 4:
+                    three_ago = float(obs[3]["value"])
+                    three_mo_annualized = (((curr / three_ago) ** 4) - 1) * 100
+                    context += f"    3-month annualized: {three_mo_annualized:.1f}%\n"
+            except (ValueError, TypeError):
+                pass
+
+    if not has_data:
+        return None
+
+    # Add interpretive guidance
+    q = question.lower()
+    context += "\n  INTERPRETATION GUIDANCE:\n"
+    if "month" in q or "rise" in q or "change" in q:
+        context += (
+            "  - MoM CPI typically ranges 0.1%-0.4% (rounded to 1 decimal)\n"
+            "  - Core CPI is stickier (less volatile month to month)\n"
+            "  - Consensus forecasts are usually within 0.1% of actual\n"
+        )
+    if "year" in q or "yoy" in q or "annual" in q:
+        context += (
+            "  - YoY CPI has been trending between 2.5%-3.5% in recent months\n"
+            "  - Fed target is 2.0% — anything above suggests continued tightening\n"
+        )
+
+    context += "  Use the MoM trend and 3-month annualized rate as your primary anchors.\n"
+    return context
 
 
 async def _get_polling_context(question: str) -> Optional[str]:

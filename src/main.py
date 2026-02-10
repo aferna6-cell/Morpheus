@@ -263,12 +263,22 @@ async def run(
                 logger.error("resolution_tracker_loop_error", error=str(e))
             await asyncio.sleep(900)  # 15 minutes
 
+    # Telegram bot — /status command handler
+    from .telegram_bot import TelegramBot
+    telegram_bot = TelegramBot(config=config, state_dir=state_dir)
+    telegram_bot.set_perf_tracker(perf_tracker)
+    telegram_bot.set_cost_tracker(cost_tracker)
+    telegram_bot.set_survival_tracker(survival_tracker)
+    if kalshi_executors:
+        telegram_bot.set_trading_clients([ex.trading_client for ex in kalshi_executors])
+
     # Start background services
     if 'position_monitor' in dir():
         await position_monitor.start()
     if 'fill_manager' in dir():
         await fill_manager.start()
     await perf_tracker.start()
+    await telegram_bot.start()
     _resolution_task = asyncio.create_task(_resolution_loop())
     logger.info("resolution_tracker_started", interval_sec=900)
 
@@ -282,6 +292,7 @@ async def run(
             except asyncio.CancelledError:
                 pass
         await perf_tracker.stop()
+        await telegram_bot.stop()
         if 'position_monitor' in dir():
             await position_monitor.stop()
         if 'fill_manager' in dir():

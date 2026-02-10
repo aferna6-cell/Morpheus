@@ -165,19 +165,24 @@ async def check_resolutions(
                 data = r.json()
                 market_data = data.get("market", data)
 
-                # Kalshi market status: "open", "closed", "settled"
+                # Kalshi market status: "open", "closed", "finalized"
                 status = market_data.get("status", "").lower()
 
-                if status not in ("settled", "closed"):
+                if status not in ("settled", "finalized", "closed"):
                     continue
 
                 # Determine outcome from Kalshi's result field
                 # Kalshi uses "result": "yes" or "result": "no"
+                # "closed" markets have empty result — skip those (not yet settled)
                 result_str = (
                     market_data.get("result", "")
                     or market_data.get("resolution", "")
                     or ""
                 ).strip().lower()
+
+                if not result_str and status == "closed":
+                    # Market closed but not yet settled — skip for now
+                    continue
 
                 if result_str in ("yes", "true", "1"):
                     actual_outcome = 1.0
