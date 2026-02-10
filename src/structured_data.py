@@ -214,9 +214,8 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
     CPI is the bot's strongest category. Fetch:
     - CPIAUCSL: Headline CPI (seasonally adjusted, index)
     - CPILFESL: Core CPI (ex food & energy, index)
-    - CPALTT01USM657N: CPI YoY % change
     - MEDCPIM158SFRBCLE: Median CPI (Cleveland Fed)
-    Last 6 months of data to show the trend.
+    YoY computed from index in threshold analysis (not stale CPALTT01USM657N).
     """
     if not _FRED_API_KEY:
         return None
@@ -224,7 +223,8 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
     series = [
         ("CPIAUCSL", "Headline CPI Index (SA)"),
         ("CPILFESL", "Core CPI Index (ex food/energy, SA)"),
-        ("CPALTT01USM657N", "CPI All Items YoY %"),
+        # CPALTT01USM657N removed — returns stale monthly rate, not annual YoY.
+        # YoY is computed directly from CPIAUCSL index in threshold analysis.
         ("MEDCPIM158SFRBCLE", "Median CPI (Cleveland Fed, annualized %)"),
     ]
 
