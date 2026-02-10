@@ -122,11 +122,11 @@ def _compute_stats(trades: list[dict[str, Any]], days: int) -> dict[str, Any]:
     orders = [t for t in filtered if t.get("event") == "order_placed"]
     exits = [t for t in filtered if t.get("event") in ("position_closed", "position_exit", "market_resolved")]
 
-    total_cost = sum(float(t.get("cost_usd", 0)) for t in orders)
-    total_pnl = sum(float(t.get("pnl_usd", t.get("pnl", 0))) for t in exits)
+    total_cost = sum(float(t.get("cost_usd") or 0) for t in orders)
+    total_pnl = sum(float(t.get("pnl_usd") or t.get("pnl") or 0) for t in exits)
 
-    wins = sum(1 for t in exits if float(t.get("pnl_usd", t.get("pnl", 0))) > 0)
-    losses = sum(1 for t in exits if float(t.get("pnl_usd", t.get("pnl", 0))) <= 0)
+    wins = sum(1 for t in exits if float(t.get("pnl_usd") or t.get("pnl") or 0) > 0)
+    losses = sum(1 for t in exits if float(t.get("pnl_usd") or t.get("pnl") or 0) <= 0)
     win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
 
     edges = [float(t.get("edge", 0)) for t in orders if t.get("edge")]
@@ -138,10 +138,10 @@ def _compute_stats(trades: list[dict[str, Any]], days: int) -> dict[str, Any]:
     for t in orders:
         strat = t.get("strategy", t.get("account", "unknown"))
         by_strategy[strat]["count"] += 1
-        by_strategy[strat]["cost"] += float(t.get("cost_usd", 0))
+        by_strategy[strat]["cost"] += float(t.get("cost_usd") or 0)
     for t in exits:
         strat = t.get("strategy", "unknown")
-        by_strategy[strat]["pnl"] += float(t.get("pnl_usd", t.get("pnl", 0)))
+        by_strategy[strat]["pnl"] += float(t.get("pnl_usd") or t.get("pnl") or 0)
 
     return {
         "period_days": days,
