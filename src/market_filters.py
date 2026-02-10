@@ -37,7 +37,10 @@ _JUNK_TICKER_PREFIXES = [
     "KXBTCD", "KXETHD", "KXDOGE", "KXSOLD", "KXBNBD",
     "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
     "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",
-    # Weather markets — now traded with NOAA anchors (removed from junk list)
+    # Weather markets — NOAA anchors insufficient, LLMs disagree wildly on forecasts
+    "KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP",
+    # Trump mention markets — unpredictable speech patterns
+    "KXTRUMPMENTION",
     # Word/phrase mention markets
     "KXWOMENTION", "KXWMENTION",
     # Stock intraday ranges

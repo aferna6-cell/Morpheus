@@ -327,7 +327,7 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     # Word/phrase mention markets — can't predict exact words in speeches
     "word_mention": MarketTypeCalibration(skip=True, min_edge=0.99),
     # Weather markets — now traded with NOAA anchors, conservative edge
-    "weather":     MarketTypeCalibration(skip=False, min_edge=0.05, extra_shrink=0.05),
+    "weather":     MarketTypeCalibration(skip=True, min_edge=0.99),
     # Crypto daily price ranges — narrow intraday ranges are near-random
     "crypto_range": MarketTypeCalibration(skip=True, min_edge=0.99),
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)
@@ -345,7 +345,7 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     # Politics — LLM has some edge here (decent backtest), lower threshold
     "politics":    MarketTypeCalibration(extra_shrink=0.0, yes_boost=-0.08, no_dampen=0.10, min_edge=0.04),
     # Economics — data-driven, LLM does well with structured economic data
-    "economics":   MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.0, no_dampen=0.05, min_edge=0.03),
+    "economics":   MarketTypeCalibration(extra_shrink=0.20, yes_boost=0.15, no_dampen=0.05, min_edge=0.08),
     # Normal markets — asymmetric correction based on backtest data
     "normal":      MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.10, no_dampen=0.10, min_edge=0.05),
 }

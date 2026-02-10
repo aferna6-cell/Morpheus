@@ -110,8 +110,18 @@ class TelegramBot:
 
                 if text.startswith("/status"):
                     await self._handle_status(client)
+                elif text.startswith("/pnl"):
+                    await self._handle_pnl(client)
+                elif text.startswith("/predictions"):
+                    await self._handle_predictions(client)
                 elif text.startswith("/help"):
-                    await self._send(client, "Commands:\n/status — Bot status dashboard\n/help — This message")
+                    await self._send(client, (
+                        "Commands:\n"
+                        "/status — Bot status dashboard\n"
+                        "/pnl — Detailed P&L breakdown\n"
+                        "/predictions — Pending predictions\n"
+                        "/help — This message"
+                    ))
 
     async def _handle_status(self, client: httpx.AsyncClient) -> None:
         """Build and send a comprehensive status message."""
@@ -194,6 +204,127 @@ class TelegramBot:
 
         # Uptime
         lines.append(f"\n🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+        await self._send(client, "\n".join(lines))
+
+    async def _handle_pnl(self, client: httpx.AsyncClient) -> None:
+        """Detailed P&L breakdown by market category."""
+        lines = ["📊 *P&L Breakdown*", ""]
+
+        try:
+            res_path = self._state_path / "resolutions.jsonl"
+            if not res_path.exists():
+                await self._send(client, "No resolutions yet.")
+                return
+
+            resolutions: List[Dict[str, Any]] = []
+            with open(res_path) as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            resolutions.append(json.loads(line.strip()))
+                        except json.JSONDecodeError:
+                            continue
+
+            if not resolutions:
+                await self._send(client, "No resolutions yet.")
+                return
+
+            # Overall stats
+            total_pnl = sum(r.get("pnl_usd", 0) for r in resolutions)
+            wins = [r for r in resolutions if r.get("pnl_usd", 0) > 0]
+            losses = [r for r in resolutions if r.get("pnl_usd", 0) < 0]
+            even = [r for r in resolutions if r.get("pnl_usd", 0) == 0]
+            n_decided = len(wins) + len(losses)
+            win_rate = len(wins) / n_decided if n_decided > 0 else 0
+
+            lines.append(f"*Overall:* {len(resolutions)} resolved")
+            lines.append(f"W/L: {len(wins)}/{len(losses)} ({win_rate:.0%} win rate)")
+            lines.append(f"Total P&L: *${total_pnl:+.2f}*")
+            if wins:
+                lines.append(f"Avg win: ${sum(r['pnl_usd'] for r in wins)/len(wins):.2f}")
+            if losses:
+                lines.append(f"Avg loss: ${sum(r['pnl_usd'] for r in losses)/len(losses):.2f}")
+            lines.append("")
+
+            # By category
+            by_cat: Dict[str, Dict[str, Any]] = {}
+            for r in resolutions:
+                mid = r.get("market_id", "")
+                prefix = mid.split("-")[0] if mid else "unknown"
+                if prefix not in by_cat:
+                    by_cat[prefix] = {"pnl": 0.0, "wins": 0, "losses": 0, "count": 0}
+                by_cat[prefix]["pnl"] += r.get("pnl_usd", 0)
+                by_cat[prefix]["count"] += 1
+                if r.get("pnl_usd", 0) > 0:
+                    by_cat[prefix]["wins"] += 1
+                elif r.get("pnl_usd", 0) < 0:
+                    by_cat[prefix]["losses"] += 1
+
+            lines.append("*By Category:*")
+            for cat, stats in sorted(by_cat.items(), key=lambda x: -x[1]["count"]):
+                w = stats["wins"]
+                l = stats["losses"]
+                wr = w / (w + l) if (w + l) > 0 else 0
+                pnl = stats["pnl"]
+                lines.append(f"  {cat}: {w}/{w+l} ({wr:.0%}) ${pnl:+.2f}")
+
+        except Exception as e:
+            lines.append(f"Error: {e}")
+
+        await self._send(client, "\n".join(lines))
+
+    async def _handle_predictions(self, client: httpx.AsyncClient) -> None:
+        """Show pending predictions summary."""
+        lines = ["🎯 *Pending Predictions*", ""]
+
+        try:
+            pred_path = self._state_path / "predictions.jsonl"
+            res_path = self._state_path / "resolutions.jsonl"
+
+            if not pred_path.exists():
+                await self._send(client, "No predictions yet.")
+                return
+
+            predictions = []
+            with open(pred_path) as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            predictions.append(json.loads(line.strip()))
+                        except json.JSONDecodeError:
+                            continue
+
+            resolved_ids: set = set()
+            if res_path.exists():
+                with open(res_path) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                r = json.loads(line.strip())
+                                resolved_ids.add(r.get("market_id", ""))
+                            except json.JSONDecodeError:
+                                continue
+
+            pending = [p for p in predictions if p.get("market_id", "") not in resolved_ids]
+
+            # Group by category
+            by_cat: Dict[str, int] = {}
+            for p in pending:
+                mid = p.get("market_id", "")
+                prefix = mid.split("-")[0] if mid else "unknown"
+                by_cat[prefix] = by_cat.get(prefix, 0) + 1
+
+            lines.append(f"Total: {len(predictions)} predictions")
+            lines.append(f"Resolved: {len(resolved_ids)}")
+            lines.append(f"Pending: {len(pending)}")
+            lines.append("")
+            lines.append("*Pending by category:*")
+            for cat, n in sorted(by_cat.items(), key=lambda x: -x[1]):
+                lines.append(f"  {cat}: {n}")
+
+        except Exception as e:
+            lines.append(f"Error: {e}")
 
         await self._send(client, "\n".join(lines))
 

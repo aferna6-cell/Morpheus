@@ -297,7 +297,7 @@ class EnsembleSignal(Signal):
 
         # Calibration
         self.calibration_shrink = float(
-            llm_config.get("calibration_shrink_strength", 0.10)
+            llm_config.get("calibration_shrink_strength", 0.25)
         )
 
         # Model weights (loaded periodically from resolved predictions)
@@ -476,7 +476,7 @@ class EnsembleSignal(Signal):
             # Adversarial challenge: when p_yes is in the danger zone (35-75%)
             # and would result in BUY_YES, get a cheap second opinion
             raw_edge_preliminary = p_yes - market_price
-            if 0.35 <= p_yes <= 0.75 and raw_edge_preliminary > 0:
+            if 0.20 <= p_yes <= 0.85 and raw_edge_preliminary > 0:
                 p_yes = await self._challenge_estimate(market, p_yes, market_price)
 
             # Get metadata from whichever response succeeded
