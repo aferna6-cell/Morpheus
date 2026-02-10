@@ -29,7 +29,7 @@ from .utils import append_jsonl
 logger = structlog.get_logger()
 
 # Minimum resolved markets per model before using learned weights
-_MIN_SAMPLES_FOR_WEIGHTS = 30
+_MIN_SAMPLES_FOR_WEIGHTS = 20
 
 # State directory
 _STATE_DIR = Path("state")
@@ -138,9 +138,14 @@ def compute_model_weights(state_dir: str | Path = "state") -> Dict[str, float]:
 
     # Inverse: weight = 1/brier, then normalize
     # Add small epsilon to avoid division by zero
-    inverse_briers = {
-        model: 1.0 / (brier + 0.001) for model, brier in avg_briers.items()
-    }
+    # Penalty: models with Brier > 0.25 (worse than random) get heavily penalized
+    inverse_briers = {}
+    for model, brier in avg_briers.items():
+        if brier > 0.25:
+            # Worse than random — squash weight to near-zero
+            inverse_briers[model] = 0.5  # small fixed weight
+        else:
+            inverse_briers[model] = 1.0 / (brier + 0.001)
     total = sum(inverse_briers.values())
 
     for model, inv_brier in inverse_briers.items():
