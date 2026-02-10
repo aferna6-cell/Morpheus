@@ -492,6 +492,26 @@ class EnsembleSignal(Signal):
                 # Negative means trust YES more (e.g., politics)
                 yes_dampen = max(0.0, yes_dampen + type_cal.yes_boost)
 
+            # Reduce calibration when structured data shows extreme confidence.
+            # Hard FRED data should override generic LLM overconfidence adjustments.
+            if isinstance(structured_context, str):
+                if "FAR ABOVE" in structured_context or "FAR BELOW" in structured_context:
+                    total_shrink *= 0.15
+                    yes_dampen = min(yes_dampen, 0.05)
+                    self.logger.info(
+                        "calibration_reduced_extreme_data",
+                        market_id=market.id,
+                        effective_shrink=round(total_shrink, 3),
+                    )
+                elif "well above" in structured_context or "well below" in structured_context:
+                    total_shrink *= 0.50
+                    yes_dampen = min(yes_dampen, 0.10)
+                    self.logger.info(
+                        "calibration_reduced_strong_data",
+                        market_id=market.id,
+                        effective_shrink=round(total_shrink, 3),
+                    )
+
             p_yes = calibrate_probability(
                 p_yes_raw,
                 shrink_strength=total_shrink,

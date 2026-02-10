@@ -80,7 +80,7 @@ llm:
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
-  calibration_shrink_strength: 0.10  # mild shrinkage only (was 0.15)
+  calibration_shrink_strength: 0.25  # increased from 0.10 — 29% phantom edge was too high
   consensus_enabled: false           # replaced by ensemble
   monthly_budget_usd: 50.0
   daily_budget_usd: 10.0
