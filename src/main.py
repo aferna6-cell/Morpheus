@@ -27,6 +27,7 @@ import structlog
 from .alerts import send_alert
 from .cost_tracker import CostTracker
 from .orchestrator import Orchestrator
+from .resolution_tracker import check_resolutions
 from .risk import RiskManager
 from .trade_logger import get_trade_logger
 from .utils import BotConfig, load_config, setup_logging
@@ -233,16 +234,42 @@ async def run(
     from .perf_tracker import PerfTracker
     perf_tracker = PerfTracker(config=config, state_dir=state_dir)
 
+    # Resolution tracker — periodic background task
+    _resolution_task: asyncio.Task | None = None
+
+    async def _resolution_loop() -> None:
+        """Poll Kalshi for resolved markets every 15 minutes."""
+        while True:
+            try:
+                count = await check_resolutions(
+                    config, state_dir, dry_run=dry_run,
+                )
+                if count > 0:
+                    logger.info("resolution_tracker_resolved", count=count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("resolution_tracker_loop_error", error=str(e))
+            await asyncio.sleep(900)  # 15 minutes
+
     # Start background services
     if 'position_monitor' in dir():
         await position_monitor.start()
     if 'fill_manager' in dir():
         await fill_manager.start()
     await perf_tracker.start()
+    _resolution_task = asyncio.create_task(_resolution_loop())
+    logger.info("resolution_tracker_started", interval_sec=900)
 
     try:
         await orchestrator.run()
     finally:
+        if _resolution_task:
+            _resolution_task.cancel()
+            try:
+                await _resolution_task
+            except asyncio.CancelledError:
+                pass
         await perf_tracker.stop()
         if 'position_monitor' in dir():
             await position_monitor.stop()
