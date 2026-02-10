@@ -31,8 +31,9 @@ class FilterResult:
 # Ticker prefixes that indicate junk markets where LLMs have no edge.
 # These are checked before any other filter to save LLM budget.
 _JUNK_TICKER_PREFIXES = [
-    # NBA/NCAA announcer mentions (e.g., KXNBAMENTION-*, KXNCAAB-*)
-    "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION",
+    # Announcer/host mention markets — no LLM edge on what people will say
+    "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION", "KXFOXNEWSMENTION",
+    "KXMLBMENTION", "KXNHLMENTION", "KXMLSMENTION",
     # Crypto daily price ranges (e.g., KXBTCD-*, KXETHD-*, KXDOGE-*)
     "KXBTCD", "KXETHD", "KXDOGE", "KXSOLD", "KXBNBD",
     "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",

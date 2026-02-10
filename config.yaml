@@ -17,7 +17,7 @@ strategy:
 
 # Market filters — loosened for volume
 market_filters:
-  min_volume_24h: 5000              # raised back — filter out illiquid junk
+  min_volume_24h: 1000              # lowered — $17 bankroll needs fewer fills
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 200                # lowered
@@ -140,7 +140,7 @@ kalshi:
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 300        # 5 min scans
   fee_per_contract: 0.00            # maker = free
-  min_volume: 5000                  # raised back — filter out illiquid junk
+  min_volume: 1000                  # lowered — match market_filters threshold
   max_position_contracts: 50
   categories:
     - "Politics"
@@ -173,7 +173,7 @@ contrarian:
   max_position_size: 25.0       # $25 per contrarian trade
   max_total_exposure: 100.0     # $100 total contrarian exposure
   max_resolution_days: 7        # 1-7 day markets (not just same-day)
-  min_volume_24h: 5000          # real crowd consensus, not illiquid
+  min_volume_24h: 1000          # lowered — small bets fill on thin markets
   categories:
     - "Politics"
     - "Economics"
@@ -187,7 +187,7 @@ contrarian:
 market_making:
   enabled: true
   max_markets: 3                    # MM on up to 3 markets
-  min_volume: 5000                  # need liquidity for fills
+  min_volume: 1000                  # lowered — small quote sizes fill fine
   min_spread_cents: 3               # 3c minimum spread to capture
   max_spread_cents: 15              # avoid illiquid markets
   quote_size: 3                     # 3 contracts per side
