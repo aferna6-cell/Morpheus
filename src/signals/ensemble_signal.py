@@ -432,6 +432,23 @@ class EnsembleSignal(Signal):
             # Weighted average (falls back to simple average if no weights)
             p_yes_raw = weighted_average(model_predictions, self._model_weights)
 
+            # Model disagreement gate: if models diverge wildly, the signal
+            # is noise. Skip rather than averaging garbage.
+            if len(p_values) == 2:
+                divergence = abs(p_values[0] - p_values[1])
+                if divergence > 0.35:
+                    self.logger.warning(
+                        "ensemble_model_disagreement",
+                        market_id=market.id,
+                        divergence=round(divergence, 3),
+                        openai=round(p_values[0], 3),
+                        anthropic=round(p_values[1], 3),
+                    )
+                    return self._hold(
+                        market,
+                        f"Model disagreement too high ({divergence:.0%})",
+                    )
+
             # Log per-model predictions for future weight computation
             if model_predictions:
                 try:

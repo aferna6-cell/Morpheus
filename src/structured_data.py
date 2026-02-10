@@ -261,6 +261,11 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
     if not has_data:
         return None
 
+    # ---- Threshold analysis: compare question threshold to actual data ----
+    threshold_context = await _get_cpi_threshold_analysis(question)
+    if threshold_context:
+        context += threshold_context
+
     # Add interpretive guidance
     q = question.lower()
     context += "\n  INTERPRETATION GUIDANCE:\n"
@@ -278,6 +283,182 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
 
     context += "  Use the MoM trend and 3-month annualized rate as your primary anchors.\n"
     return context
+
+
+async def _get_cpi_threshold_analysis(question: str) -> Optional[str]:
+    """Compare the question's threshold to actual FRED data.
+
+    Parses "above X%" from the question, fetches the relevant FRED series,
+    and tells the LLM exactly how the current value compares to the threshold.
+    This prevents the LLM from guessing when hard data is available.
+    """
+    q = question.lower()
+
+    # Parse threshold from question
+    threshold = _parse_cpi_threshold(q)
+    if threshold is None:
+        return None
+
+    # Determine which type of CPI question this is
+    is_yoy = any(w in q for w in ["year ending", "yoy", "annual", "year over year"])
+    is_core = "core" in q
+    is_combo = "and" in q and "yoy" in q  # COMBO markets
+
+    if is_combo:
+        # Combo markets have two thresholds — handle the YoY part
+        return await _analyze_combo_threshold(q)
+
+    if is_yoy:
+        # YoY CPI — compare to CPALTT01USM657N
+        obs = await _fetch_fred_series("CPALTT01USM657N", limit=3)
+        if not obs:
+            return None
+        try:
+            current_val = float(obs[0]["value"])
+            as_of = obs[0].get("date", "?")
+        except (ValueError, KeyError):
+            return None
+
+        gap = current_val - threshold
+        series_label = "CPI All Items YoY"
+        volatility = 0.2  # typical MoM change in YoY CPI
+
+    elif is_core:
+        # Core CPI MoM — compute from CPILFESL index
+        obs = await _fetch_fred_series("CPILFESL", limit=3)
+        if not obs or len(obs) < 2:
+            return None
+        try:
+            curr_idx = float(obs[0]["value"])
+            prev_idx = float(obs[1]["value"])
+            current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 2)
+            as_of = obs[0].get("date", "?")
+        except (ValueError, KeyError):
+            return None
+
+        gap = current_val - threshold
+        series_label = "Core CPI MoM change"
+        volatility = 0.1  # core is stickier
+
+    else:
+        # Headline CPI MoM — compute from CPIAUCSL index
+        obs = await _fetch_fred_series("CPIAUCSL", limit=3)
+        if not obs or len(obs) < 2:
+            return None
+        try:
+            curr_idx = float(obs[0]["value"])
+            prev_idx = float(obs[1]["value"])
+            current_val = round(((curr_idx - prev_idx) / prev_idx) * 100, 2)
+            as_of = obs[0].get("date", "?")
+        except (ValueError, KeyError):
+            return None
+
+        gap = current_val - threshold
+        series_label = "Headline CPI MoM change"
+        volatility = 0.15
+
+    # Build threshold analysis
+    ctx = f"\n  THRESHOLD ANALYSIS (CRITICAL — use this as your primary anchor):\n"
+    ctx += f"    Question threshold: {threshold}%\n"
+    ctx += f"    Latest {series_label}: {current_val}% (as of {as_of})\n"
+    ctx += f"    Gap: current value is {gap:+.2f} percentage points vs threshold\n"
+    ctx += f"    Typical month-to-month volatility: ±{volatility} pp\n"
+
+    # Classify likelihood
+    gap_in_sigmas = abs(gap) / volatility if volatility > 0 else 0
+    if gap > 0 and gap_in_sigmas >= 3:
+        ctx += (
+            f"    Assessment: Current value ({current_val}%) is FAR ABOVE threshold ({threshold}%). "
+            f"This is {gap_in_sigmas:.1f}x the typical volatility. "
+            f"Unless there is a massive deflationary shock, p_yes should be VERY HIGH (>0.90).\n"
+            f"    WARNING: Do NOT let anti-YES bias override this hard data. "
+            f"The base rate for 'above X%' when current value is {gap:.1f}pp above X is >95%.\n"
+        )
+    elif gap > 0 and gap_in_sigmas >= 1.5:
+        ctx += (
+            f"    Assessment: Current value ({current_val}%) is well above threshold ({threshold}%). "
+            f"p_yes should be HIGH (0.75-0.95) unless you have specific evidence of a sharp reversal.\n"
+        )
+    elif gap < 0 and gap_in_sigmas >= 3:
+        ctx += (
+            f"    Assessment: Current value ({current_val}%) is FAR BELOW threshold ({threshold}%). "
+            f"Unless there is a massive inflationary shock, p_yes should be VERY LOW (<0.10).\n"
+        )
+    elif gap < 0 and gap_in_sigmas >= 1.5:
+        ctx += (
+            f"    Assessment: Current value ({current_val}%) is well below threshold ({threshold}%). "
+            f"p_yes should be LOW (0.05-0.25) unless you have specific evidence of a sharp increase.\n"
+        )
+    else:
+        ctx += (
+            f"    Assessment: Current value ({current_val}%) is CLOSE to threshold ({threshold}%). "
+            f"This is a genuinely uncertain market — careful analysis needed.\n"
+        )
+
+    return ctx
+
+
+async def _analyze_combo_threshold(question: str) -> Optional[str]:
+    """Handle COMBO markets like 'CPI above 0.0% AND YoY above 2.4%'."""
+    # Extract both thresholds
+    import re as _re
+    mom_match = _re.search(r'cpi\s+(?:be\s+)?above\s+(-?[\d.]+)%', question)
+    yoy_match = _re.search(r'yoy(?:cpi)?\s+(?:be\s+)?above\s+(-?[\d.]+)%', question)
+
+    if not mom_match or not yoy_match:
+        return None
+
+    mom_threshold = float(mom_match.group(1))
+    yoy_threshold = float(yoy_match.group(1))
+
+    # Fetch both series
+    headline_obs = await _fetch_fred_series("CPIAUCSL", limit=3)
+    yoy_obs = await _fetch_fred_series("CPALTT01USM657N", limit=3)
+
+    ctx = f"\n  COMBO THRESHOLD ANALYSIS:\n"
+
+    if headline_obs and len(headline_obs) >= 2:
+        try:
+            curr = float(headline_obs[0]["value"])
+            prev = float(headline_obs[1]["value"])
+            mom_val = round(((curr - prev) / prev) * 100, 2)
+            mom_gap = mom_val - mom_threshold
+            ctx += f"    MoM CPI threshold: {mom_threshold}% | Latest MoM: {mom_val}% | Gap: {mom_gap:+.2f}pp\n"
+        except (ValueError, KeyError):
+            pass
+
+    if yoy_obs:
+        try:
+            yoy_val = float(yoy_obs[0]["value"])
+            yoy_gap = yoy_val - yoy_threshold
+            ctx += f"    YoY CPI threshold: {yoy_threshold}% | Latest YoY: {yoy_val}% | Gap: {yoy_gap:+.2f}pp\n"
+        except (ValueError, KeyError):
+            pass
+
+    ctx += "    COMBO requires BOTH conditions to be true. Estimate each independently, then multiply.\n"
+    return ctx
+
+
+def _parse_cpi_threshold(question: str) -> Optional[float]:
+    """Extract the numeric threshold from a CPI market question.
+
+    Handles: "above 2.3%", "rise more than 0.3%", "above -0.1%"
+    """
+    patterns = [
+        r'above\s+(-?[\d.]+)%',
+        r'more than\s+(-?[\d.]+)%',
+        r'exceed\s+(-?[\d.]+)%',
+        r'greater than\s+(-?[\d.]+)%',
+        r'over\s+(-?[\d.]+)%',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, question)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 async def _get_polling_context(question: str) -> Optional[str]:
