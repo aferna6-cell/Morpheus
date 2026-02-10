@@ -9,7 +9,7 @@ Fetch and analyze recent production logs from the Morpheus droplet.
 
 ## Default behavior (no arguments)
 
-Run: `ssh root@45.55.85.173 "journalctl -u morpheus -n 50 --no-pager"`
+Run: `ssh morpheus "journalctl -u morpheus -n 50 --no-pager"`
 
 Summarize:
 - Any errors or warnings

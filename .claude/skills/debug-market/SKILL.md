@@ -16,17 +16,17 @@ Trace why Morpheus traded (or didn't trade) a specific market.
 
 1. **Search production logs** for the market ticker or keyword:
    ```
-   ssh root@45.55.85.173 "journalctl -u morpheus --since '24 hours ago' --no-pager | grep -i '$ARGUMENTS'"
+   ssh morpheus "journalctl -u morpheus --since '24 hours ago' --no-pager | grep -i '$ARGUMENTS'"
    ```
 
 2. **Check trade history** for this market:
    ```
-   ssh root@45.55.85.173 "grep -i '$ARGUMENTS' /opt/morpheus/state/trade_history.jsonl 2>/dev/null"
+   ssh morpheus "grep -i '$ARGUMENTS' /opt/morpheus/state/trade_history.jsonl 2>/dev/null"
    ```
 
 3. **Check predictions** for this market:
    ```
-   ssh root@45.55.85.173 "grep -i '$ARGUMENTS' /opt/morpheus/state/predictions.jsonl 2>/dev/null"
+   ssh morpheus "grep -i '$ARGUMENTS' /opt/morpheus/state/predictions.jsonl 2>/dev/null"
    ```
 
 4. **Trace the decision path** from logs. Look for:

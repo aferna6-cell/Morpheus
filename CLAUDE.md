@@ -19,10 +19,10 @@ python -m src.main --dry-run
 python -m src.main --dry-run --once
 
 # Deploy to production
-ssh root@45.55.85.173 "cd /opt/morpheus && git pull && systemctl restart morpheus"
+ssh morpheus "cd /opt/morpheus && git pull && systemctl restart morpheus"
 
 # Production logs
-ssh root@45.55.85.173 "journalctl -u morpheus -n 50 --no-pager"
+ssh morpheus "journalctl -u morpheus -n 50 --no-pager"
 
 # Tests
 pytest tests/

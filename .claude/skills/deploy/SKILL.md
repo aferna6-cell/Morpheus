@@ -11,8 +11,8 @@ Deploy Morpheus to the DigitalOcean production droplet.
 
 1. Check `git status` for uncommitted changes. If there are changes, ask the user if they want to commit first.
 2. Run `git push origin main` to push to GitHub.
-3. Deploy with: `ssh root@45.55.85.173 "cd /opt/morpheus && git pull && systemctl restart morpheus"`
-4. Wait 5 seconds, then check startup logs: `ssh root@45.55.85.173 "journalctl -u morpheus -n 20 --no-pager"`
+3. Deploy with: `ssh morpheus "cd /opt/morpheus && git pull && systemctl restart morpheus"`
+4. Wait 5 seconds, then check startup logs: `ssh morpheus "journalctl -u morpheus -n 20 --no-pager"`
 5. Verify the bot started successfully (look for `morpheus_v2_started` in logs).
 6. Report: engines loaded, account balances, any errors.
 

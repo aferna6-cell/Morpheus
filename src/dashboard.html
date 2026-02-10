@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Morpheus Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 16px;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+  .header-stat { text-align: center; }
+  .header-stat .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .header-stat .value { font-size: 18px; font-weight: 600; }
+  .status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .status-dot.active { background: var(--green); }
+  .status-dot.inactive { background: var(--red); }
+  .status-dot.unknown { background: var(--yellow); }
+
+  /* Grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 16px;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+  }
+  .card h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  /* P&L numbers */
+  .pnl-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .pnl-box { text-align: center; }
+  .pnl-box .period { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+  .pnl-box .amount { font-size: 22px; font-weight: 700; }
+  .pnl-box .detail { font-size: 12px; color: var(--text-dim); }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  .neutral { color: var(--text-dim); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+  tr:last-child td { border-bottom: none; }
+  .table-scroll { max-height: 350px; overflow-y: auto; }
+
+  /* Cost bars */
+  .cost-bar-wrap { margin-bottom: 10px; }
+  .cost-bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    margin-bottom: 3px;
+  }
+  .cost-bar {
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .cost-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+
+  /* Strategy pills */
+  .strat-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .strat-pill {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  /* Model boxes */
+  .model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+  .model-box {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .model-box .name { font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--blue); }
+  .model-box .stat { font-size: 12px; color: var(--text-dim); }
+  .model-box .stat span { color: var(--text); font-weight: 500; }
+
+  /* Category pills */
+  .cat-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cat-pill {
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .cat-pill .count { font-weight: 700; color: var(--blue); }
+
+  /* Refresh indicator */
+  .refresh-bar {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 16px;
+    padding: 8px;
+  }
+
+  /* Empty state */
+  .empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 12px 0; }
+
+  /* Full width card */
+  .full-width { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header" id="header">
+  <div>
+    <h1>Morpheus</h1>
+    <span id="bot-status" style="font-size:13px; color:var(--text-dim)">Loading...</span>
+  </div>
+  <div class="header-stats" id="header-stats"></div>
+</div>
+
+<!-- Main Grid -->
+<div class="grid">
+
+  <!-- P&L Overview -->
+  <div class="card">
+    <h2>P&L Overview</h2>
+    <div class="pnl-grid" id="pnl-grid"></div>
+    <div id="strategy-breakdown"></div>
+  </div>
+
+  <!-- LLM Costs -->
+  <div class="card">
+    <h2>LLM Cost Tracker</h2>
+    <div id="cost-section"></div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="card full-width">
+    <h2>Open Positions <span id="pos-count" style="color:var(--blue)"></span></h2>
+    <div class="table-scroll" id="positions-table"></div>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="card full-width">
+    <h2>Recent Trades</h2>
+    <div class="table-scroll" id="trades-table"></div>
+  </div>
+
+  <!-- Model Performance -->
+  <div class="card">
+    <h2>Model Performance</h2>
+    <div id="models-section"></div>
+  </div>
+
+  <!-- Market Types -->
+  <div class="card">
+    <h2>Market Type Breakdown</h2>
+    <div id="market-types"></div>
+  </div>
+
+</div>
+
+<div class="refresh-bar" id="refresh-bar">Last updated: --</div>
+
+<script>
+const API = '';
+
+function $(id) { return document.getElementById(id); }
+
+function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
+function fmtPnl(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
+function fmtPct(v) { return (v * 100).toFixed(1) + '%'; }
+function fmtTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  return d.toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+}
+
+// Derive a short category from a ticker string
+function tickerCategory(ticker) {
+  if (!ticker) return 'other';
+  const t = ticker.toUpperCase();
+  if (t.includes('KXFED') || t.includes('KXCPI') || t.includes('KXGDP') || t.includes('KXJOB') || t.includes('KXECON') || t.includes('INXY') || t.includes('INX')) return 'economics';
+  if (t.includes('KXTRUMP') || t.includes('KXBIDEN') || t.includes('KXPOTUS') || t.includes('KXSENATE') || t.includes('KXHOUSE') || t.includes('KXGOV')) return 'politics';
+  if (t.includes('KXWOMENTION')) return 'word-mention';
+  if (t.includes('KXLLM')) return 'llm-benchmarks';
+  if (t.includes('KXCRYPTO') || t.includes('KXBTC') || t.includes('KXETH')) return 'crypto';
+  if (t.includes('KXWEATHER') || t.includes('KXTEMP')) return 'weather';
+  if (t.includes('KXNFL') || t.includes('KXNBA') || t.includes('KXMLB') || t.includes('KXNHL')) return 'sports';
+  return 'other';
+}
+
+async function fetchJSON(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function loadSummary() {
+  const data = await fetchJSON('/api/summary');
+  if (!data) return;
+
+  // Bot status
+  const bot = data.bot || {};
+  const statusClass = bot.status === 'active' ? 'active' : bot.status === 'inactive' ? 'inactive' : 'unknown';
+  const statusLabel = bot.status === 'active' ? 'Running' : bot.status || 'Unknown';
+  $('bot-status').innerHTML = `<span class="status-dot ${statusClass}"></span>${statusLabel}` +
+    (bot.uptime ? ` &middot; Uptime: ${bot.uptime}` : '');
+
+  // Header stats
+  const perf = data.performance || {};
+  const s1 = perf.stats_1d || {};
+  $('header-stats').innerHTML = `
+    <div class="header-stat">
+      <div class="label">Today P&L</div>
+      <div class="value ${pnlClass(s1.total_pnl || 0)}">${fmtPnl(s1.total_pnl || 0)}</div>
+    </div>
+    <div class="header-stat">
+      <div class="label">Trades Today</div>
+      <div class="value">${s1.total_trades || 0}</div>
+    </div>
+    <div class="header-stat">
+      <div class="label">Win Rate</div>
+      <div class="value">${s1.total_exits > 0 ? fmtPct(s1.win_rate || 0) : '--'}</div>
+    </div>
+    <div class="header-stat">
+      <div class="label">All-Time Trades</div>
+      <div class="value">${data.total_trades_all_time || 0}</div>
+    </div>
+  `;
+
+  // P&L grid
+  const s7 = perf.stats_7d || {};
+  const s30 = perf.stats_30d || {};
+  $('pnl-grid').innerHTML = [
+    { label: 'Today', stats: s1 },
+    { label: '7 Day', stats: s7 },
+    { label: '30 Day', stats: s30 },
+  ].map(({ label, stats }) => `
+    <div class="pnl-box">
+      <div class="period">${label}</div>
+      <div class="amount ${pnlClass(stats.total_pnl || 0)}">${fmtPnl(stats.total_pnl || 0)}</div>
+      <div class="detail">${stats.total_trades || 0} trades &middot; ${stats.total_exits > 0 ? fmtPct(stats.win_rate || 0) + ' win' : 'no exits'}</div>
+    </div>
+  `).join('');
+
+  // Strategy breakdown
+  const strats = s1.by_strategy || {};
+  const stratKeys = Object.keys(strats);
+  if (stratKeys.length > 0) {
+    $('strategy-breakdown').innerHTML = '<div class="strat-row">' + stratKeys.map(k => {
+      const s = strats[k];
+      return `<div class="strat-pill">${k}: ${s.count} trades, <span class="${pnlClass(s.pnl || 0)}">${fmtPnl(s.pnl || 0)}</span></div>`;
+    }).join('') + '</div>';
+  } else {
+    $('strategy-breakdown').innerHTML = '';
+  }
+}
+
+async function loadPositions() {
+  const data = await fetchJSON('/api/positions');
+  if (!data) return;
+
+  const positions = data.positions || [];
+  $('pos-count').textContent = `(${positions.length})`;
+
+  if (positions.length === 0) {
+    $('positions-table').innerHTML = '<div class="empty">No open positions</div>';
+    return;
+  }
+
+  let html = `<table>
+    <tr><th>Ticker</th><th>Side</th><th>Entry Price</th><th>Bot P(yes)</th><th>Amount</th><th>Age</th></tr>`;
+  for (const p of positions) {
+    const ticker = p.ticker || p.market_id || '--';
+    html += `<tr>
+      <td title="${ticker}">${ticker}</td>
+      <td>${p.side || '--'}</td>
+      <td>${p.entry_price != null ? '$' + Number(p.entry_price).toFixed(2) : '--'}</td>
+      <td>${p.entry_probability != null ? fmtPct(p.entry_probability) : '--'}</td>
+      <td>${p.amount_usd != null ? '$' + Number(p.amount_usd).toFixed(2) : '--'}</td>
+      <td>${p.age || '--'}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  $('positions-table').innerHTML = html;
+}
+
+async function loadTrades() {
+  const data = await fetchJSON('/api/trades?limit=50');
+  if (!data) return;
+
+  const trades = data.trades || [];
+  if (trades.length === 0) {
+    $('trades-table').innerHTML = '<div class="empty">No trades yet</div>';
+    return;
+  }
+
+  let html = `<table>
+    <tr><th>Time</th><th>Event</th><th>Ticker</th><th>Side</th><th>Price</th><th>Count</th><th>Conviction</th><th>Edge</th><th>P&L</th></tr>`;
+  for (const t of trades) {
+    const pnl = t.pnl_usd ?? t.pnl ?? null;
+    const pnlStr = pnl != null ? fmtPnl(pnl) : '--';
+    const pnlCls = pnl != null ? pnlClass(pnl) : '';
+    const event = t.event || '--';
+    const isExit = event.includes('closed') || event.includes('resolved');
+    html += `<tr>
+      <td>${fmtTime(t.logged_at || t.timestamp)}</td>
+      <td>${event}</td>
+      <td title="${t.ticker || ''}">${t.ticker || '--'}</td>
+      <td>${t.side || '--'}</td>
+      <td>${t.price_cents != null ? (t.price_cents / 100).toFixed(2) : '--'}</td>
+      <td>${t.count || '--'}</td>
+      <td>${t.conviction || '--'}</td>
+      <td>${t.edge != null ? (t.edge * 100).toFixed(1) + '%' : '--'}</td>
+      <td class="${pnlCls}">${isExit ? pnlStr : '--'}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  $('trades-table').innerHTML = html;
+}
+
+async function loadModels() {
+  const data = await fetchJSON('/api/models');
+  if (!data) { $('models-section').innerHTML = '<div class="empty">No model data yet</div>'; return; }
+
+  const models = data.models || {};
+  const keys = Object.keys(models);
+
+  if (keys.length === 0) {
+    $('models-section').innerHTML = '<div class="empty">No model predictions recorded yet</div>';
+    return;
+  }
+
+  let html = '<div class="model-grid">';
+  for (const name of keys) {
+    const m = models[name];
+    const weight = data.ensemble_weights?.[name];
+    html += `<div class="model-box">
+      <div class="name">${name}</div>
+      <div class="stat">Predictions: <span>${m.predictions}</span></div>
+      <div class="stat">Avg p(yes): <span>${m.avg_p_yes?.toFixed(3) ?? '--'}</span></div>
+      <div class="stat">Resolved: <span>${m.resolved_count}</span></div>
+      <div class="stat">Brier: <span>${m.avg_brier_score != null ? m.avg_brier_score.toFixed(4) : '--'}</span></div>
+      <div class="stat">Weight: <span>${weight != null ? fmtPct(weight) : 'equal'}</span></div>
+    </div>`;
+  }
+  html += '</div>';
+
+  if (data.agreement_rate != null) {
+    html += `<div style="margin-top:10px; font-size:13px; color:var(--text-dim)">
+      Agreement rate: <span style="color:var(--text); font-weight:600">${fmtPct(data.agreement_rate)}</span>
+      &middot; ${data.total_predictions} predictions &middot; ${data.total_resolutions} resolutions
+    </div>`;
+  }
+
+  $('models-section').innerHTML = html;
+}
+
+async function loadCosts() {
+  const data = await fetchJSON('/api/costs');
+  if (!data) return;
+
+  const dailyPct = data.daily_budget > 0 ? Math.min(data.daily_spend / data.daily_budget, 1) : 0;
+  const monthlyPct = data.monthly_budget > 0 ? Math.min(data.monthly_spend / data.monthly_budget, 1) : 0;
+
+  const dailyColor = dailyPct > 0.9 ? 'var(--red)' : dailyPct > 0.7 ? 'var(--yellow)' : 'var(--green)';
+  const monthlyColor = monthlyPct > 0.9 ? 'var(--red)' : monthlyPct > 0.7 ? 'var(--yellow)' : 'var(--green)';
+
+  let html = `
+    <div class="cost-bar-wrap">
+      <div class="cost-bar-label"><span>Daily: $${data.daily_spend.toFixed(4)}</span><span>$${data.daily_budget.toFixed(0)} budget</span></div>
+      <div class="cost-bar"><div class="cost-bar-fill" style="width:${dailyPct * 100}%; background:${dailyColor}"></div></div>
+    </div>
+    <div class="cost-bar-wrap">
+      <div class="cost-bar-label"><span>Monthly: $${data.monthly_spend.toFixed(4)}</span><span>$${data.monthly_budget.toFixed(0)} budget</span></div>
+      <div class="cost-bar"><div class="cost-bar-fill" style="width:${monthlyPct * 100}%; background:${monthlyColor}"></div></div>
+    </div>
+    <div style="font-size:13px; color:var(--text-dim); margin-top:8px">API calls today: <span style="color:var(--text); font-weight:600">${data.call_count}</span></div>
+  `;
+
+  // Per-model breakdown
+  const models = data.spend_by_model || {};
+  const modelKeys = Object.keys(models);
+  if (modelKeys.length > 0) {
+    html += '<table style="margin-top:12px"><tr><th>Model</th><th>Spend</th></tr>';
+    for (const m of modelKeys.sort((a, b) => models[b] - models[a])) {
+      html += `<tr><td>${m}</td><td>$${models[m].toFixed(4)}</td></tr>`;
+    }
+    html += '</table>';
+  }
+
+  $('cost-section').innerHTML = html;
+}
+
+async function loadMarketTypes() {
+  const data = await fetchJSON('/api/trades?limit=500');
+  if (!data || !data.trades?.length) {
+    $('market-types').innerHTML = '<div class="empty">No trade data</div>';
+    return;
+  }
+
+  const counts = {};
+  for (const t of data.trades) {
+    if (t.event !== 'order_placed') continue;
+    const cat = tickerCategory(t.ticker);
+    counts[cat] = (counts[cat] || 0) + 1;
+  }
+
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (sorted.length === 0) {
+    $('market-types').innerHTML = '<div class="empty">No categorizable trades</div>';
+    return;
+  }
+
+  $('market-types').innerHTML = '<div class="cat-grid">' +
+    sorted.map(([cat, count]) => `<div class="cat-pill">${cat} <span class="count">${count}</span></div>`).join('') +
+    '</div>';
+}
+
+async function refreshAll() {
+  await Promise.all([
+    loadSummary(),
+    loadPositions(),
+    loadTrades(),
+    loadModels(),
+    loadCosts(),
+    loadMarketTypes(),
+  ]);
+  $('refresh-bar').textContent = `Last updated: ${new Date().toLocaleTimeString()} (refreshes every 60s)`;
+}
+
+// Initial load + auto-refresh
+refreshAll();
+setInterval(refreshAll, 60000);
+</script>
+</body>
+</html>

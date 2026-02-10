@@ -20,9 +20,9 @@ All on the production droplet at `/opt/morpheus/state/`:
 
 1. Copy relevant state files locally:
    ```
-   scp root@45.55.85.173:/opt/morpheus/state/trade_history.jsonl /tmp/
-   scp root@45.55.85.173:/opt/morpheus/state/predictions.jsonl /tmp/
-   scp root@45.55.85.173:/opt/morpheus/state/model_predictions.jsonl /tmp/
+   scp morpheus:/opt/morpheus/state/trade_history.jsonl /tmp/
+   scp morpheus:/opt/morpheus/state/predictions.jsonl /tmp/
+   scp morpheus:/opt/morpheus/state/model_predictions.jsonl /tmp/
    ```
 
 2. Analyze and report:
