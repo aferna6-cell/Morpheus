@@ -131,11 +131,11 @@ class PerfTracker:
         for t in orders:
             strat = t.get("strategy", t.get("platform", "unknown"))
             by_strategy[strat]["count"] += 1
-            by_strategy[strat]["cost"] += float(t.get("cost_usd", 0))
+            by_strategy[strat]["cost"] += _safe_float(t.get("cost_usd"))
 
         for t in exits:
             strat = t.get("strategy", "unknown")
-            by_strategy[strat]["pnl"] += float(t.get("pnl", 0))
+            by_strategy[strat]["pnl"] += _safe_float(t.get("pnl"))
 
         return {
             "period_days": days,
