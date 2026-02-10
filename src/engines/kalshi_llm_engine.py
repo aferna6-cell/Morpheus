@@ -199,6 +199,7 @@ class KalshiLLMEngine(BaseEngine):
 
         filtered_markets = []
         filter_stats = {
+            "price": 0,
             "volume": 0,
             "spread": 0,
             "resolution": 0,
