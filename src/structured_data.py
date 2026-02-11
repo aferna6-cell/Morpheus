@@ -1007,10 +1007,12 @@ async def compute_weather_probability(
     # Clamp
     p_yes = max(0.001, min(0.999, p_yes))
 
-    # 8. Only return for confident cases: |forecast - threshold| / sigma > 1.5
+    # 8. Only return for confident cases: |forecast - threshold| / sigma > 1.0
+    # At z=1.0, probability is 84%/16% — clearly directional, not ambiguous.
+    # Previous threshold of 1.5 let the LLM handle cases it consistently gets wrong.
     if "bracket" not in t_type:
         z_score = abs(forecast_temp - t_value) / sigma
-        if z_score < 1.5:
+        if z_score < 1.0:
             logger.info(
                 "weather_direct_ambiguous",
                 city=city,
