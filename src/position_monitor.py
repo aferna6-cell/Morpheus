@@ -380,7 +380,16 @@ class PositionMonitor:
                     account=client.label,
                     error=str(e),
                 )
-                # Max out retry counter to prevent further attempts
+                self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
+                return
+            # Detect market_closed — Kalshi will settle automatically, stop retrying
+            if "market_closed" in error_str or "market closed" in error_str:
+                self.logger.info(
+                    "exit_market_already_closed",
+                    ticker=pos.ticker,
+                    account=client.label,
+                    msg="Market settled by Kalshi — no exit needed",
+                )
                 self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
                 return
             # Other errors — record retry attempt
