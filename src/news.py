@@ -188,8 +188,14 @@ class BraveSearchSource:
         self.api_key = api_key
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
         self._last_call: float = 0.0  # monotonic timestamp of last request
+        self._cooldown_until: float = 0.0  # skip Brave until this time after 429
 
     async def search(self, query: str, max_articles: int = 8) -> List[NewsArticle]:
+        # If in cooldown after a 429, skip immediately so Google RSS fallback takes over
+        now = asyncio.get_event_loop().time()
+        if now < self._cooldown_until:
+            return []
+
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
@@ -202,56 +208,49 @@ class BraveSearchSource:
             "text_decorations": "false",
         }
 
-        # Retry with exponential backoff on 429 rate limits
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # Enforce 1.1s minimum between Brave calls to avoid 429s
-                now = asyncio.get_event_loop().time()
-                elapsed = now - self._last_call
-                if elapsed < 1.1:
-                    await asyncio.sleep(1.1 - elapsed)
-                self._last_call = asyncio.get_event_loop().time()
+        try:
+            # Enforce 2s minimum between Brave calls to avoid 429s
+            elapsed = now - self._last_call
+            if elapsed < 2.0:
+                await asyncio.sleep(2.0 - elapsed)
+            self._last_call = asyncio.get_event_loop().time()
 
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.get(self.base_url, headers=headers, params=params)
-                    if resp.status_code == 429:
-                        wait = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
-                        structlog.get_logger().warning(
-                            "brave_search_429_retry",
-                            attempt=attempt + 1,
-                            wait_seconds=wait,
-                        )
-                        await asyncio.sleep(wait)
-                        continue
-                    resp.raise_for_status()
-                    data = resp.json()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(self.base_url, headers=headers, params=params)
+                if resp.status_code == 429:
+                    # Set 60s cooldown — all subsequent calls fall through to Google RSS
+                    self._cooldown_until = asyncio.get_event_loop().time() + 60.0
+                    structlog.get_logger().warning(
+                        "brave_search_429_cooldown",
+                        cooldown_seconds=60,
+                    )
+                    return []
+                resp.raise_for_status()
+                data = resp.json()
 
-                articles = []
-                for result in data.get("web", {}).get("results", [])[:max_articles]:
-                    published = datetime.now(timezone.utc)
-                    age = result.get("age")
-                    if age:
-                        published = self._parse_age(age)
+            articles = []
+            for result in data.get("web", {}).get("results", [])[:max_articles]:
+                published = datetime.now(timezone.utc)
+                age = result.get("age")
+                if age:
+                    published = self._parse_age(age)
 
-                    articles.append(NewsArticle(
-                        title=result.get("title", ""),
-                        summary=result.get("description", ""),
-                        url=result.get("url", ""),
-                        published=published,
-                        source="Brave Search",
-                    ))
-                return articles
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < max_retries - 1:
-                    await asyncio.sleep(2.0 * (2 ** attempt))
-                    continue
-                structlog.get_logger().warning("brave_search_error", error=str(e))
-                return []
-            except Exception as e:
-                structlog.get_logger().warning("brave_search_error", error=str(e))
-                return []
-        return []
+                articles.append(NewsArticle(
+                    title=result.get("title", ""),
+                    summary=result.get("description", ""),
+                    url=result.get("url", ""),
+                    published=published,
+                    source="Brave Search",
+                ))
+            return articles
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                self._cooldown_until = asyncio.get_event_loop().time() + 60.0
+            structlog.get_logger().warning("brave_search_error", error=str(e))
+            return []
+        except Exception as e:
+            structlog.get_logger().warning("brave_search_error", error=str(e))
+            return []
 
     @staticmethod
     def _parse_age(age_str: str) -> datetime:
