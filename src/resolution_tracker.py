@@ -47,12 +47,28 @@ def _resolved_market_ids(state_dir: Path) -> Set[str]:
 
 
 def _build_order_lookup(state_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
-    """Build market_id -> list of order_placed events from trade history."""
+    """Build market_id -> list of order_placed events from trade history.
+
+    Skips duplicate null-field entries (from old KalshiTradingClient bug
+    that logged orders twice — once with nulls, once with real data).
+    Deduplicates by order_id, keeping the entry with the most data.
+    """
     trades = _read_jsonl(state_dir / "trade_history.jsonl")
-    lookup: Dict[str, List[Dict[str, Any]]] = {}
+    # Deduplicate by order_id — keep the entry with edge/cost data
+    by_order_id: Dict[str, Dict[str, Any]] = {}
     for t in trades:
         if t.get("event") != "order_placed":
             continue
+        oid = t.get("order_id", "")
+        if oid and oid in by_order_id:
+            # Keep the one with more data (non-null edge)
+            if t.get("edge") is not None:
+                by_order_id[oid] = t
+        else:
+            by_order_id[oid or id(t)] = t
+
+    lookup: Dict[str, List[Dict[str, Any]]] = {}
+    for t in by_order_id.values():
         # ticker in trade history may have ":yes"/":no" suffix — strip it
         ticker = t.get("ticker", "")
         market_id = ticker.split(":")[0] if ":" in ticker else ticker
@@ -105,7 +121,7 @@ async def check_resolutions(
     *,
     dry_run: bool = False,
 ) -> int:
-    """Check all unresolved predictions for resolution status via Kalshi API.
+    """Check all unresolved predictions AND traded markets for resolution.
 
     Returns the number of newly resolved markets.
     """
@@ -113,23 +129,44 @@ async def check_resolutions(
     state_path = Path(state_dir)
 
     predictions = _read_jsonl(state_path / "predictions.jsonl")
-    if not predictions:
-        logger.debug("resolution_tracker_no_predictions")
-        return 0
-
     already_resolved = _resolved_market_ids(state_path)
     order_lookup = _build_order_lookup(state_path)
 
-    # Collect unique unresolved market ids
+    # Collect unique unresolved market ids from predictions
     unresolved: Dict[str, Dict[str, Any]] = {}
     for pred in predictions:
         mid = pred.get("market_id")
         if mid and mid not in already_resolved and mid not in unresolved:
             unresolved[mid] = pred
 
+    # Also add traded markets that have no prediction entry
+    # (e.g. market-making orders, or orders placed before prediction logging)
+    for market_id, orders in order_lookup.items():
+        if market_id not in already_resolved and market_id not in unresolved:
+            # Build a synthetic prediction from order data
+            first_order = orders[0]
+            side = first_order.get("side", "unknown")
+            price_cents = float(first_order.get("price_cents") or 50)
+            unresolved[market_id] = {
+                "market_id": market_id,
+                "predicted_p_yes": 0.5,  # unknown — no LLM prediction
+                "market_price_at_entry": price_cents / 100.0,
+                "side": f"buy_{side}" if side in ("yes", "no") else side,
+                "edge": 0.0,
+                "conviction": "unknown",
+                "timestamp": first_order.get("logged_at", ""),
+            }
+
     if not unresolved:
         logger.debug("resolution_tracker_all_resolved")
         return 0
+
+    logger.info(
+        "resolution_tracker_checking",
+        total_unresolved=len(unresolved),
+        from_predictions=len([u for u in unresolved.values() if u.get("conviction") != "unknown"]),
+        from_trades_only=len([u for u in unresolved.values() if u.get("conviction") == "unknown"]),
+    )
 
     # Kalshi public API base URL
     kalshi_cfg = getattr(config, "kalshi", None) or {}
@@ -152,8 +189,11 @@ async def check_resolutions(
                 r = await client.get(f"/markets/{market_id}")
                 if r.status_code == 429:
                     logger.debug("resolution_tracker_rate_limited", market_id=market_id)
-                    await asyncio.sleep(2.0)
-                    continue
+                    await asyncio.sleep(5.0)
+                    r = await client.get(f"/markets/{market_id}")
+                    if r.status_code == 429:
+                        logger.warning("resolution_tracker_rate_limited_backoff", checked_so_far=newly_resolved)
+                        break  # Stop checking, resume next cycle
                 if r.status_code != 200:
                     logger.warning(
                         "resolution_tracker_api_error",
