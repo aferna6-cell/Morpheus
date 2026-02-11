@@ -232,17 +232,27 @@ class KalshiLLMEngine(BaseEngine):
             if is_weather and km.close_time and km.close_time > same_day_cutoff:
                 filter_stats["weather_lookahead"] += 1
 
-            # Apply strict filters
-            filter_result = self._filters.check_all(
-                market_id=km.ticker,
-                title=km.title,
-                category=km.category,
-                volume=float(km.volume),
-                bid=km.yes_bid,
-                ask=km.yes_ask,
-                close_time=km.close_time,
-                is_live=False,  # Kalshi doesn't expose live status clearly
-            )
+            # Apply filters
+            is_lookahead = is_weather and km.close_time and km.close_time > same_day_cutoff
+            if is_lookahead:
+                # Weather lookahead: only check ticker prefix + price + spread (skip volume/resolution).
+                # NOAA fast-path is free and new markets have low volume.
+                filter_result = self._filters.check_ticker_prefix(km.ticker)
+                if filter_result.passed:
+                    filter_result = self._filters.check_price(km.ticker, km.yes_bid, km.yes_ask)
+                if filter_result.passed:
+                    filter_result = self._filters.check_spread(km.ticker, km.yes_bid, km.yes_ask)
+            else:
+                filter_result = self._filters.check_all(
+                    market_id=km.ticker,
+                    title=km.title,
+                    category=km.category,
+                    volume=float(km.volume),
+                    bid=km.yes_bid,
+                    ask=km.yes_ask,
+                    close_time=km.close_time,
+                    is_live=False,
+                )
 
             if not filter_result.passed:
                 self._markets_filtered += 1
