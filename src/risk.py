@@ -95,10 +95,8 @@ class RiskManager:
         contrarian_cfg = getattr(config, "contrarian", None) or {}
         if isinstance(contrarian_cfg, dict):
             self._contrarian_max_position = float(contrarian_cfg.get("max_position_size", 25.0))
-            self._contrarian_max_exposure = float(contrarian_cfg.get("max_total_exposure", 100.0))
         else:
             self._contrarian_max_position = 25.0
-            self._contrarian_max_exposure = 100.0
 
         from pathlib import Path
         self.state_file = str(Path(self.state_dir) / "risk_state.json")
@@ -131,11 +129,9 @@ class RiskManager:
         self.max_position_size = min(base_max_pos * scale_factor, total_balance * 0.15)
         self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
 
-        # Scale contrarian limits too
+        # Scale contrarian position limit
         base_c_pos = 4.0  # contrarian default
-        base_c_exp = 8.0
         self._contrarian_max_position = min(base_c_pos * scale_factor, total_balance * 0.15)
-        self._contrarian_max_exposure = min(base_c_exp * scale_factor, total_balance * 0.80)
 
         # Scale loss limits
         base_max_loss_trade = self.config.risk.get("max_loss_per_trade", 2.0)
