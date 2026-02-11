@@ -358,6 +358,7 @@ class KalshiContrarianEngine(BaseEngine):
                     "net_edge": net_edge,
                     "conviction": conv_str,
                     "reasoning": result.reasoning,
+                    "signal_source": getattr(result, "signal_source", "llm"),
                     "contrarian_thesis": contrarian_thesis,
                     "crowd_wrong_reason": crowd_wrong_reason,
                     "crowd_confidence": max(km.yes_price, km.no_price),

@@ -412,6 +412,7 @@ class EnsembleSignal(Signal):
                         )
                         result.net_edge = net_edge  # type: ignore[attr-defined]
                         result.conviction = conviction  # type: ignore[attr-defined]
+                        result.signal_source = "noaa_direct"  # type: ignore[attr-defined]
                         return result
                     else:
                         self.logger.debug(
@@ -1177,6 +1178,7 @@ Rules:
                     sig.conviction = conviction  # type: ignore[attr-defined]
                     sig.contrarian_thesis = w_reasoning  # type: ignore[attr-defined]
                     sig.crowd_wrong_reason = f"NOAA forecast disagrees with market by {abs(raw_edge):.0%}"  # type: ignore[attr-defined]
+                    sig.signal_source = "noaa_direct"  # type: ignore[attr-defined]
                     return sig
 
             # Get news context

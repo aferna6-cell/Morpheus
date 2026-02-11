@@ -79,6 +79,7 @@ def log_prediction(
     edge: float,
     conviction: str,
     net_edge: float = 0.0,
+    signal_source: str = "llm",
     features_active: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Append a prediction entry to state_dir/predictions.jsonl.
@@ -87,6 +88,7 @@ def log_prediction(
     eventual market resolution.
 
     Args:
+        signal_source: "noaa_direct" for weather fast-path, "llm" for LLM ensemble.
         features_active: Optional dict of feature flags active at prediction
             time (for A/B comparison). See ab_tracker.get_active_features().
     """
@@ -98,6 +100,7 @@ def log_prediction(
         "edge": round(edge, 4),
         "net_edge": round(net_edge, 4),
         "conviction": conviction,
+        "signal_source": signal_source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if features_active is not None:

@@ -365,6 +365,7 @@ class KalshiLLMEngine(BaseEngine):
                     "net_edge": net_edge,
                     "conviction": conviction,
                     "reasoning": result.reasoning,
+                    "signal_source": getattr(result, "signal_source", "llm"),
                     "kalshi_ticker": km.ticker,
                     "kalshi_yes_bid": km.yes_bid,
                     "kalshi_yes_ask": km.yes_ask,

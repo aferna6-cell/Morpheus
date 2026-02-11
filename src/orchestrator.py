@@ -245,6 +245,17 @@ class Orchestrator:
         # 3. Score and rank
         ranked = self._score_signals(fresh)
 
+        # 4. Build set of tickers we already hold (position dedup)
+        held_tickers: set = set()
+        for executor in self.kalshi_executors:
+            try:
+                positions = await executor.trading_client.get_positions()
+                for pos in positions:
+                    if pos.count != 0:
+                        held_tickers.add(pos.ticker)
+            except Exception:
+                pass  # If we can't check, skip guard rather than block trading
+
         # 5. Execute top N within risk limits
         executed = 0
         for signal in ranked[: self._max_per_cycle]:
@@ -267,6 +278,15 @@ class Orchestrator:
                     "dispatch_dedup_skip",
                     market_id=signal.market_id,
                     side=signal.side,
+                    engine=signal.engine,
+                )
+                continue
+
+            # Position dedup: skip markets where we already hold a position
+            if signal.market_id in held_tickers:
+                self.logger.info(
+                    "dispatch_position_dedup_skip",
+                    market_id=signal.market_id,
                     engine=signal.engine,
                 )
                 continue
@@ -340,6 +360,7 @@ class Orchestrator:
                             edge=signal.edge,
                             conviction=str(conviction),
                             net_edge=signal.metadata.get("net_edge", 0.0),
+                            signal_source=signal.metadata.get("signal_source", "llm"),
                         )
                     except Exception:
                         self.logger.warning("prediction_log_failed", market_id=signal.market_id)

@@ -73,7 +73,7 @@ class TelegramBot:
                 pass
 
     async def _poll_loop(self) -> None:
-        """Poll for new messages every 5 seconds."""
+        """Poll for new messages every 30 seconds."""
         await asyncio.sleep(10)  # let other services start first
         while True:
             try:
@@ -82,7 +82,7 @@ class TelegramBot:
                 raise
             except Exception as e:
                 logger.debug("telegram_poll_error", error=str(e))
-            await asyncio.sleep(5)
+            await asyncio.sleep(30)
 
     async def _check_updates(self) -> None:
         async with httpx.AsyncClient(timeout=10.0) as client:
