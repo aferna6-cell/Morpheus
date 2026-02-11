@@ -603,10 +603,9 @@ class Orchestrator:
                     market_data, sig_result, pos,
                 )
 
-                # Register resting orders with fill manager for tracking
+                # Register ALL successful orders with fill manager for tracking
                 if kalshi_trade and kalshi_trade.was_successful and self.fill_manager:
-                    if kalshi_trade.order_id and kalshi_trade.executed_contracts == 0:
-                        # Resting order — needs fill tracking
+                    if kalshi_trade.order_id:
                         self.fill_manager.track_order(
                             order_id=kalshi_trade.order_id,
                             ticker=kalshi_trade.ticker,

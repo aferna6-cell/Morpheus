@@ -135,10 +135,11 @@ async def run(
                 state_dir=state_dir,
             )
 
-            # Fill manager — track real fills
+            # Fill manager — track real fills (persists resting orders to disk)
             fill_manager = FillManager(
                 config=config,
                 trading_clients=trading_clients,
+                state_dir=state_dir,
             )
 
             # Wire fill events to position tracking

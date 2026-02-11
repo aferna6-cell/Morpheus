@@ -3,13 +3,17 @@
 Fixes the critical bug where kalshi_executor.py line 236 pretends
 resting orders filled immediately. This module polls order status
 and detects actual fills, partial fills, and stale orders.
+
+Persistence: resting orders are saved to disk so tracking survives restarts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
@@ -35,6 +39,33 @@ class RestingOrder:
     filled_count: int = 0
     is_done: bool = False
 
+    def to_dict(self) -> dict:
+        return {
+            "order_id": self.order_id,
+            "ticker": self.ticker,
+            "side": self.side,
+            "count": self.count,
+            "price_cents": self.price_cents,
+            "placed_at": self.placed_at.isoformat(),
+            "account_label": self.account_label,
+            "strategy": self.strategy,
+            "filled_count": self.filled_count,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RestingOrder":
+        return cls(
+            order_id=d["order_id"],
+            ticker=d["ticker"],
+            side=d["side"],
+            count=d["count"],
+            price_cents=d["price_cents"],
+            placed_at=datetime.fromisoformat(d["placed_at"]),
+            account_label=d.get("account_label", "default"),
+            strategy=d.get("strategy", "llm"),
+            filled_count=d.get("filled_count", 0),
+        )
+
 
 @dataclass
 class FillEvent:
@@ -57,6 +88,7 @@ class FillManager:
         self,
         config: BotConfig,
         trading_clients: List[KalshiTradingClient],
+        state_dir: str = "state",
     ):
         self.config = config
         self.trading_clients = trading_clients
@@ -68,11 +100,43 @@ class FillManager:
         self._resting: Dict[str, RestingOrder] = {}  # order_id -> RestingOrder
         self._on_fill_callbacks: List[Callable] = []
         self._task: Optional[asyncio.Task] = None
+        self._state_file = Path(state_dir) / "resting_orders.json"
+
+        # Restore resting orders from disk (survives restarts)
+        self._load_state()
 
         # Stats
         self.total_filled = 0
         self.total_cancelled = 0
         self.total_partial = 0
+
+    def _load_state(self) -> None:
+        """Load resting orders from disk."""
+        try:
+            if self._state_file.exists():
+                data = json.loads(self._state_file.read_text())
+                for d in data:
+                    try:
+                        order = RestingOrder.from_dict(d)
+                        self._resting[order.order_id] = order
+                    except Exception:
+                        continue
+                if self._resting:
+                    self.logger.info(
+                        "fill_manager_restored",
+                        restored_orders=len(self._resting),
+                    )
+        except Exception as e:
+            self.logger.debug("fill_manager_load_error", error=str(e))
+
+    def _save_state(self) -> None:
+        """Persist resting orders to disk."""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            data = [o.to_dict() for o in self._resting.values() if not o.is_done]
+            self._state_file.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            self.logger.debug("fill_manager_save_error", error=str(e))
 
     def on_fill(self, callback: Callable) -> None:
         """Register a callback for fill events."""
@@ -108,6 +172,7 @@ class FillManager:
             price_cents=price_cents,
             account=account_label,
         )
+        self._save_state()
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll_loop())
@@ -246,9 +311,11 @@ class FillManager:
                                 )
                             break
 
-        # Clean up done orders
+        # Clean up done orders and persist
         for oid in done_ids:
             self._resting.pop(oid, None)
+        if done_ids:
+            self._save_state()
 
     @property
     def pending_count(self) -> int:
