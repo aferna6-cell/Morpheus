@@ -23,7 +23,9 @@ import math
 import httpx
 import structlog
 
-_FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+def _get_fred_api_key() -> str:
+    """Lazy FRED key lookup — load_dotenv() may not have run at import time."""
+    return os.getenv("FRED_API_KEY", "")
 
 logger = structlog.get_logger()
 
@@ -68,7 +70,7 @@ async def _get_fedwatch_context() -> Optional[str]:
     Uses the CME website's public data or financial news for current
     Fed rate probabilities implied by futures markets.
     """
-    if not _FRED_API_KEY:
+    if not _get_fred_api_key():
         return None
 
     try:
@@ -82,7 +84,7 @@ async def _get_fedwatch_context() -> Optional[str]:
                 "https://api.stlouisfed.org/fred/series/observations",
                 params={
                     "series_id": "DFEDTARU",  # Federal funds target rate upper
-                    "api_key": _FRED_API_KEY,
+                    "api_key": _get_fred_api_key(),
                     "file_type": "json",
                     "sort_order": "desc",
                     "limit": 1,
@@ -110,7 +112,7 @@ async def _get_fedwatch_context() -> Optional[str]:
 
 async def _fetch_fred_series(series_id: str, limit: int = 6) -> List[Dict]:
     """Fetch recent observations from a FRED series. Returns list of {date, value}."""
-    if not _FRED_API_KEY:
+    if not _get_fred_api_key():
         return []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -118,7 +120,7 @@ async def _fetch_fred_series(series_id: str, limit: int = 6) -> List[Dict]:
                 "https://api.stlouisfed.org/fred/series/observations",
                 params={
                     "series_id": series_id,
-                    "api_key": _FRED_API_KEY,
+                    "api_key": _get_fred_api_key(),
                     "file_type": "json",
                     "sort_order": "desc",
                     "limit": limit,
@@ -221,7 +223,7 @@ async def _get_cpi_deep_context(question: str) -> Optional[str]:
     - MEDCPIM158SFRBCLE: Median CPI (Cleveland Fed)
     YoY computed from index in threshold analysis (not stale CPALTT01USM657N).
     """
-    if not _FRED_API_KEY:
+    if not _get_fred_api_key():
         return None
 
     series = [
@@ -1053,13 +1055,37 @@ async def compute_weather_probability(
             )
             return None
     else:
-        # For brackets, check if forecast is well inside or outside
-        midpoint = t_value
-        z_score = abs(forecast_temp - midpoint) / sigma
-        # For brackets, low z_score means forecast is near the bracket (good for YES)
-        # We return for both confident YES and confident NO cases
-        # Only skip truly ambiguous cases (z_score between 0.5 and 2.0 with moderate p_yes)
-        if 0.15 < p_yes < 0.85 and z_score < 1.5:
+        # For brackets, check distance from nearest bracket edge (not midpoint)
+        # A 2-degree bracket means +-1F from midpoint is inside the bracket
+        q = question.lower()
+        m_b = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)", q)
+        if m_b:
+            lower_b = float(m_b.group(1))
+            upper_b = float(m_b.group(2))
+        else:
+            lower_b = t_value - 1
+            upper_b = t_value + 1
+        # Distance from forecast to nearest bracket edge
+        if forecast_temp < lower_b:
+            edge_dist = lower_b - forecast_temp
+        elif forecast_temp > upper_b:
+            edge_dist = forecast_temp - upper_b
+        else:
+            edge_dist = 0  # forecast is inside the bracket
+        z_from_edge = edge_dist / sigma
+        z_score = abs(forecast_temp - t_value) / sigma
+        # Only signal when forecast is >= 1.5 sigma from the nearest bracket edge
+        # This prevents betting on brackets where the forecast is borderline
+        if z_from_edge < 1.5:
+            logger.info(
+                "weather_bracket_too_close",
+                market_id=market_id,
+                forecast=forecast_temp,
+                bracket=f"{lower_b}-{upper_b}",
+                edge_dist=round(edge_dist, 1),
+                z_from_edge=round(z_from_edge, 2),
+                msg="Forecast too close to bracket edge, deferring to LLM",
+            )
             return None
 
     confidence = min(0.95, 0.5 + z_score * 0.15) if "bracket" not in t_type else min(0.90, 0.4 + abs(0.5 - p_yes) * 1.5)
@@ -1270,7 +1296,7 @@ async def compute_jobless_claims_probability(
     Uses 4-week moving average as forecast and 8-week stdev as error.
     Returns (p_yes, confidence, reasoning) or None if can't compute.
     """
-    if not _FRED_API_KEY:
+    if not _get_fred_api_key():
         return None
 
     # Parse threshold from market question or ticker

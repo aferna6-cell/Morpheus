@@ -169,7 +169,7 @@ contrarian:
   min_crowd_confidence: 0.80    # market must be 80%+ one side
   max_crowd_confidence: 0.95    # don't bet against 95%+ (usually right)
   min_contrarian_edge: 0.10     # LLM must disagree by 10%+
-  min_conviction: "high"        # only high-conviction contrarian bets
+  min_conviction: "medium"      # medium+ conviction (high too restrictive with few candidates)
   max_position_size: 4.0        # $4 per contrarian trade
   max_total_exposure: 8.0       # $8 total contrarian exposure
   max_resolution_days: 7        # 1-7 day markets (not just same-day)
