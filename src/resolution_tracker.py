@@ -307,9 +307,10 @@ async def check_resolutions(
                     "total_count": total_count,
                 }
 
-                # Include features_active if present
-                if "features_active" in pred:
-                    resolution_record["features_active"] = pred["features_active"]
+                # Propagate tracking fields from prediction
+                for extra_key in ("features_active", "signal_source", "net_edge"):
+                    if extra_key in pred:
+                        resolution_record[extra_key] = pred[extra_key]
 
                 append_jsonl(state_path / "resolutions.jsonl", resolution_record)
                 newly_resolved += 1

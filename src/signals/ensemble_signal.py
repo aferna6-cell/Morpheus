@@ -421,6 +421,17 @@ class EnsembleSignal(Signal):
                             market,
                             f"Weather direct: net edge {net_edge:.3f} < {min_edge:.3f}",
                         )
+                else:
+                    # NOAA couldn't produce a confident signal (z-score < 1.0).
+                    # Skip LLM fallback for weather — historical 1W/33L shows LLM
+                    # has no edge on weather, and near-threshold markets are the
+                    # hardest to predict. Save LLM budget for non-weather markets.
+                    self.logger.debug(
+                        "weather_skip_noaa_ambiguous",
+                        market_id=market.id,
+                        msg="NOAA ambiguous, skipping LLM fallback",
+                    )
+                    return self._hold(market, "Weather: NOAA ambiguous, LLM has no edge")
 
             # Jobless claims fast-path: bypass LLM when FRED data gives clear signal
             if mtype == "economic" or "jobless" in market.question.lower() or "KXJOBLESSCLAIMS" in market.id.upper():
