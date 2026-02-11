@@ -46,55 +46,80 @@ def _resolved_market_ids(state_dir: Path) -> Set[str]:
     return {r["market_id"] for r in resolutions if "market_id" in r}
 
 
-def _build_order_lookup(state_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
-    """Build market_id -> list of order_placed events from trade history.
+def _build_order_lookup(
+    state_dir: Path,
+) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    """Build market_id -> orders from trade history.
 
-    Skips duplicate null-field entries (from old KalshiTradingClient bug
-    that logged orders twice — once with nulls, once with real data).
-    Deduplicates by order_id, keeping the entry with the most data.
+    Returns (placed_lookup, filled_lookup):
+    - placed_lookup: market_id -> deduplicated order_placed events
+    - filled_lookup: market_id -> order_filled events (confirmed fills)
+
+    When computing P&L, prefer filled_lookup (actual fills) over
+    placed_lookup (which includes unfilled resting orders).
     """
     trades = _read_jsonl(state_dir / "trade_history.jsonl")
-    # Deduplicate by order_id — keep the entry with edge/cost data
-    by_order_id: Dict[str, Dict[str, Any]] = {}
-    for t in trades:
-        if t.get("event") != "order_placed":
-            continue
-        oid = t.get("order_id", "")
-        if oid and oid in by_order_id:
-            # Keep the one with more data (non-null edge)
-            if t.get("edge") is not None:
-                by_order_id[oid] = t
-        else:
-            by_order_id[oid or id(t)] = t
 
-    lookup: Dict[str, List[Dict[str, Any]]] = {}
+    # Collect order_placed, deduplicated by order_id
+    by_order_id: Dict[str, Dict[str, Any]] = {}
+    fills: List[Dict[str, Any]] = []
+
+    for t in trades:
+        event = t.get("event")
+        if event == "order_placed":
+            oid = t.get("order_id", "")
+            if oid and oid in by_order_id:
+                if t.get("edge") is not None:
+                    by_order_id[oid] = t
+            else:
+                by_order_id[oid or id(t)] = t
+        elif event == "order_filled":
+            fills.append(t)
+
+    placed_lookup: Dict[str, List[Dict[str, Any]]] = {}
     for t in by_order_id.values():
-        # ticker in trade history may have ":yes"/":no" suffix — strip it
         ticker = t.get("ticker", "")
         market_id = ticker.split(":")[0] if ":" in ticker else ticker
         if market_id:
-            lookup.setdefault(market_id, []).append(t)
-    return lookup
+            placed_lookup.setdefault(market_id, []).append(t)
+
+    filled_lookup: Dict[str, List[Dict[str, Any]]] = {}
+    for t in fills:
+        ticker = t.get("ticker", "")
+        market_id = ticker.split(":")[0] if ":" in ticker else ticker
+        if market_id:
+            filled_lookup.setdefault(market_id, []).append(t)
+
+    return placed_lookup, filled_lookup
 
 
 def _compute_pnl(
-    orders: List[Dict[str, Any]],
+    placed_orders: List[Dict[str, Any]],
+    filled_orders: List[Dict[str, Any]],
     actual_outcome: float,
 ) -> tuple[float, int]:
     """Compute dollar P&L and total contract count from orders + outcome.
+
+    Prefers order_filled events (confirmed fills) over order_placed events
+    (which may include unfilled resting/MM orders). Falls back to
+    order_placed only when no fills are recorded for a market.
 
     Kalshi binary: buy side at price_cents. If your side wins, payout = 100c/contract.
     If your side loses, payout = 0.
 
     Returns (pnl_usd, total_count).
     """
+    # Use fills if available, otherwise fall back to placed orders
+    orders = filled_orders if filled_orders else placed_orders
+    price_field = "fill_price_cents" if filled_orders else "price_cents"
+
     total_pnl = 0.0
     total_count = 0
     outcome_yes = actual_outcome >= 0.5
 
     for order in orders:
         count = int(order.get("count") or 0)
-        price_cents = float(order.get("price_cents") or 0)
+        price_cents = float(order.get(price_field) or order.get("price_cents") or 0)
         side = (order.get("side") or "").lower()
 
         if count <= 0 or price_cents <= 0:
@@ -130,7 +155,7 @@ async def check_resolutions(
 
     predictions = _read_jsonl(state_path / "predictions.jsonl")
     already_resolved = _resolved_market_ids(state_path)
-    order_lookup = _build_order_lookup(state_path)
+    placed_lookup, filled_lookup = _build_order_lookup(state_path)
 
     # Collect unique unresolved market ids from predictions
     unresolved: Dict[str, Dict[str, Any]] = {}
@@ -141,12 +166,21 @@ async def check_resolutions(
 
     # Also add traded markets that have no prediction entry
     # (e.g. market-making orders, or orders placed before prediction logging)
-    for market_id, orders in order_lookup.items():
+    # Use placed_lookup (all orders) to find traded markets
+    all_traded = set(placed_lookup.keys()) | set(filled_lookup.keys())
+    for market_id in all_traded:
         if market_id not in already_resolved and market_id not in unresolved:
             # Build a synthetic prediction from order data
+            orders = filled_lookup.get(market_id) or placed_lookup.get(market_id, [])
+            if not orders:
+                continue
             first_order = orders[0]
             side = first_order.get("side", "unknown")
-            price_cents = float(first_order.get("price_cents") or 50)
+            price_cents = float(
+                first_order.get("fill_price_cents")
+                or first_order.get("price_cents")
+                or 50
+            )
             unresolved[market_id] = {
                 "market_id": market_id,
                 "predicted_p_yes": 0.5,  # unknown — no LLM prediction
@@ -253,9 +287,10 @@ async def check_resolutions(
                     else:
                         continue
 
-                # Compute dollar P&L from actual orders
-                orders = order_lookup.get(market_id, [])
-                pnl_usd, total_count = _compute_pnl(orders, actual_outcome)
+                # Compute dollar P&L — prefer confirmed fills over placed orders
+                placed = placed_lookup.get(market_id, [])
+                filled = filled_lookup.get(market_id, [])
+                pnl_usd, total_count = _compute_pnl(placed, filled, actual_outcome)
 
                 resolution_record = {
                     "market_id": market_id,
