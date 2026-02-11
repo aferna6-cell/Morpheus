@@ -122,6 +122,9 @@ class KalshiLLMEngine(BaseEngine):
         self._eval_cooldown_seconds: float = 1800.0  # 30 minutes
         self._price_change_threshold: float = 0.05   # re-evaluate if price moved 5%+
 
+        # Rescan trigger: set externally when capital frees up
+        self._rescan_event = asyncio.Event()
+
         # Stats
         self._markets_scanned = 0
         self._markets_filtered = 0
@@ -167,12 +170,23 @@ class KalshiLLMEngine(BaseEngine):
                 raise
             except Exception as exc:
                 self.logger.error("kalshi_llm_engine_scan_error", error=str(exc))
-            await asyncio.sleep(self._interval)
+
+            # Wait for interval OR rescan trigger (whichever comes first)
+            try:
+                await asyncio.wait_for(self._rescan_event.wait(), timeout=self._interval)
+                self._rescan_event.clear()
+                self.logger.info("kalshi_llm_rescan_triggered", msg="Capital freed — immediate rescan")
+            except asyncio.TimeoutError:
+                pass  # Normal interval elapsed
 
     def set_balance_checker(self, checker, min_balance: float = 1.0) -> None:
         """Set an async callable that returns total USD across all Kalshi accounts."""
         self._balance_checker = checker
         self._min_trade_balance = min_balance
+
+    def trigger_rescan(self) -> None:
+        """Signal the engine to run an immediate scan (e.g., when capital frees up)."""
+        self._rescan_event.set()
 
     async def _scan_once(self) -> None:
         # Balance gate — don't waste LLM API calls if there's no money to trade

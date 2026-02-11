@@ -114,6 +114,13 @@ class KalshiContrarianEngine(BaseEngine):
         self._recently_evaluated: Dict[str, float] = {}  # ticker -> timestamp
         self._eval_cooldown = 7200.0  # 2 hours
 
+        # Balance gate
+        self._min_trade_balance: float = 1.0
+        self._balance_checker = None
+
+        # Rescan trigger: set externally when capital frees up
+        self._rescan_event = asyncio.Event()
+
         # Stats
         self._markets_scanned = 0
         self._overconfident_found = 0
@@ -159,9 +166,39 @@ class KalshiContrarianEngine(BaseEngine):
                 raise
             except Exception as exc:
                 self.logger.error("kalshi_contrarian_scan_error", error=str(exc))
-            await asyncio.sleep(self._interval)
+
+            # Wait for interval OR rescan trigger (whichever comes first)
+            try:
+                await asyncio.wait_for(self._rescan_event.wait(), timeout=self._interval)
+                self._rescan_event.clear()
+                self.logger.info("contrarian_rescan_triggered", msg="Capital freed — immediate rescan")
+            except asyncio.TimeoutError:
+                pass  # Normal interval elapsed
+
+    def set_balance_checker(self, checker, min_balance: float = 1.0) -> None:
+        """Set an async callable that returns total USD across all Kalshi accounts."""
+        self._balance_checker = checker
+        self._min_trade_balance = min_balance
+
+    def trigger_rescan(self) -> None:
+        """Signal the engine to run an immediate scan (e.g., when capital frees up)."""
+        self._rescan_event.set()
 
     async def _scan_once(self) -> None:
+        # Balance gate — skip LLM evaluation if accounts are unfunded
+        if self._balance_checker is not None:
+            try:
+                total_balance = await self._balance_checker()
+                if total_balance < self._min_trade_balance:
+                    self.logger.info(
+                        "contrarian_skip_unfunded",
+                        total_balance=total_balance,
+                        min_required=self._min_trade_balance,
+                    )
+                    return
+            except Exception as exc:
+                self.logger.warning("contrarian_balance_check_failed", error=str(exc))
+
         # Fetch markets closing within 1-7 days (wider than standard engine's same-day)
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=self._max_resolution_days,

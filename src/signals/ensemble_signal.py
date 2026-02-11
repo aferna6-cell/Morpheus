@@ -1130,6 +1130,55 @@ Rules:
                         f"Weather market closing in {market.time_to_close_hours:.1f}h",
                     )
 
+            # Weather fast-path for contrarian: bypass LLM when NOAA data is unambiguous
+            if mtype == "weather":
+                weather_result = await compute_weather_probability(
+                    market.question, market.id, getattr(market, "close_time", market.end_date),
+                )
+                if weather_result is not None:
+                    p_yes, w_confidence, w_reasoning = weather_result
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+
+                    if raw_edge > 0:
+                        side = TradingSide.BUY_YES
+                    elif raw_edge < 0:
+                        side = TradingSide.BUY_NO
+                    else:
+                        side = TradingSide.HOLD
+
+                    conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"
+                    reasoning = (
+                        f"CONTRARIAN WEATHER DIRECT: {w_reasoning} | "
+                        f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
+                        f"net_edge={net_edge:+.3f}"
+                    )
+
+                    self.logger.info(
+                        "contrarian_weather_fast_path",
+                        market_id=market.id,
+                        p_yes=round(p_yes, 4),
+                        market_price=market_price,
+                        net_edge=round(net_edge, 4),
+                        side=side.value,
+                    )
+
+                    sig = SignalResult(
+                        estimated_prob=p_yes,
+                        confidence=w_confidence,
+                        edge=raw_edge,
+                        recommended_side=side,
+                        reasoning=reasoning,
+                        signal_name="Contrarian",
+                        market_price=market_price,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+                    sig.net_edge = net_edge  # type: ignore[attr-defined]
+                    sig.conviction = conviction  # type: ignore[attr-defined]
+                    sig.contrarian_thesis = w_reasoning  # type: ignore[attr-defined]
+                    sig.crowd_wrong_reason = f"NOAA forecast disagrees with market by {abs(raw_edge):.0%}"  # type: ignore[attr-defined]
+                    return sig
+
             # Get news context
             news_articles = await self.news_aggregator.get_market_news(market)
             news_context = self.news_aggregator.format_news_context(news_articles)

@@ -735,7 +735,7 @@ async def _get_nws_gridpoint_url(lat: float, lon: float) -> Optional[str]:
 
 
 async def _get_nws_forecast(forecast_url: str) -> Optional[Dict]:
-    """Step 2: Fetch forecast periods from NWS. Cached 1 hour."""
+    """Step 2: Fetch forecast periods from NWS. Cached 20 min."""
     now = time.monotonic()
     if forecast_url in _forecast_cache:
         cached_time, cached_data = _forecast_cache[forecast_url]
@@ -754,6 +754,43 @@ async def _get_nws_forecast(forecast_url: str) -> Optional[Dict]:
                 return data
     except Exception as e:
         logger.debug("nws_forecast_error", error=str(e), url=forecast_url)
+
+    return None
+
+
+# Cache for hourly forecast data (20 min TTL, separate from 12h forecast)
+_hourly_forecast_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+
+
+async def _get_nws_hourly_forecast(forecast_url: str) -> Optional[List[Dict]]:
+    """Fetch hourly forecast from NWS (/forecast/hourly endpoint).
+
+    Hourly forecasts have ~1.5F accuracy for day-0 vs ~2.5F for 12h periods.
+    Returns list of hourly period dicts, or None on failure.
+    """
+    # The hourly endpoint is the same URL with /hourly appended
+    hourly_url = forecast_url.rstrip("/") + "/hourly"
+
+    now = time.monotonic()
+    if hourly_url in _hourly_forecast_cache:
+        cached_time, cached_data = _hourly_forecast_cache[hourly_url]
+        if now - cached_time < _FORECAST_CACHE_TTL:
+            return cached_data
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "(Morpheus Trading Bot, contact@example.com)"},
+        ) as client:
+            resp = await client.get(hourly_url)
+            if resp.status_code == 200:
+                data = resp.json()
+                periods = data.get("properties", {}).get("periods", [])
+                if periods:
+                    _hourly_forecast_cache[hourly_url] = (now, periods)
+                    return periods
+    except Exception as e:
+        logger.debug("nws_hourly_forecast_error", error=str(e), url=hourly_url)
 
     return None
 
@@ -870,54 +907,81 @@ async def compute_weather_probability(
     if not forecast_url:
         return None
 
-    forecast_data = await _get_nws_forecast(forecast_url)
-    if not forecast_data:
-        return None
-
-    periods = forecast_data.get("properties", {}).get("periods", [])
-    if not periods:
-        return None
-
-    # 6. Find the relevant forecast period
-    relevant = []
-    if target_date:
-        target_str = target_date.strftime("%Y-%m-%d")
-        for period in periods:
-            start = period.get("startTime", "")
-            if target_str in start:
-                relevant.append(period)
-    if not relevant:
-        relevant = periods[:4]
-
-    # Get the forecast temp for the right period type
+    # For day-0 markets, try hourly forecast first (sigma ~1.5F vs 2.5F)
     forecast_temp = None
     period_name = None
-    for p in relevant:
-        t = p.get("temperature")
-        name = p.get("name", "")
-        if not isinstance(t, (int, float)):
-            continue
-        if "high" in t_type:
-            # Daytime period for high temp
-            if "night" not in name.lower():
-                forecast_temp = float(t)
-                period_name = name
-                break
-        elif "low" in t_type:
-            # Nighttime period for low temp
-            if "night" in name.lower():
-                forecast_temp = float(t)
-                period_name = name
-                break
+    used_hourly = False
 
-    # Fallback: use first available temp
+    if lead_days == 0:
+        hourly_periods = await _get_nws_hourly_forecast(forecast_url)
+        if hourly_periods:
+            # Find max/min temp from today's hourly periods for high/low markets
+            today_str = now.strftime("%Y-%m-%d")
+            today_temps = []
+            for hp in hourly_periods:
+                start = hp.get("startTime", "")
+                if today_str in start:
+                    t = hp.get("temperature")
+                    if isinstance(t, (int, float)):
+                        today_temps.append(float(t))
+
+            if today_temps:
+                if "high" in t_type:
+                    forecast_temp = max(today_temps)
+                    period_name = f"Today hourly max ({len(today_temps)} hours)"
+                elif "low" in t_type:
+                    forecast_temp = min(today_temps)
+                    period_name = f"Today hourly min ({len(today_temps)} hours)"
+                if forecast_temp is not None:
+                    sigma = 1.5  # hourly forecast accuracy is ~1.5F
+                    used_hourly = True
+
+    # Fallback to standard 12-hour forecast
     if forecast_temp is None:
+        forecast_data = await _get_nws_forecast(forecast_url)
+        if not forecast_data:
+            return None
+
+        periods = forecast_data.get("properties", {}).get("periods", [])
+        if not periods:
+            return None
+
+        # 6. Find the relevant forecast period
+        relevant = []
+        if target_date:
+            target_str = target_date.strftime("%Y-%m-%d")
+            for period in periods:
+                start = period.get("startTime", "")
+                if target_str in start:
+                    relevant.append(period)
+        if not relevant:
+            relevant = periods[:4]
+
+        # Get the forecast temp for the right period type
         for p in relevant:
             t = p.get("temperature")
-            if isinstance(t, (int, float)):
-                forecast_temp = float(t)
-                period_name = p.get("name", "unknown")
-                break
+            name = p.get("name", "")
+            if not isinstance(t, (int, float)):
+                continue
+            if "high" in t_type:
+                if "night" not in name.lower():
+                    forecast_temp = float(t)
+                    period_name = name
+                    break
+            elif "low" in t_type:
+                if "night" in name.lower():
+                    forecast_temp = float(t)
+                    period_name = name
+                    break
+
+        # Fallback: use first available temp
+        if forecast_temp is None:
+            for p in relevant:
+                t = p.get("temperature")
+                if isinstance(t, (int, float)):
+                    forecast_temp = float(t)
+                    period_name = p.get("name", "unknown")
+                    break
 
     if forecast_temp is None:
         return None
@@ -968,8 +1032,9 @@ async def compute_weather_probability(
 
     confidence = min(0.95, 0.5 + z_score * 0.15) if "bracket" not in t_type else min(0.90, 0.4 + abs(0.5 - p_yes) * 1.5)
 
+    source = "hourly" if used_hourly else "12h"
     reasoning = (
-        f"NOAA direct: NWS forecast={forecast_temp:.0f}°F, "
+        f"NOAA direct ({source}): NWS forecast={forecast_temp:.0f}°F, "
         f"threshold={t_value:.1f}°F, sigma={sigma:.1f}°F, "
         f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
     )

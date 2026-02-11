@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+import httpx
+
 from .alerts import send_alert
 from .kalshi_trading_client import KalshiTradingClient, KalshiPosition
 from .risk import RiskManager
@@ -61,6 +63,18 @@ class PositionMonitor:
         # Exit retry tracking: key -> (attempt_count, last_attempt_time)
         self._exit_retries: Dict[str, tuple[int, float]] = {}
         self._max_exit_retries = 3
+
+        # Stale market cache: ticker -> (check_time, is_closed)
+        self._market_status_cache: Dict[str, tuple[float, bool]] = {}
+        self._market_status_ttl = 600.0  # 10 min cache
+
+        # Kalshi API base URL for market status checks
+        kalshi_cfg = getattr(config, "kalshi", None) or {}
+        self._kalshi_base_url = (
+            kalshi_cfg.get("base_url", "https://api.elections.kalshi.com/trade-api/v2")
+            if isinstance(kalshi_cfg, dict)
+            else "https://api.elections.kalshi.com/trade-api/v2"
+        )
 
     def track_position(
         self,
@@ -205,6 +219,43 @@ class PositionMonitor:
                     error=str(e),
                 )
 
+    async def _is_market_closed(self, ticker: str) -> bool:
+        """Check if a market has already closed/settled via Kalshi public API.
+
+        Caches results for 10 minutes to avoid hammering the API.
+        """
+        import time as _time
+        now = _time.monotonic()
+
+        cached = self._market_status_cache.get(ticker)
+        if cached:
+            check_time, is_closed = cached
+            if now - check_time < self._market_status_ttl:
+                return is_closed
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._kalshi_base_url,
+                timeout=10.0,
+                headers={"Accept": "application/json"},
+            ) as client:
+                r = await client.get(f"/markets/{ticker}")
+                if r.status_code == 200:
+                    data = r.json()
+                    market_data = data.get("market", data)
+                    status = (market_data.get("status") or "").lower()
+                    is_closed = status in ("closed", "settled", "finalized")
+                    self._market_status_cache[ticker] = (now, is_closed)
+                    return is_closed
+                elif r.status_code == 404:
+                    # Market doesn't exist anymore — treat as closed
+                    self._market_status_cache[ticker] = (now, True)
+                    return True
+        except Exception as e:
+            self.logger.debug("market_status_check_error", ticker=ticker, error=str(e))
+
+        return False
+
     async def _check_position(
         self,
         client: KalshiTradingClient,
@@ -233,6 +284,19 @@ class PositionMonitor:
                 account_label=client.label,
             )
             tracked = self._tracked[key]
+
+        # Check if market has already closed — stale position (dead capital)
+        is_closed = await self._is_market_closed(pos.ticker)
+        if is_closed:
+            self.logger.warning(
+                "stale_position_detected",
+                ticker=pos.ticker,
+                count=pos.count,
+                account=client.label,
+                msg="Market closed/settled but position still open — attempting exit",
+            )
+            await self._exit_position(client, pos, tracked, "Market closed/settled (stale position)")
+            return
 
         # Get current market price for P&L calculation
         # We don't have direct price access here, so use exposure-based estimate

@@ -198,6 +198,7 @@ async def run(
                         kalshi_client=kalshi_read,
                         cost_tracker=cost_tracker,
                     )
+                    contrarian_engine.set_balance_checker(_total_kalshi_balance, min_balance=1.0)
                     engines.append(contrarian_engine)
                     logger.info("kalshi_contrarian_engine_initialized")
 
@@ -272,6 +273,11 @@ async def run(
                 )
                 if count > 0:
                     logger.info("resolution_tracker_resolved", count=count)
+                    # Capital freed — trigger immediate rescan on all engines
+                    for engine in engines:
+                        if hasattr(engine, "trigger_rescan"):
+                            engine.trigger_rescan()
+                    logger.info("rescan_triggered_after_resolution", resolved=count)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
