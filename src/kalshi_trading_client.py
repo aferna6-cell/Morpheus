@@ -331,7 +331,12 @@ class KalshiTradingClient:
             return order_data if isinstance(order_data, dict) else {"order": order_data}
         except Exception as exc:
             error_str = str(exc).lower()
-            
+
+            # Re-raise market_closed — callers need to handle this differently
+            # (position will be settled by Kalshi, no retry needed)
+            if "market_closed" in error_str:
+                raise
+
             # Detect insufficient balance and halt trading
             if "insufficient_balance" in error_str or "insufficient balance" in error_str:
                 self._halt_trading(f"Insufficient balance detected: {exc}")
