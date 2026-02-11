@@ -920,26 +920,48 @@ async def compute_weather_probability(
     if lead_days == 0:
         hourly_periods = await _get_nws_hourly_forecast(forecast_url)
         if hourly_periods:
-            # Find max/min temp from today's hourly periods for high/low markets
             today_str = now.strftime("%Y-%m-%d")
             today_temps = []
+            overnight_temps = []
+
+            # For high-temp markets: use today's daytime hours
+            # For low-temp markets: use tonight + tomorrow early morning (overnight window)
+            tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
             for hp in hourly_periods:
                 start = hp.get("startTime", "")
-                if today_str in start:
-                    t = hp.get("temperature")
-                    if isinstance(t, (int, float)):
-                        today_temps.append(float(t))
+                t = hp.get("temperature")
+                if not isinstance(t, (int, float)):
+                    continue
 
-            if today_temps:
-                if "high" in t_type:
-                    forecast_temp = max(today_temps)
-                    period_name = f"Today hourly max ({len(today_temps)} hours)"
-                elif "low" in t_type:
-                    forecast_temp = min(today_temps)
-                    period_name = f"Today hourly min ({len(today_temps)} hours)"
-                if forecast_temp is not None:
-                    sigma = 1.5  # hourly forecast accuracy is ~1.5F
-                    used_hourly = True
+                if today_str in start:
+                    today_temps.append(float(t))
+                    # Evening hours (18:00+) also count for overnight low
+                    hour_str = start[11:13] if len(start) > 12 else ""
+                    if hour_str.isdigit() and int(hour_str) >= 18:
+                        overnight_temps.append(float(t))
+                elif tomorrow_str in start:
+                    # Early morning hours (00:00-11:00) for overnight low
+                    hour_str = start[11:13] if len(start) > 12 else ""
+                    if hour_str.isdigit() and int(hour_str) < 12:
+                        overnight_temps.append(float(t))
+
+            if "high" in t_type and today_temps:
+                forecast_temp = max(today_temps)
+                period_name = f"Today hourly max ({len(today_temps)} hours)"
+                sigma = 1.5
+                used_hourly = True
+            elif "low" in t_type and overnight_temps:
+                forecast_temp = min(overnight_temps)
+                period_name = f"Overnight hourly min ({len(overnight_temps)} hours)"
+                sigma = 1.5
+                used_hourly = True
+            elif "low" in t_type and today_temps:
+                # Fallback: use today's min if no overnight data yet
+                forecast_temp = min(today_temps)
+                period_name = f"Today hourly min ({len(today_temps)} hours)"
+                sigma = 1.5
+                used_hourly = True
 
     # Fallback to standard 12-hour forecast
     if forecast_temp is None:
