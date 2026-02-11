@@ -204,13 +204,20 @@ class KalshiLLMEngine(BaseEngine):
             except Exception as exc:
                 self.logger.warning("balance_check_failed", error=str(exc))
 
-        # Fetch same-day markets
+        # Fetch markets — extend window to +1 day for weather (NOAA fast-path
+        # is free, and placing orders early gets better prices).
+        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+        scan_days = self._max_resolution_days + 1  # weather look-ahead
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
-            max_days=self._max_resolution_days,
+            max_days=scan_days,
             min_volume=100,  # low threshold, we filter below
         )
 
         self.logger.info("kalshi_llm_scan_raw", markets_fetched=len(kalshi_markets))
+
+        # Compute same-day cutoff for non-weather markets
+        from datetime import timedelta
+        same_day_cutoff = datetime.now(timezone.utc) + timedelta(days=self._max_resolution_days)
 
         filtered_markets = []
         filter_stats = {
@@ -219,11 +226,21 @@ class KalshiLLMEngine(BaseEngine):
             "spread": 0,
             "resolution": 0,
             "sports": 0,
+            "weather_lookahead": 0,
             "passed": 0,
         }
 
         for km in kalshi_markets:
             self._markets_scanned += 1
+
+            # Non-weather markets must close within original same-day window
+            is_weather = km.ticker.upper().startswith(_WEATHER_PREFIXES)
+            if not is_weather and km.close_time and km.close_time > same_day_cutoff:
+                filter_stats["resolution"] += 1
+                self._markets_filtered += 1
+                continue
+            if is_weather and km.close_time and km.close_time > same_day_cutoff:
+                filter_stats["weather_lookahead"] += 1
 
             # Apply strict filters
             filter_result = self._filters.check_all(
@@ -264,6 +281,7 @@ class KalshiLLMEngine(BaseEngine):
             filtered_by_spread=filter_stats["spread"],
             filtered_by_resolution=filter_stats["resolution"],
             filtered_by_sports=filter_stats["sports"],
+            weather_lookahead=filter_stats.get("weather_lookahead", 0),
         )
 
         # Sort by close time — soonest-closing markets get evaluated FIRST
