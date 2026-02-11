@@ -127,7 +127,7 @@ class RiskManager:
         base_max_exp = self.config.strategy.get("max_total_exposure", 10.0)
 
         self.max_position_size = min(base_max_pos * scale_factor, total_balance * 0.15)
-        self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
+        self.max_total_exposure = base_max_exp * scale_factor
 
         # Scale contrarian position limit
         base_c_pos = 4.0  # contrarian default

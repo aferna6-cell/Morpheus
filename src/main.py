@@ -274,11 +274,13 @@ async def run(
                 )
                 if count > 0:
                     logger.info("resolution_tracker_resolved", count=count)
-                    # Capital freed — re-scale risk limits to new balance
+                    # Capital freed — re-scale risk limits to total equity
                     try:
                         total_bal = 0.0
                         for ex in kalshi_executors:
                             total_bal += await ex.trading_client.get_balance()
+                            for p in await ex.trading_client.get_positions():
+                                total_bal += p.market_exposure
                         risk.scale_limits_to_balance(total_bal)
                     except Exception as exc:
                         logger.debug("resolution_balance_scale_failed", error=str(exc))
@@ -302,12 +304,15 @@ async def run(
     if kalshi_executors:
         telegram_bot.set_trading_clients([ex.trading_client for ex in kalshi_executors])
 
-    # Auto-scale risk limits based on actual balance
+    # Auto-scale risk limits based on total equity (cash + positions)
     if 'kalshi_executors' in dir() and kalshi_executors:
         try:
             total_bal = 0.0
             for ex in kalshi_executors:
                 total_bal += await ex.trading_client.get_balance()
+                for p in await ex.trading_client.get_positions():
+                    total_bal += p.market_exposure
+            logger.info("equity_for_scaling", total_equity=round(total_bal, 2))
             risk.scale_limits_to_balance(total_bal)
         except Exception as exc:
             logger.warning("initial_balance_scale_failed", error=str(exc))
