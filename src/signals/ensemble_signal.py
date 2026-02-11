@@ -38,7 +38,7 @@ from ..cost_tracker import CostTracker
 from ..markets import Market
 from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
 from ..news import NewsAggregator
-from ..structured_data import get_structured_anchor, compute_weather_probability
+from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
 
@@ -424,6 +424,62 @@ class EnsembleSignal(Signal):
                         return self._hold(
                             market,
                             f"Weather direct: net edge {net_edge:.3f} < {min_edge:.3f}",
+                        )
+
+            # Jobless claims fast-path: bypass LLM when FRED data gives clear signal
+            if mtype == "economic" or "jobless" in market.question.lower() or "KXJOBLESSCLAIMS" in market.id.upper():
+                claims_result = await compute_jobless_claims_probability(
+                    market.question, market.id,
+                )
+                if claims_result is not None:
+                    p_yes, jc_confidence, jc_reasoning = claims_result
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    min_edge = 0.08
+
+                    if net_edge >= min_edge:
+                        if raw_edge > 0:
+                            side = TradingSide.BUY_YES
+                        elif raw_edge < 0:
+                            side = TradingSide.BUY_NO
+                        else:
+                            side = TradingSide.HOLD
+
+                        if side != TradingSide.HOLD:
+                            entry_cost = market_price if side == TradingSide.BUY_YES else (1.0 - market_price)
+                            payout_ratio = (1.0 - entry_cost) / entry_cost if entry_cost > 0 else 0
+                            if payout_ratio < 0.12:
+                                side = TradingSide.HOLD
+
+                        conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"
+
+                        self.logger.info(
+                            "jobless_claims_fast_path_signal",
+                            market_id=market.id,
+                            p_yes=round(p_yes, 4),
+                            market_price=market_price,
+                            net_edge=round(net_edge, 4),
+                            side=side.value,
+                        )
+
+                        result = SignalResult(
+                            estimated_prob=p_yes,
+                            confidence=jc_confidence,
+                            edge=raw_edge,
+                            recommended_side=side,
+                            reasoning=jc_reasoning,
+                            signal_name=self.name,
+                            market_price=market_price,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        )
+                        result.net_edge = net_edge  # type: ignore[attr-defined]
+                        result.conviction = conviction  # type: ignore[attr-defined]
+                        result.signal_source = "fred_direct"  # type: ignore[attr-defined]
+                        return result
+                    else:
+                        return self._hold(
+                            market,
+                            f"Jobless claims direct: net edge {net_edge:.3f} < {min_edge:.3f}",
                         )
 
             # Market quality gate
@@ -1181,6 +1237,41 @@ Rules:
                     sig.signal_source = "noaa_direct"  # type: ignore[attr-defined]
                     return sig
 
+            # Jobless claims fast-path for contrarian
+            if "jobless" in market.question.lower() or "KXJOBLESSCLAIMS" in market.id.upper():
+                claims_result = await compute_jobless_claims_probability(
+                    market.question, market.id,
+                )
+                if claims_result is not None:
+                    p_yes, jc_conf, jc_reasoning = claims_result
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+
+                    if raw_edge > 0:
+                        side = TradingSide.BUY_YES
+                    elif raw_edge < 0:
+                        side = TradingSide.BUY_NO
+                    else:
+                        side = TradingSide.HOLD
+
+                    conviction = "high" if net_edge >= 0.10 else "medium"
+                    sig = SignalResult(
+                        estimated_prob=p_yes,
+                        confidence=jc_conf,
+                        edge=raw_edge,
+                        recommended_side=side,
+                        reasoning=f"CONTRARIAN JOBLESS DIRECT: {jc_reasoning}",
+                        signal_name="Contrarian",
+                        market_price=market_price,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+                    sig.net_edge = net_edge  # type: ignore[attr-defined]
+                    sig.conviction = conviction  # type: ignore[attr-defined]
+                    sig.contrarian_thesis = jc_reasoning  # type: ignore[attr-defined]
+                    sig.crowd_wrong_reason = f"FRED data disagrees with market by {abs(raw_edge):.0%}"  # type: ignore[attr-defined]
+                    sig.signal_source = "fred_direct"  # type: ignore[attr-defined]
+                    return sig
+
             # Get news context
             news_articles = await self.news_aggregator.get_market_news(market)
             news_context = self.news_aggregator.format_news_context(news_articles)
@@ -1189,12 +1280,12 @@ Rules:
             prompt = self._build_contrarian_prompt(market, news_context, market_price)
             system = self._contrarian_system_prompt()
 
-            # Use Claude Sonnet only for contrarian (better at nuanced reasoning)
-            result = await self._call_anthropic(system, prompt)
+            # Use GPT-4o for contrarian (cheaper + better Brier score than Claude)
+            result = await self._call_openai(system, prompt)
 
             if result is None or _validate_llm_response(result) is not None:
-                # Fallback to OpenAI
-                result = await self._call_openai(system, prompt)
+                # Fallback to Anthropic
+                result = await self._call_anthropic(system, prompt)
 
             if result is None or _validate_llm_response(result) is not None:
                 return self._hold(market, "Contrarian LLM call failed")

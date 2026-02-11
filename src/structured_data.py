@@ -1256,3 +1256,100 @@ async def _get_weather_context(question: str, market_id: str = "") -> Optional[s
     )
 
     return anchor
+
+
+# ---------------------------------------------------------------------------
+# Jobless claims fast-path — FRED ICSA data + historical distribution
+# ---------------------------------------------------------------------------
+
+async def compute_jobless_claims_probability(
+    question: str, market_id: str = "",
+) -> Optional[Tuple[float, float, str]]:
+    """Compute probability for initial jobless claims markets from FRED data.
+
+    Uses 4-week moving average as forecast and 8-week stdev as error.
+    Returns (p_yes, confidence, reasoning) or None if can't compute.
+    """
+    if not _FRED_API_KEY:
+        return None
+
+    # Parse threshold from market question or ticker
+    threshold = _parse_jobless_threshold(question, market_id)
+    if threshold is None:
+        return None
+
+    # Fetch recent ICSA data from FRED
+    obs = await _fetch_fred_series("ICSA", limit=12)
+    if not obs or len(obs) < 4:
+        return None
+
+    vals = []
+    for o in obs:
+        v = _safe_float(o.get("value", ""))
+        if v is not None:
+            vals.append(v)
+
+    if len(vals) < 4:
+        return None
+
+    avg_4w = sum(vals[:4]) / 4
+    # Use 8-week stdev for volatility estimate (minimum 8k floor)
+    import statistics
+    stdev = max(8000.0, statistics.stdev(vals[:min(8, len(vals))]))
+
+    # Compute P(claims > threshold) using normal CDF
+    p_above = 1.0 - _norm_cdf(threshold, avg_4w, stdev)
+    p_above = max(0.001, min(0.999, p_above))
+
+    # Confidence based on z-score (how far from threshold)
+    z_score = abs(avg_4w - threshold) / stdev
+    if z_score < 0.5:
+        # Too close to call — let LLM handle it
+        return None
+
+    confidence = min(0.90, 0.5 + z_score * 0.15)
+
+    reasoning = (
+        f"FRED ICSA direct: 4wk avg={avg_4w:.0f}, stdev={stdev:.0f}, "
+        f"threshold={threshold:.0f}, p_above={p_above:.3f}, z={z_score:.2f}"
+    )
+
+    logger.info(
+        "jobless_claims_fast_path",
+        avg_4w=avg_4w,
+        stdev=round(stdev),
+        threshold=threshold,
+        p_above=round(p_above, 4),
+        z_score=round(z_score, 2),
+    )
+
+    return (p_above, confidence, reasoning)
+
+
+def _parse_jobless_threshold(question: str, market_id: str = "") -> Optional[float]:
+    """Extract jobless claims threshold from question or ticker.
+
+    Kalshi tickers: KXJOBLESSCLAIMS-26FEB12-215000 → threshold 215000
+    Question: "Will initial jobless claims be above 215,000?" → 215000
+    """
+    # Try ticker first (most reliable)
+    if market_id:
+        m = re.search(r"KXJOBLESSCLAIMS-\w+-(\d+)", market_id.upper())
+        if m:
+            return float(m.group(1))
+
+    # Try question text
+    q = question.lower()
+    patterns = [
+        r"(?:above|over|exceed|more than)\s+([\d,]+)",
+        r"([\d,]+)\s+(?:or more|or higher)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, q)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+
+    return None
