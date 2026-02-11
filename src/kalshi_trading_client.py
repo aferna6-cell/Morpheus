@@ -326,7 +326,8 @@ class KalshiTradingClient:
                 or "unknown"
             )
             self.logger.info("kalshi_order_placed", label=self.label, order_id=order_id, ticker=ticker)
-            get_trade_logger().log_order_placed("kalshi", ticker, side, count, price_cents, order_id, order_type, account_label=self.label)
+            # Trade logging moved to KalshiExecutor which has full signal context
+            # (edge, conviction, cost, probability). Logging here caused duplicates.
             return order_data if isinstance(order_data, dict) else {"order": order_data}
         except Exception as exc:
             error_str = str(exc).lower()

@@ -111,16 +111,18 @@ class PerfTracker:
             except (ValueError, TypeError):
                 return default
 
-        # Separate orders placed vs fills vs exits
+        # Separate orders placed vs exits (market_resolved, position_closed)
         orders = [t for t in trades if t.get("event") == "order_placed"]
-        exits = [t for t in trades if t.get("event") == "position_exit"]
+        _EXIT_EVENTS = {"position_exit", "position_closed", "market_resolved"}
+        exits = [t for t in trades if t.get("event") in _EXIT_EVENTS]
 
         total_cost = sum(_safe_float(t.get("cost_usd")) for t in orders)
         total_fees = sum(_safe_float(t.get("fee_usd")) for t in orders)
-        total_pnl = sum(_safe_float(t.get("pnl")) for t in exits)
+        # market_resolved uses "pnl_usd", position_closed uses "pnl_usd", legacy uses "pnl"
+        total_pnl = sum(_safe_float(t.get("pnl_usd", t.get("pnl"))) for t in exits)
 
-        wins = sum(1 for t in exits if _safe_float(t.get("pnl")) > 0)
-        losses = sum(1 for t in exits if _safe_float(t.get("pnl")) <= 0)
+        wins = sum(1 for t in exits if _safe_float(t.get("pnl_usd", t.get("pnl"))) > 0)
+        losses = sum(1 for t in exits if _safe_float(t.get("pnl_usd", t.get("pnl"))) <= 0)
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
 
         edges = [_safe_float(t.get("edge")) for t in orders if t.get("edge") is not None]
@@ -134,8 +136,8 @@ class PerfTracker:
             by_strategy[strat]["cost"] += _safe_float(t.get("cost_usd"))
 
         for t in exits:
-            strat = t.get("strategy", "unknown")
-            by_strategy[strat]["pnl"] += _safe_float(t.get("pnl"))
+            strat = t.get("strategy", t.get("platform", "unknown"))
+            by_strategy[strat]["pnl"] += _safe_float(t.get("pnl_usd", t.get("pnl")))
 
         return {
             "period_days": days,

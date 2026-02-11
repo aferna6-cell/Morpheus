@@ -206,6 +206,11 @@ class KalshiContrarianEngine(BaseEngine):
             if not prefix_result.passed:
                 continue
 
+            # Price filter — skip extreme prices where LLM has no edge
+            price_result = self._filters.check_price(km.ticker, km.yes_bid, km.yes_ask)
+            if not price_result.passed:
+                continue
+
             # Market type skip (sports, coin flips)
             mtype = detect_market_type(km.title)
             if mtype in _SKIP_TYPES:

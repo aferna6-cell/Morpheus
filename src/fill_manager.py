@@ -16,6 +16,7 @@ import structlog
 
 from .alerts import send_alert
 from .kalshi_trading_client import KalshiTradingClient
+from .trade_logger import get_trade_logger
 from .utils import BotConfig
 
 
@@ -194,6 +195,17 @@ class FillManager:
                     count=resting.count,
                     price_cents=resting.price_cents,
                     account=resting.account_label,
+                )
+
+                # Log fill to trade history JSONL
+                get_trade_logger().log_order_filled(
+                    platform="kalshi",
+                    ticker=resting.ticker,
+                    side=resting.side,
+                    count=resting.count,
+                    fill_price_cents=resting.price_cents,
+                    order_id=order_id,
+                    account_label=resting.account_label,
                 )
 
                 # Notify callbacks
