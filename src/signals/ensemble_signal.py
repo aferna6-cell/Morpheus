@@ -505,19 +505,30 @@ class EnsembleSignal(Signal):
                 self._screened_passed += 1
 
             # Get news context + structured data in parallel
-            news_task = self.news_aggregator.get_market_news(market)
-            structured_task = get_structured_anchor(
-                market.question, market.category or "", market.id
-            )
-            news_articles, structured_context = await asyncio.gather(
-                news_task, structured_task, return_exceptions=True
-            )
-            if isinstance(news_articles, Exception):
-                self.logger.warning("news_fetch_error", error=str(news_articles))
+            # Skip news for weather markets — news search for "high temp 38°" is useless
+            # and burns Brave Search quota. NOAA data is the only useful anchor.
+            if mtype == "weather":
                 news_articles = []
-            if isinstance(structured_context, Exception):
-                structured_context = None
-            news_context = self.news_aggregator.format_news_context(news_articles)
+                news_context = ""
+                structured_context = await get_structured_anchor(
+                    market.question, market.category or "", market.id
+                )
+                if isinstance(structured_context, Exception):
+                    structured_context = None
+            else:
+                news_task = self.news_aggregator.get_market_news(market)
+                structured_task = get_structured_anchor(
+                    market.question, market.category or "", market.id
+                )
+                news_articles, structured_context = await asyncio.gather(
+                    news_task, structured_task, return_exceptions=True
+                )
+                if isinstance(news_articles, Exception):
+                    self.logger.warning("news_fetch_error", error=str(news_articles))
+                    news_articles = []
+                if isinstance(structured_context, Exception):
+                    structured_context = None
+                news_context = self.news_aggregator.format_news_context(news_articles)
 
             # Build prompt (same for both models)
             prompt = self._build_prompt(
