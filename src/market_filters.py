@@ -52,6 +52,7 @@ _JUNK_TICKER_PREFIXES = [
     "KXSUPERBOWLAD", "KXRT", "KXSPOTIFY", "KXSPOTIFYD", "KXSPOTIFYGLOBALD",
     "KXSBADAPPEARANCES", "KXTOPSONG", "KXTOPALBUM", "KXALBUMDEBUT",
     "KXFIRSTSUPERBOWLSONG", "KXAAAGASW", "KXNEXTTEAMNFL",
+    "KXNETFLIXRANK", "KXNETFLIX",  # Netflix #1 show/movie — unpredictable streaming
     # Racing — LLMs have no edge on race outcomes
     "KXNASCARRACE", "KXNASCAR", "KXF1RACE", "KXINDYRACE",
     # LLM mention markets — what will an AI chatbot say? No edge.

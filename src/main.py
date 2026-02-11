@@ -207,6 +207,14 @@ async def run(
                 engines.append(mm_engine)
                 logger.info("kalshi_mm_engine_initialized")
 
+            # Wire resume callback: when a halted account resumes, trigger engine rescans
+            _engines_for_rescan = list(engines)
+            def _on_account_resume():
+                for eng in _engines_for_rescan:
+                    if hasattr(eng, "trigger_rescan"):
+                        eng.trigger_rescan()
+            position_monitor.on_resume(_on_account_resume)
+
             logger.info("kalshi_setup_complete", executors=len(kalshi_executors), engines=[e.name for e in engines])
         except Exception as exc:
             logger.error("kalshi_engine_init_failed", error=str(exc))

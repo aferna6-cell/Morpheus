@@ -76,6 +76,9 @@ class PositionMonitor:
         self._market_status_cache: Dict[str, tuple[float, bool]] = {}
         self._market_status_ttl = 600.0  # 10 min cache
 
+        # Callback to trigger engine rescans when an account resumes
+        self._on_resume_callbacks: List = []
+
         # Kalshi API base URL for market status checks
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         self._kalshi_base_url = (
@@ -103,6 +106,10 @@ class PositionMonitor:
             )
         except Exception as e:
             self.logger.debug("save_closed_markets_error", error=str(e))
+
+    def on_resume(self, callback) -> None:
+        """Register a callback to fire when a halted account resumes trading."""
+        self._on_resume_callbacks.append(callback)
 
     def track_position(
         self,
@@ -231,7 +238,18 @@ class PositionMonitor:
         # Auto-resume halted clients if balance has recovered
         for client in self.trading_clients:
             if client.is_halted:
-                await client.check_and_resume()
+                resumed = await client.check_and_resume()
+                if resumed:
+                    self.logger.info(
+                        "account_resumed_trading",
+                        label=client.label,
+                        msg="Triggering engine rescans",
+                    )
+                    for cb in self._on_resume_callbacks:
+                        try:
+                            cb()
+                        except Exception as e:
+                            self.logger.debug("resume_callback_error", error=str(e))
 
         for client in self.trading_clients:
             try:
