@@ -110,6 +110,8 @@ class TelegramBot:
 
                 if text.startswith("/status"):
                     await self._handle_status(client)
+                elif text.startswith("/positions"):
+                    await self._handle_positions(client)
                 elif text.startswith("/pnl"):
                     await self._handle_pnl(client)
                 elif text.startswith("/predictions"):
@@ -118,6 +120,7 @@ class TelegramBot:
                     await self._send(client, (
                         "Commands:\n"
                         "/status — Bot status dashboard\n"
+                        "/positions — Live positions from Kalshi\n"
                         "/pnl — Detailed P&L breakdown\n"
                         "/predictions — Pending predictions\n"
                         "/help — This message"
@@ -205,6 +208,40 @@ class TelegramBot:
         # Uptime
         lines.append(f"\n🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
+        await self._send(client, "\n".join(lines))
+
+    async def _handle_positions(self, client: httpx.AsyncClient) -> None:
+        """Show live positions from Kalshi API across all accounts."""
+        lines = ["📋 *Live Positions*", ""]
+
+        total_exposure = 0.0
+        total_positions = 0
+
+        for tc in self._trading_clients:
+            label = getattr(tc, "label", "unknown")
+            try:
+                bal = await tc.get_balance()
+                positions = await tc.get_positions()
+                active = [p for p in positions if p.count != 0]
+                lines.append(f"*{label}* (${bal:.2f} available)")
+
+                if not active:
+                    lines.append("  No positions")
+                else:
+                    for p in active:
+                        side = "YES" if p.count > 0 else "NO"
+                        count = abs(p.count)
+                        exp = p.market_exposure
+                        total_exposure += exp
+                        total_positions += 1
+                        lines.append(f"  {p.ticker}: {side} x{count} (${exp:.2f})")
+
+                lines.append("")
+            except Exception as e:
+                lines.append(f"*{label}*: error ({e})")
+                lines.append("")
+
+        lines.append(f"*Total:* {total_positions} positions, ${total_exposure:.2f} deployed")
         await self._send(client, "\n".join(lines))
 
     async def _handle_pnl(self, client: httpx.AsyncClient) -> None:

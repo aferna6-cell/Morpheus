@@ -34,9 +34,11 @@ _JUNK_TICKER_PREFIXES = [
     # Announcer/host mention markets — no LLM edge on what people will say
     "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION", "KXFOXNEWSMENTION",
     "KXMLBMENTION", "KXNHLMENTION", "KXMLSMENTION",
-    # Crypto daily price ranges (e.g., KXBTCD-*, KXETHD-*, KXDOGE-*)
-    "KXBTCD", "KXETHD", "KXDOGE", "KXSOLD", "KXBNBD",
-    "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
+    # Crypto price ranges (daily + intraday + bracket) — LLMs have no edge
+    "KXBTCD", "KXBTC15M", "KXBTC",
+    "KXETHD", "KXETH15M", "KXETH",
+    "KXDOGE", "KXDOGED", "KXSOLD", "KXSOLE", "KXSOL15M",
+    "KXBNBD", "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
     "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",
     # Weather markets — NOW UNBLOCKED (NOAA NWS forecast anchors added)
     # "KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP",

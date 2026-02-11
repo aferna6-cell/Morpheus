@@ -839,7 +839,7 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
 # ---------------------------------------------------------------------------
 
 # NWS forecast error standard deviation by lead time in days
-_NWS_SIGMA = {0: 2.5, 1: 2.5, 2: 3.5, 3: 5.0}
+_NWS_SIGMA = {0: 2.5, 1: 2.5, 2: 3.5, 3: 5.5}
 
 # Track previous forecast temps for change detection
 _previous_forecasts: Dict[str, float] = {}  # "city:period" -> temp
