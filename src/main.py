@@ -139,6 +139,7 @@ async def run(
                 config=config,
                 trading_clients=trading_clients,
                 risk_manager=risk,
+                state_dir=state_dir,
             )
 
             # Fill manager — track real fills
@@ -273,7 +274,16 @@ async def run(
                 )
                 if count > 0:
                     logger.info("resolution_tracker_resolved", count=count)
-                    # Capital freed — trigger immediate rescan on all engines
+                    # Capital freed — re-scale risk limits to new balance
+                    try:
+                        total_bal = sum(
+                            await ex.trading_client.get_balance()
+                            for ex in kalshi_executors
+                        )
+                        risk.scale_limits_to_balance(total_bal)
+                    except Exception as exc:
+                        logger.debug("resolution_balance_scale_failed", error=str(exc))
+                    # Trigger immediate rescan on all engines
                     for engine in engines:
                         if hasattr(engine, "trigger_rescan"):
                             engine.trigger_rescan()
@@ -292,6 +302,17 @@ async def run(
     telegram_bot.set_survival_tracker(survival_tracker)
     if kalshi_executors:
         telegram_bot.set_trading_clients([ex.trading_client for ex in kalshi_executors])
+
+    # Auto-scale risk limits based on actual balance
+    if 'kalshi_executors' in dir() and kalshi_executors:
+        try:
+            total_bal = sum(
+                await ex.trading_client.get_balance()
+                for ex in kalshi_executors
+            )
+            risk.scale_limits_to_balance(total_bal)
+        except Exception as exc:
+            logger.warning("initial_balance_scale_failed", error=str(exc))
 
     # Start background services
     if 'position_monitor' in dir():

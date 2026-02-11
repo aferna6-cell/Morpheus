@@ -111,6 +111,47 @@ class RiskManager:
         """Set the survival-mode sizing multiplier (0.0 to 1.0)."""
         self._survival_multiplier = max(0.0, min(1.0, multiplier))
 
+    def scale_limits_to_balance(self, total_balance: float) -> None:
+        """Dynamically scale position/exposure limits based on actual balance.
+
+        Config values are treated as the baseline for ~$6.56 bankroll.
+        When balance grows, limits scale proportionally so the bot can
+        deploy capital effectively without manual config edits.
+        """
+        baseline_bankroll = 6.56
+        if total_balance <= baseline_bankroll:
+            return  # Use config defaults for small balances
+
+        scale_factor = total_balance / baseline_bankroll
+
+        # Scale up from config defaults, capped at reasonable maximums
+        base_max_pos = self.config.strategy.get("max_position_size", 3.0)
+        base_max_exp = self.config.strategy.get("max_total_exposure", 10.0)
+
+        self.max_position_size = min(base_max_pos * scale_factor, total_balance * 0.15)
+        self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
+
+        # Scale contrarian limits too
+        base_c_pos = 4.0  # contrarian default
+        base_c_exp = 8.0
+        self._contrarian_max_position = min(base_c_pos * scale_factor, total_balance * 0.15)
+        self._contrarian_max_exposure = min(base_c_exp * scale_factor, total_balance * 0.80)
+
+        # Scale loss limits
+        base_max_loss_trade = self.config.risk.get("max_loss_per_trade", 2.0)
+        base_max_daily_loss = self.config.risk.get("max_daily_loss", 3.0)
+        self.max_loss_per_trade = min(base_max_loss_trade * scale_factor, total_balance * 0.10)
+        self.max_daily_loss = min(base_max_daily_loss * scale_factor, total_balance * 0.20)
+
+        self.logger.info(
+            "risk_limits_scaled",
+            total_balance=round(total_balance, 2),
+            scale_factor=round(scale_factor, 2),
+            max_position_size=round(self.max_position_size, 2),
+            max_total_exposure=round(self.max_total_exposure, 2),
+            max_daily_loss=round(self.max_daily_loss, 2),
+        )
+
     def calculate_position_size(
         self,
         signal: SignalResult,

@@ -8,9 +8,11 @@ and actively monitors all positions.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
 import structlog
 
@@ -44,6 +46,7 @@ class PositionMonitor:
         config: BotConfig,
         trading_clients: List[KalshiTradingClient],
         risk_manager: RiskManager,
+        state_dir: str = "state",
     ):
         self.config = config
         self.trading_clients = trading_clients
@@ -64,6 +67,11 @@ class PositionMonitor:
         self._exit_retries: Dict[str, tuple[int, float]] = {}
         self._max_exit_retries = 3
 
+        # Persistent set of known-closed markets (survives restarts)
+        self._state_path = Path(state_dir)
+        self._closed_markets_file = self._state_path / "closed_markets.json"
+        self._known_closed: Set[str] = self._load_known_closed()
+
         # Stale market cache: ticker -> (check_time, is_closed)
         self._market_status_cache: Dict[str, tuple[float, bool]] = {}
         self._market_status_ttl = 600.0  # 10 min cache
@@ -75,6 +83,26 @@ class PositionMonitor:
             if isinstance(kalshi_cfg, dict)
             else "https://api.elections.kalshi.com/trade-api/v2"
         )
+
+    def _load_known_closed(self) -> Set[str]:
+        """Load known-closed market keys from disk."""
+        try:
+            if self._closed_markets_file.exists():
+                data = json.loads(self._closed_markets_file.read_text())
+                return set(data)
+        except Exception:
+            pass
+        return set()
+
+    def _save_known_closed(self) -> None:
+        """Persist known-closed market keys to disk."""
+        try:
+            self._state_path.mkdir(parents=True, exist_ok=True)
+            self._closed_markets_file.write_text(
+                json.dumps(sorted(self._known_closed), indent=2)
+            )
+        except Exception as e:
+            self.logger.debug("save_closed_markets_error", error=str(e))
 
     def track_position(
         self,
@@ -263,6 +291,11 @@ class PositionMonitor:
     ) -> None:
         """Check a single position for exit conditions."""
         key = f"{client.label}:{pos.ticker}"
+
+        # Skip markets we already know are closed (persisted across restarts)
+        if key in self._known_closed:
+            return
+
         tracked = self._tracked.get(key)
 
         if not tracked:
@@ -391,6 +424,8 @@ class PositionMonitor:
                     msg="Market settled by Kalshi — no exit needed",
                 )
                 self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
+                self._known_closed.add(key)
+                self._save_known_closed()
                 return
             # Other errors — record retry attempt
             self._exit_retries[key] = (retry_count + 1, _time.monotonic())
