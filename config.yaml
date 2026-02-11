@@ -141,7 +141,7 @@ kalshi:
   scan_interval_seconds: 300        # 5 min scans
   fee_per_contract: 0.00            # maker = free
   min_volume: 1000                  # lowered — match market_filters threshold
-  max_position_contracts: 15
+  max_position_contracts: 50
   categories:
     - "Politics"
     - "Economics"
