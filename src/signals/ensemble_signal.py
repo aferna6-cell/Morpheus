@@ -107,9 +107,9 @@ _MIN_EDGE_BY_TYPE = {
     k: v.min_edge for k, v in _MARKET_TYPE_CALIBRATION_LLM.items()
 }
 # Ensure defaults
-_MIN_EDGE_BY_TYPE.setdefault("normal", 0.03)
+_MIN_EDGE_BY_TYPE.setdefault("normal", 0.05)
 _MIN_EDGE_BY_TYPE.setdefault("politics", 0.04)
-_MIN_EDGE_BY_TYPE.setdefault("economics", 0.03)
+_MIN_EDGE_BY_TYPE.setdefault("economics", 0.04)
 
 
 # ---------------------------------------------------------------------------

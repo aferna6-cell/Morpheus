@@ -191,7 +191,8 @@ def detect_market_type(question: str) -> str:
             "temperature", "high temperature", "low temperature",
             "high temp", "low temp",  # Kalshi uses "high temp" not "high temperature"
             "degrees fahrenheit", "degrees celsius",
-            "rainfall", "inches of rain", "snowfall", "inches of snow",
+            "rain", "rainfall", "inches of rain", "precipitation",
+            "snowfall", "inches of snow",
             "wind speed", "humidity",
         ]),
         "weather" in q and any(w in q for w in ["above", "below", "between", "reach"]),

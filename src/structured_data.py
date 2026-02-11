@@ -57,7 +57,8 @@ async def get_structured_anchor(
     # Weather markets — NOAA NWS forecast data
     if any(w in q for w in ["temperature", "high temp", "low temp",
                              "degrees fahrenheit", "degrees celsius",
-                             "rainfall", "inches of rain", "snowfall", "inches of snow",
+                             "rain", "rainfall", "inches of rain",
+                             "precipitation", "snowfall", "inches of snow",
                              "wind speed", "heat wave", "cold snap"]):
         return await _get_weather_context(question, market_id)
 
@@ -838,6 +839,14 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
             direction = "low_below" if m.group(1) == "<" else "low"
             return (direction, float(m.group(2)))
 
+    # Rain/precipitation threshold
+    if "rain" in q or "precipitation" in q or "inches of precipitation" in q:
+        m = re.search(r"(?:>|greater than|more than|exceed)\s*(\d+\.?\d*)", q)
+        if m:
+            return ("rain", float(m.group(1)))
+        # Default: any rain (>0 inches)
+        return ("rain", 0.0)
+
     return None
 
 
@@ -913,6 +922,73 @@ async def compute_weather_probability(
     forecast_url = await _get_nws_gridpoint_url(coords[0], coords[1])
     if not forecast_url:
         return None
+
+    # Rain fast-path: use NWS hourly probabilityOfPrecipitation (PoP)
+    if t_type == "rain":
+        hourly_periods = await _get_nws_hourly_forecast(forecast_url)
+        if not hourly_periods:
+            return None
+
+        # Determine target date string
+        if target_date:
+            target_str = target_date.strftime("%Y-%m-%d")
+        else:
+            target_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Extract PoP values for the target date
+        pop_values: List[float] = []
+        for hp in hourly_periods:
+            start = hp.get("startTime", "")
+            if target_str not in start:
+                continue
+            pop_data = hp.get("probabilityOfPrecipitation", {})
+            pop_val = pop_data.get("value") if isinstance(pop_data, dict) else None
+            if pop_val is not None and isinstance(pop_val, (int, float)):
+                pop_values.append(float(pop_val))
+
+        if not pop_values:
+            return None
+
+        max_pop = max(pop_values)
+
+        # Amount threshold (e.g., >0.5 inches) — too uncertain, defer to LLM
+        if t_value > 0.0:
+            logger.info(
+                "rain_amount_threshold_defer",
+                city=city,
+                threshold_inches=t_value,
+                msg="Amount thresholds deferred to LLM",
+            )
+            return None
+
+        # Confidence gate: only signal when clearly raining or clearly dry
+        if max_pop >= 80 or max_pop <= 15:
+            p_yes = max_pop / 100.0
+            p_yes = max(0.001, min(0.999, p_yes))
+            confidence = 0.85 if (max_pop >= 90 or max_pop <= 5) else 0.70
+            reasoning = (
+                f"NOAA rain direct: NWS max PoP={max_pop:.0f}% across {len(pop_values)} hours, "
+                f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+            )
+            logger.info(
+                "noaa_direct_signal",
+                city=city,
+                t_type="rain",
+                max_pop=max_pop,
+                pop_hours=len(pop_values),
+                p_yes=round(p_yes, 4),
+                confidence=round(confidence, 3),
+                lead_days=lead_days,
+            )
+            return (p_yes, confidence, reasoning)
+        else:
+            logger.info(
+                "rain_pop_ambiguous",
+                city=city,
+                max_pop=max_pop,
+                msg="PoP 15-80%, deferring to LLM",
+            )
+            return None
 
     # For day-0 markets, try hourly forecast first (sigma ~1.5F vs 2.5F)
     forecast_temp = None
@@ -1074,9 +1150,22 @@ async def compute_weather_probability(
             edge_dist = 0  # forecast is inside the bracket
         z_from_edge = edge_dist / sigma
         z_score = abs(forecast_temp - t_value) / sigma
-        # Only signal when forecast is >= 1.5 sigma from the nearest bracket edge
-        # This prevents betting on brackets where the forecast is borderline
-        if z_from_edge < 1.5:
+        # Hard physical floor: forecast must be >=3°F from nearest bracket edge
+        # regardless of sigma. Prevents losses when actual temp is 1-2°F inside edge.
+        if edge_dist < 3.0:
+            logger.info(
+                "weather_bracket_physical_floor",
+                market_id=market_id,
+                forecast=forecast_temp,
+                bracket=f"{lower_b}-{upper_b}",
+                edge_dist=round(edge_dist, 1),
+                msg="Forecast within 3°F of bracket edge",
+            )
+            return None
+        # Z-score gate: forecast must be >= 2.0 sigma from nearest bracket edge
+        # (raised from 1.5 — with sigma=1.5 hourly, requires 3.0°F; with
+        # sigma=2.5 day-1+, requires 5.0°F from edge)
+        if z_from_edge < 2.0:
             logger.info(
                 "weather_bracket_too_close",
                 market_id=market_id,

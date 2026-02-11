@@ -100,18 +100,20 @@ def _compute_pnl(
 ) -> tuple[float, int]:
     """Compute dollar P&L and total contract count from orders + outcome.
 
-    Prefers order_filled events (confirmed fills) over order_placed events
-    (which may include unfilled resting/MM orders). Falls back to
-    order_placed only when no fills are recorded for a market.
+    Uses only order_filled events (confirmed fills). Returns (0.0, 0)
+    when no fills exist — unfilled resting/MM orders are not real trades.
 
     Kalshi binary: buy side at price_cents. If your side wins, payout = 100c/contract.
     If your side loses, payout = 0.
 
     Returns (pnl_usd, total_count).
     """
-    # Use fills if available, otherwise fall back to placed orders
-    orders = filled_orders if filled_orders else placed_orders
-    price_field = "fill_price_cents" if filled_orders else "price_cents"
+    # Only use confirmed fills — never fall back to placed_orders,
+    # which include unfilled resting/MM orders and create ghost P&L.
+    if not filled_orders:
+        return 0.0, 0
+    orders = filled_orders
+    price_field = "fill_price_cents"
 
     total_pnl = 0.0
     total_count = 0
