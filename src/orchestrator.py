@@ -302,15 +302,22 @@ class Orchestrator:
 
             # Event-level dedup: prevent correlated trades
             # (e.g., NO on 5 different BTC threshold tickers)
+            # Weather markets get a higher limit (3 vs 2) because each city-date
+            # can have a threshold + bracket that are independent bets.
             event_prefix = _extract_event_prefix(signal.market_id)
             event_count = self._event_dispatched.get(event_prefix, 0)
-            if event_count >= self._max_per_event:
+            is_weather_event = any(
+                event_prefix.startswith(p)
+                for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+            )
+            max_event = 3 if is_weather_event else self._max_per_event
+            if event_count >= max_event:
                 self.logger.info(
                     "dispatch_event_dedup_skip",
                     market_id=signal.market_id,
                     event_prefix=event_prefix,
                     event_count=event_count,
-                    max_per_event=self._max_per_event,
+                    max_per_event=max_event,
                 )
                 continue
 
@@ -565,11 +572,13 @@ class Orchestrator:
 
                 sig_result.conviction = conviction_str  # type: ignore[attr-defined]
                 sig_result.net_edge = net_edge  # type: ignore[attr-defined]
+                sig_result.signal_source = signal.metadata.get("signal_source")  # type: ignore[attr-defined]
 
                 sig_result.metadata = {  # type: ignore[attr-defined]
                     "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
                     "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
                     "strategy": signal.metadata.get("strategy", "standard"),
+                    "signal_source": signal.metadata.get("signal_source"),
                 }
 
                 # Each account sizes independently based on its own balance

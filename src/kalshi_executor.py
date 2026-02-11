@@ -88,15 +88,16 @@ class KalshiExecutor:
         ticker = market.id  # This is the Kalshi ticker
 
         # Determine side and price
+        meta = getattr(signal, "metadata", None) or {}
+        signal_source = meta.get("signal_source") or getattr(signal, "signal_source", None)
+
         if signal.recommended_side == TradingSide.BUY_YES:
             side = "yes"
             # Use yes_ask from metadata if available, else market price
-            meta = getattr(signal, "metadata", None) or {}
             ask_price = meta.get("kalshi_yes_ask") or signal.market_price or market.yes_price or 0.5
             price_cents = max(1, min(99, round(ask_price * 100)))
         elif signal.recommended_side == TradingSide.BUY_NO:
             side = "no"
-            meta = getattr(signal, "metadata", None) or {}
             ask_price = meta.get("kalshi_no_ask") or (
                 1.0 - (signal.market_price or market.yes_price or 0.5)
             )
@@ -114,6 +115,19 @@ class KalshiExecutor:
                 was_successful=False,
                 reason="Signal is HOLD",
                 execution_time=datetime.now(timezone.utc),
+            )
+
+        # NOAA weather signals: cross the spread by 2c to improve fill rate.
+        # These are data-driven (z>1), high-confidence bets where getting filled
+        # at 2c worse is much better than not getting filled at all.
+        if signal_source == "noaa_direct" and signal.confidence >= 0.70:
+            price_cents = min(99, price_cents + 2)
+            self.logger.info(
+                "weather_spread_cross",
+                ticker=ticker,
+                side=side,
+                original_price=price_cents - 2,
+                crossed_price=price_cents,
             )
 
         # Calculate contracts: $1 per contract, so USD ≈ contracts

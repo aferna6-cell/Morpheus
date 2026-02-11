@@ -181,13 +181,23 @@ class RiskManager:
                 kelly_f = 0.0
             else:
                 edge = abs(signal.edge)
-                
+
+                # NOAA weather signals: use half-Kelly (0.50) instead of
+                # third-Kelly (0.33), and raise bankroll cap to 10%.
+                # Rationale: NOAA forecasts are hard data with known sigma,
+                # not LLM guesswork. z>1 = 84%+ win rate, z>2 = 97%+.
+                # Also: diversified across independent cities → lower portfolio risk.
+                signal_source = getattr(signal, "signal_source", None)
+                is_noaa = signal_source == "noaa_direct"
+                effective_kelly = 0.50 if is_noaa else self.kelly_fraction
+                effective_bankroll_pct = 0.10 if is_noaa else self.max_bankroll_pct
+
                 # Calculate Kelly fraction
-                kelly_f = calculate_kelly_fraction(edge, odds, self.kelly_fraction)
-                
-                # Third-Kelly with bankroll cap (kelly_f already includes fraction)
+                kelly_f = calculate_kelly_fraction(edge, odds, effective_kelly)
+
+                # Kelly with bankroll cap (kelly_f already includes fraction)
                 kelly_bet = available_capital * kelly_f
-                max_bet = available_capital * self.max_bankroll_pct
+                max_bet = available_capital * effective_bankroll_pct
                 position_amount = min(kelly_bet, max_bet)
 
             # Minimum position floor: if Kelly says bet $0.20 but edge is real,

@@ -336,15 +336,20 @@ class EnsembleSignal(Signal):
             if mtype in _SKIP_TYPES:
                 return self._hold(market, f"Skipped market type '{mtype}'")
 
-            # Weather time-of-day filter: skip weather markets closing within
-            # 8 hours — by then temps are already observed at weather stations,
-            # so the market reflects actual data while the bot only has forecasts.
+            # Weather time-of-day filter: skip markets closing soon.
+            # Threshold markets (T-prefix): 4h cutoff — thresholds closing in
+            # 4-8h are our best edge (temps partially observed, NOAA most accurate).
+            # Bracket markets (B-prefix): 8h cutoff — brackets are riskier near
+            # close because edge effects matter more.
             if mtype == "weather" and market.time_to_close_hours is not None:
-                if market.time_to_close_hours < 8:
+                is_threshold = "-T" in market.id and "-B" not in market.id
+                weather_cutoff = 4.0 if is_threshold else 8.0
+                if market.time_to_close_hours < weather_cutoff:
                     return self._hold(
                         market,
-                        f"Weather market closing in {market.time_to_close_hours:.1f}h "
-                        f"(temps already observed)",
+                        f"Weather {'threshold' if is_threshold else 'bracket'} "
+                        f"closing in {market.time_to_close_hours:.1f}h "
+                        f"(cutoff={weather_cutoff:.0f}h)",
                     )
 
             market_price = market.midpoint_price
@@ -361,7 +366,10 @@ class EnsembleSignal(Signal):
                     # Compute edge directly (no calibration needed — this is hard data)
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-                    min_edge = 0.08  # lower threshold for direct NOAA computation
+                    # Threshold markets (T-prefix) need less edge — one boundary,
+                    # higher win rate. Brackets (B-prefix) need more — two edges.
+                    is_weather_threshold = "-T" in market.id and "-B" not in market.id
+                    min_edge = 0.05 if is_weather_threshold else 0.10
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -1199,10 +1207,12 @@ Rules:
 
             # Weather time-of-day filter (same as evaluate())
             if mtype == "weather" and market.time_to_close_hours is not None:
-                if market.time_to_close_hours < 8:
+                is_threshold = "-T" in market.id and "-B" not in market.id
+                weather_cutoff = 4.0 if is_threshold else 8.0
+                if market.time_to_close_hours < weather_cutoff:
                     return self._hold(
                         market,
-                        f"Weather market closing in {market.time_to_close_hours:.1f}h",
+                        f"Weather closing in {market.time_to_close_hours:.1f}h (cutoff={weather_cutoff:.0f}h)",
                     )
 
             # Weather fast-path for contrarian: bypass LLM when NOAA data is unambiguous
