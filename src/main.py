@@ -276,10 +276,9 @@ async def run(
                     logger.info("resolution_tracker_resolved", count=count)
                     # Capital freed — re-scale risk limits to new balance
                     try:
-                        total_bal = sum(
-                            await ex.trading_client.get_balance()
-                            for ex in kalshi_executors
-                        )
+                        total_bal = 0.0
+                        for ex in kalshi_executors:
+                            total_bal += await ex.trading_client.get_balance()
                         risk.scale_limits_to_balance(total_bal)
                     except Exception as exc:
                         logger.debug("resolution_balance_scale_failed", error=str(exc))
@@ -306,10 +305,9 @@ async def run(
     # Auto-scale risk limits based on actual balance
     if 'kalshi_executors' in dir() and kalshi_executors:
         try:
-            total_bal = sum(
-                await ex.trading_client.get_balance()
-                for ex in kalshi_executors
-            )
+            total_bal = 0.0
+            for ex in kalshi_executors:
+                total_bal += await ex.trading_client.get_balance()
             risk.scale_limits_to_balance(total_bal)
         except Exception as exc:
             logger.warning("initial_balance_scale_failed", error=str(exc))

@@ -1,6 +1,6 @@
 """Risk management — tuned for ~$6.56 capital, same-day markets.
 
-Position sizing: bankroll * kelly * 0.33 (third-Kelly)
+Position sizing: bankroll * (edge/odds) * 0.33 (third-Kelly)
 - Hard cap at 15% of bankroll per trade (~$1 on $6.56)
 - Minimum position floor: rounds up sub-$0.50 to 1 contract when edge >= 5%
 - 3% minimum edge
@@ -189,8 +189,8 @@ class RiskManager:
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, self.kelly_fraction)
                 
-                # Third-Kelly with bankroll cap
-                kelly_bet = available_capital * kelly_f * self.kelly_fraction
+                # Third-Kelly with bankroll cap (kelly_f already includes fraction)
+                kelly_bet = available_capital * kelly_f
                 max_bet = available_capital * self.max_bankroll_pct
                 position_amount = min(kelly_bet, max_bet)
 

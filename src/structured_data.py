@@ -813,23 +813,28 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
         if m:
             lo, hi = float(m.group(1)), float(m.group(2))
             return ("high_bracket", (lo + hi) / 2)
-        # Threshold: ">65°", "<65°", ">65", "<65"
-        m = re.search(r"[><]\s*(\d+\.?\d*)", q)
+        # Threshold: ">65°", "<65°", ">65", "<65" — capture direction
+        m = re.search(r"([><])\s*(\d+\.?\d*)", q)
         if m:
-            return ("high", float(m.group(1)))
+            direction = "high_below" if m.group(1) == "<" else "high"
+            return (direction, float(m.group(2)))
         # "above 65" / "below 65"
         m = re.search(r"(?:above|over|exceed)\s+(\d+\.?\d*)", q)
         if m:
             return ("high", float(m.group(1)))
+        m = re.search(r"(?:below|under)\s+(\d+\.?\d*)", q)
+        if m:
+            return ("high_below", float(m.group(1)))
 
     if "low" in q or "minimum" in q:
         m = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)°", q)
         if m:
             lo, hi = float(m.group(1)), float(m.group(2))
             return ("low_bracket", (lo + hi) / 2)
-        m = re.search(r"[><]\s*(\d+\.?\d*)", q)
+        m = re.search(r"([><])\s*(\d+\.?\d*)", q)
         if m:
-            return ("low", float(m.group(1)))
+            direction = "low_below" if m.group(1) == "<" else "low"
+            return (direction, float(m.group(2)))
 
     return None
 
@@ -1000,8 +1005,11 @@ async def compute_weather_probability(
         lower = float(m.group(1))
         upper = float(m.group(2))
         p_yes = _norm_cdf(upper, forecast_temp, sigma) - _norm_cdf(lower, forecast_temp, sigma)
+    elif "below" in t_type:
+        # "<X" market: YES means temp is below threshold
+        p_yes = _norm_cdf(t_value, forecast_temp, sigma)
     else:
-        # "above X" market
+        # ">X" market: YES means temp is above threshold
         p_yes = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
 
     # Clamp
@@ -1172,7 +1180,7 @@ def _parse_city_from_ticker(ticker: str) -> Optional[str]:
         "SFO": "san francisco", "LAX": "los angeles", "CHI": "chicago",
         "AUS": "austin", "ATL": "atlanta", "NOLA": "new orleans",
         "DEN": "denver", "MIN": "minneapolis", "LV": "las vegas",
-        "SEA": "seattle", "MIA": "miami", "NYC": "new york",
+        "SEA": "seattle", "MIA": "miami", "NYC": "new york", "NY": "new york",
         "PHX": "phoenix", "BOS": "boston", "DFW": "dallas",
         "HOU": "houston", "PHL": "philadelphia", "PHIL": "philadelphia", "DET": "detroit",
         "MSP": "minneapolis", "TPA": "tampa", "CLE": "cleveland",
