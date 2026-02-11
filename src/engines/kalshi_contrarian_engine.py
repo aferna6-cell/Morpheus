@@ -185,19 +185,8 @@ class KalshiContrarianEngine(BaseEngine):
         self._rescan_event.set()
 
     async def _scan_once(self) -> None:
-        # Balance gate — skip LLM evaluation if accounts are unfunded
-        if self._balance_checker is not None:
-            try:
-                total_balance = await self._balance_checker()
-                if total_balance < self._min_trade_balance:
-                    self.logger.info(
-                        "contrarian_skip_unfunded",
-                        total_balance=total_balance,
-                        min_required=self._min_trade_balance,
-                    )
-                    return
-            except Exception as exc:
-                self.logger.warning("contrarian_balance_check_failed", error=str(exc))
+        # Note: balance gate removed — budget check in evaluate_contrarian()
+        # blocks costly LLM calls, and dispatcher handles insufficient balance.
 
         # Fetch markets closing within 1-7 days (wider than standard engine's same-day)
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(

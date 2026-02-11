@@ -112,27 +112,20 @@ async def run(
                 await kalshi_trading_2.initialize()
                 # Always add to trading_clients for position monitoring/exits
                 trading_clients.append(kalshi_trading_2)
-                # Only add executor if balance is sufficient for trading
-                min_balance = 1.00  # $1 minimum to place new trades
+                # Always add executor — halt/resume handles low balance gracefully.
+                # Disabling at startup prevents trading even after positions resolve.
+                kalshi_exec_secondary = KalshiExecutor(
+                    config=config,
+                    trading_client=kalshi_trading_2,
+                    risk_manager=risk,
+                )
+                kalshi_executors.append(kalshi_exec_secondary)
                 try:
                     bal = await kalshi_trading_2.get_balance()
                     balance_usd = bal / 100.0 if bal > 100 else bal
                 except Exception:
                     balance_usd = 0.0
-                if balance_usd >= min_balance:
-                    kalshi_exec_secondary = KalshiExecutor(
-                        config=config,
-                        trading_client=kalshi_trading_2,
-                        risk_manager=risk,
-                    )
-                    kalshi_executors.append(kalshi_exec_secondary)
-                    logger.info("kalshi_secondary_account_initialized", balance=balance_usd)
-                else:
-                    logger.info(
-                        "kalshi_secondary_disabled_low_balance",
-                        balance=balance_usd,
-                        min_required=min_balance,
-                    )
+                logger.info("kalshi_secondary_account_initialized", balance=balance_usd)
 
             # Position monitor — enforce exits
             position_monitor = PositionMonitor(

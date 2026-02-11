@@ -189,20 +189,10 @@ class KalshiLLMEngine(BaseEngine):
         self._rescan_event.set()
 
     async def _scan_once(self) -> None:
-        # Balance gate — don't waste LLM API calls if there's no money to trade
-        if self._balance_checker is not None:
-            try:
-                total_balance = await self._balance_checker()
-                if total_balance < self._min_trade_balance:
-                    self.logger.info(
-                        "kalshi_llm_skip_unfunded",
-                        total_balance=total_balance,
-                        min_required=self._min_trade_balance,
-                        msg="Skipping LLM evaluation — accounts unfunded",
-                    )
-                    return
-            except Exception as exc:
-                self.logger.warning("balance_check_failed", error=str(exc))
+        # Note: balance gate removed — NOAA/FRED fast-paths are free and should
+        # always run.  The per-evaluation budget check in ensemble_signal.py
+        # already blocks costly LLM calls when budget is exceeded, and position
+        # sizing / executor will handle insufficient balance on dispatch.
 
         # Fetch markets — extend window to +1 day for weather (NOAA fast-path
         # is free, and placing orders early gets better prices).
