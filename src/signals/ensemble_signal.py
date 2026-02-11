@@ -331,11 +331,7 @@ class EnsembleSignal(Signal):
                 question=market.question[:120],
             )
 
-            # Budget check
-            if self.cost_tracker and not self.cost_tracker.check_budget():
-                return self._hold(market, "LLM budget exceeded")
-
-            # Market type skip
+            # Market type detection first (fast-paths don't need LLM budget)
             mtype = detect_market_type(market.question)
             if mtype in _SKIP_TYPES:
                 return self._hold(market, f"Skipped market type '{mtype}'")
@@ -481,6 +477,10 @@ class EnsembleSignal(Signal):
                             market,
                             f"Jobless claims direct: net edge {net_edge:.3f} < {min_edge:.3f}",
                         )
+
+            # Budget check — AFTER fast-paths (NOAA/FRED cost $0, only LLM calls need budget)
+            if self.cost_tracker and not self.cost_tracker.check_budget():
+                return self._hold(market, "LLM budget exceeded")
 
             # Market quality gate
             if market.liquidity < self.min_market_liquidity:
@@ -1170,11 +1170,7 @@ Rules:
             if market_price is None:
                 return self._hold(market, "No market price")
 
-            # Budget check
-            if self.cost_tracker and not self.cost_tracker.check_budget():
-                return self._hold(market, "LLM budget exceeded")
-
-            # Market type skip
+            # Market type skip (before fast-paths)
             mtype = detect_market_type(market.question)
             if mtype in _SKIP_TYPES:
                 return self._hold(market, f"Skipped market type '{mtype}'")
@@ -1271,6 +1267,10 @@ Rules:
                     sig.crowd_wrong_reason = f"FRED data disagrees with market by {abs(raw_edge):.0%}"  # type: ignore[attr-defined]
                     sig.signal_source = "fred_direct"  # type: ignore[attr-defined]
                     return sig
+
+            # Budget check — AFTER fast-paths (NOAA/FRED cost $0, only LLM calls need budget)
+            if self.cost_tracker and not self.cost_tracker.check_budget():
+                return self._hold(market, "LLM budget exceeded")
 
             # Get news context
             news_articles = await self.news_aggregator.get_market_news(market)
