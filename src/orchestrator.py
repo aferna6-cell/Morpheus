@@ -246,15 +246,24 @@ class Orchestrator:
         ranked = self._score_signals(fresh)
 
         # 4. Build set of tickers we already hold (position dedup)
+        #    Also count held positions per event prefix for correlation limiting
         held_tickers: set = set()
+        held_event_counts: Dict[str, int] = {}
         for executor in self.kalshi_executors:
             try:
                 positions = await executor.trading_client.get_positions()
                 for pos in positions:
                     if pos.count != 0:
                         held_tickers.add(pos.ticker)
+                        ep = _extract_event_prefix(pos.ticker)
+                        held_event_counts[ep] = held_event_counts.get(ep, 0) + 1
             except Exception:
                 pass  # If we can't check, skip guard rather than block trading
+
+        # Merge held positions into event dispatch tracker
+        # (ensures correlation limits respect existing positions, not just this session)
+        for ep, count in held_event_counts.items():
+            self._event_dispatched[ep] = max(self._event_dispatched.get(ep, 0), count)
 
         # 5. Execute top N within risk limits
         executed = 0

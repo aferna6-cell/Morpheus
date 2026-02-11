@@ -54,6 +54,14 @@ _JUNK_TICKER_PREFIXES = [
     "KXFIRSTSUPERBOWLSONG", "KXAAAGASW", "KXNEXTTEAMNFL",
     # Racing — LLMs have no edge on race outcomes
     "KXNASCARRACE", "KXNASCAR", "KXF1RACE", "KXINDYRACE",
+    # LLM mention markets — what will an AI chatbot say? No edge.
+    "KXLLM",
+    # NBA All-Stars / draft — sports-adjacent entertainment
+    "KXNBAALLSTAR",
+    # Executive order / government action — highly unpredictable timing
+    "KXEOWEEK", "KXTRUMPACT", "KXEXECORDER",
+    # Person-specific mention markets
+    "KXVLADTENEV", "KXELONMENTION",
 ]
 
 

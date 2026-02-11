@@ -82,8 +82,8 @@ llm:
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.25  # increased from 0.10 — 29% phantom edge was too high
   consensus_enabled: false           # replaced by ensemble
-  monthly_budget_usd: 50.0
-  daily_budget_usd: 10.0
+  monthly_budget_usd: 25.0
+  daily_budget_usd: 3.0
   require_data_sources: false
   min_data_sources: 0
 
@@ -138,7 +138,7 @@ orchestrator:
 kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
-  scan_interval_seconds: 300        # 5 min scans
+  scan_interval_seconds: 600        # 10 min scans (budget-friendly)
   fee_per_contract: 0.00            # maker = free
   min_volume: 1000                  # lowered — match market_filters threshold
   max_position_contracts: 50

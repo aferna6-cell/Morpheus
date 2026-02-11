@@ -119,7 +119,7 @@ class KalshiLLMEngine(BaseEngine):
         # Scan cooldown: skip recently evaluated markets (save LLM budget)
         import time as _time
         self._recently_evaluated: Dict[str, Tuple[float, float]] = {}  # ticker -> (timestamp, price_at_eval)
-        self._eval_cooldown_seconds: float = 1800.0  # 30 minutes
+        self._eval_cooldown_seconds: float = 3600.0  # 60 minutes (budget-friendly)
         self._price_change_threshold: float = 0.05   # re-evaluate if price moved 5%+
 
         # Rescan trigger: set externally when capital frees up
@@ -273,6 +273,9 @@ class KalshiLLMEngine(BaseEngine):
         )
 
         # Evaluate remaining markets with ensemble (soonest-closing first)
+        # Cap evaluations per scan to control LLM budget
+        max_evals_per_scan = 8
+        evals_this_scan = 0
         cooldown_skipped = 0
         now_ts = time.monotonic()
         for km in filtered_markets:
@@ -311,8 +314,18 @@ class KalshiLLMEngine(BaseEngine):
                         cooldown_skipped += 1
                         continue
 
+            # Budget cap: stop evaluating after N markets per scan
+            if evals_this_scan >= max_evals_per_scan:
+                self.logger.info(
+                    "kalshi_llm_eval_cap_reached",
+                    cap=max_evals_per_scan,
+                    remaining=len(filtered_markets) - evals_this_scan - cooldown_skipped,
+                )
+                break
+
             market = _kalshi_to_market(km)
             result = await self._signal.evaluate(market)
+            evals_this_scan += 1
 
             # Record evaluation timestamp and price
             self._recently_evaluated[km.ticker] = (now_ts, km.yes_price)
