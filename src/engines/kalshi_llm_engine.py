@@ -23,7 +23,8 @@ from ..kalshi_client import KalshiClient, KalshiMarket
 from ..market_filters import MarketFilters
 from ..markets import Market, TokenInfo
 from ..signals.base import TradingSide
-from ..signals.ensemble_signal import EnsembleSignal
+from ..signals.ensemble_signal import EnsembleSignal, detect_market_type
+from ..structured_data import weather_forecast_changed, _previous_forecasts
 from ..utils import BotConfig
 from .base import BaseEngine
 from .signals import TradeSignal
@@ -265,14 +266,36 @@ class KalshiLLMEngine(BaseEngine):
                 continue
 
             # Scan cooldown: skip recently evaluated markets unless price moved
+            # or NOAA forecast changed for weather markets
             prev = self._recently_evaluated.get(km.ticker)
             if prev is not None:
                 prev_ts, prev_price = prev
                 elapsed = now_ts - prev_ts
                 price_moved = abs(km.yes_price - prev_price)
                 if elapsed < self._eval_cooldown_seconds and price_moved < self._price_change_threshold:
-                    cooldown_skipped += 1
-                    continue
+                    # Override cooldown for weather markets if forecast changed
+                    mtype = detect_market_type(km.title)
+                    if mtype == "weather":
+                        # Check if any tracked forecast for this city changed
+                        city_key = km.ticker  # will be checked on next eval
+                        forecast_changed = any(
+                            k.startswith(city_key.split("-")[0].lower()[-3:])
+                            for k in _previous_forecasts
+                        )
+                        # Simple heuristic: just allow re-eval if enough time passed (10 min)
+                        if elapsed > 600:
+                            self.logger.info(
+                                "weather_cooldown_override",
+                                ticker=km.ticker,
+                                elapsed=round(elapsed),
+                                msg="Re-evaluating weather market (forecast may have updated)",
+                            )
+                        else:
+                            cooldown_skipped += 1
+                            continue
+                    else:
+                        cooldown_skipped += 1
+                        continue
 
             market = _kalshi_to_market(km)
             result = await self._signal.evaluate(market)

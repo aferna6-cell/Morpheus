@@ -329,7 +329,7 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     # Weather markets — traded with NOAA NWS forecast anchors, conservative.
     # LLM systematically underestimates bracket probabilities (12% vs 90% market),
     # so use high min_edge (0.15) and extra shrinkage to avoid phantom edge trades.
-    "weather":     MarketTypeCalibration(skip=False, min_edge=0.15, extra_shrink=0.15),
+    "weather":     MarketTypeCalibration(skip=False, min_edge=0.08, extra_shrink=0.05),
     # Crypto daily price ranges — narrow intraday ranges are near-random
     "crypto_range": MarketTypeCalibration(skip=True, min_edge=0.99),
     # LLM can't predict exact words → SKIP (backtest: 0.62 avg Brier)

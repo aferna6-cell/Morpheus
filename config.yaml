@@ -1,16 +1,16 @@
 # Morpheus v2 — Kalshi trading bot
-# $200 capital (2 accounts × $100), same-day markets only
+# ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
   enabled_strategies: ["kalshi_llm", "kalshi_contrarian"]
   min_edge: 0.03                    # 3% minimum edge (was 5%)
   kelly_fraction: 0.33              # third-Kelly (was quarter)
   max_position_pct: 0.05            # 5% of bankroll cap
-  max_position_size: 15.0           # $15 max (was $10)
-  max_total_exposure: 80.0          # $80 max exposure (was $30)
+  max_position_size: 3.0            # $3 max (scaled for ~$6.56 bankroll)
+  max_total_exposure: 10.0          # $10 max exposure
   min_confidence: 0.3
   min_conviction: "low"             # allow all positive-edge trades (was "medium")
-  high_conviction_multiplier: 1.5
+  high_conviction_multiplier: 1.3
   min_payout_ratio: 0.12
   fee_pct: 0.00                     # maker orders = free
   slippage_pct: 0.005
@@ -100,8 +100,8 @@ news:
 
 # Risk — tuned for $100/account
 risk:
-  max_loss_per_trade: 10.0          # $10 max loss per trade
-  max_daily_loss: 20.0              # $20 daily loss limit (10% of total)
+  max_loss_per_trade: 2.0           # $2 max loss per trade
+  max_daily_loss: 3.0               # $3 daily loss limit
   stop_loss_pct: 0.35               # 35% stop loss (was 25%)
   take_profit_pct: 0.30             # 30% take profit (was 40%)
   max_position_hold_hours: 24       # same-day (was 168)
@@ -109,7 +109,7 @@ risk:
   cooldown_minutes: 15              # shorter cooldown
   prevent_retrade: true
   use_quarter_kelly: false          # using third-Kelly now
-  max_bankroll_pct: 0.05            # 5% per trade
+  max_bankroll_pct: 0.15            # 15% per trade (5% of $6.56 = $0.33, too small)
 
 timing:
   loop_interval_seconds: 60
@@ -141,7 +141,7 @@ kalshi:
   scan_interval_seconds: 300        # 5 min scans
   fee_per_contract: 0.00            # maker = free
   min_volume: 1000                  # lowered — match market_filters threshold
-  max_position_contracts: 50
+  max_position_contracts: 15
   categories:
     - "Politics"
     - "Economics"
@@ -170,8 +170,8 @@ contrarian:
   max_crowd_confidence: 0.95    # don't bet against 95%+ (usually right)
   min_contrarian_edge: 0.10     # LLM must disagree by 10%+
   min_conviction: "high"        # only high-conviction contrarian bets
-  max_position_size: 25.0       # $25 per contrarian trade
-  max_total_exposure: 100.0     # $100 total contrarian exposure
+  max_position_size: 4.0        # $4 per contrarian trade
+  max_total_exposure: 8.0       # $8 total contrarian exposure
   max_resolution_days: 7        # 1-7 day markets (not just same-day)
   min_volume_24h: 1000          # lowered — small bets fill on thin markets
   categories:
@@ -190,9 +190,9 @@ market_making:
   min_volume: 1000                  # lowered — small quote sizes fill fine
   min_spread_cents: 3               # 3c minimum spread to capture
   max_spread_cents: 15              # avoid illiquid markets
-  quote_size: 3                     # 3 contracts per side
-  max_inventory: 15                 # max 15 contracts one-sided
-  max_inventory_usd: 50.0           # $50 max exposure per market
+  quote_size: 2                     # 2 contracts per side
+  max_inventory: 8                  # max 8 contracts one-sided
+  max_inventory_usd: 5.0            # $5 max exposure per market
   inventory_skew_cents: 2           # skew quotes 2c per inventory unit
   quote_refresh_seconds: 60         # re-quote every minute
   scan_interval_seconds: 300        # rescan markets every 5 min

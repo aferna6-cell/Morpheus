@@ -18,6 +18,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+import math
+
 import httpx
 import structlog
 
@@ -621,7 +623,7 @@ _gridpoint_cache: Dict[str, str] = {}
 
 # Cache for forecast data (1 hour TTL)
 _forecast_cache: Dict[str, Tuple[float, Dict]] = {}
-_FORECAST_CACHE_TTL = 3600.0  # 1 hour
+_FORECAST_CACHE_TTL = 1200.0  # 20 min — catch NOAA forecast updates faster
 
 
 def _parse_city(question: str) -> Optional[str]:
@@ -793,6 +795,198 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
             return ("low", float(m.group(1)))
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# NWS forecast error sigma (empirical, Fahrenheit) and direct probability
+# ---------------------------------------------------------------------------
+
+# NWS forecast error standard deviation by lead time in days
+_NWS_SIGMA = {0: 2.5, 1: 2.5, 2: 3.5, 3: 5.0}
+
+# Track previous forecast temps for change detection
+_previous_forecasts: Dict[str, float] = {}  # "city:period" -> temp
+
+
+def _norm_cdf(x: float, mu: float, sigma: float) -> float:
+    """Normal CDF using math.erfc (no scipy needed)."""
+    z = (x - mu) / sigma
+    return 0.5 * math.erfc(-z / math.sqrt(2))
+
+
+def weather_forecast_changed(city: str, period_name: str, new_temp: float) -> bool:
+    """Return True if forecast temp shifted >= 1F from last seen value."""
+    key = f"{city}:{period_name}"
+    prev = _previous_forecasts.get(key)
+    _previous_forecasts[key] = new_temp
+    if prev is None:
+        return False
+    return abs(new_temp - prev) >= 1.0
+
+
+async def compute_weather_probability(
+    question: str, market_id: str = "", close_time: Optional[datetime] = None,
+) -> Optional[Tuple[float, float, str]]:
+    """Compute weather probability directly from NWS forecast.
+
+    Returns (p_yes, confidence, reasoning) or None if can't compute.
+    Only returns a result when NWS data is unambiguous (|forecast - threshold| / sigma > 1.5).
+    For ambiguous cases, returns None so the LLM handles it.
+    """
+    # 1. Parse city
+    city = _parse_city(question)
+    if not city and market_id:
+        city = _parse_city_from_ticker(market_id)
+    if not city:
+        return None
+
+    # 2. Parse threshold
+    threshold_info = _parse_weather_threshold(question)
+    if threshold_info is None:
+        return None
+
+    t_type, t_value = threshold_info
+
+    # 3. Parse target date
+    target_date = _parse_target_date(question)
+
+    # 4. Compute lead time in days
+    now = datetime.now(timezone.utc)
+    if target_date:
+        lead_days = max(0, (target_date - now).days)
+    elif close_time:
+        lead_days = max(0, (close_time - now).days)
+    else:
+        lead_days = 0
+
+    sigma = _NWS_SIGMA.get(min(lead_days, 3), 5.0)
+
+    # 5. Fetch NWS forecast
+    coords = _WEATHER_CITIES.get(city)
+    if not coords:
+        return None
+
+    forecast_url = await _get_nws_gridpoint_url(coords[0], coords[1])
+    if not forecast_url:
+        return None
+
+    forecast_data = await _get_nws_forecast(forecast_url)
+    if not forecast_data:
+        return None
+
+    periods = forecast_data.get("properties", {}).get("periods", [])
+    if not periods:
+        return None
+
+    # 6. Find the relevant forecast period
+    relevant = []
+    if target_date:
+        target_str = target_date.strftime("%Y-%m-%d")
+        for period in periods:
+            start = period.get("startTime", "")
+            if target_str in start:
+                relevant.append(period)
+    if not relevant:
+        relevant = periods[:4]
+
+    # Get the forecast temp for the right period type
+    forecast_temp = None
+    period_name = None
+    for p in relevant:
+        t = p.get("temperature")
+        name = p.get("name", "")
+        if not isinstance(t, (int, float)):
+            continue
+        if "high" in t_type:
+            # Daytime period for high temp
+            if "night" not in name.lower():
+                forecast_temp = float(t)
+                period_name = name
+                break
+        elif "low" in t_type:
+            # Nighttime period for low temp
+            if "night" in name.lower():
+                forecast_temp = float(t)
+                period_name = name
+                break
+
+    # Fallback: use first available temp
+    if forecast_temp is None:
+        for p in relevant:
+            t = p.get("temperature")
+            if isinstance(t, (int, float)):
+                forecast_temp = float(t)
+                period_name = p.get("name", "unknown")
+                break
+
+    if forecast_temp is None:
+        return None
+
+    # Track forecast changes
+    if period_name:
+        weather_forecast_changed(city, period_name, forecast_temp)
+
+    # 7. Compute probability
+    if "bracket" in t_type:
+        # Bracket market: "X-Y°F" — t_value is midpoint, need to find bounds
+        q = question.lower()
+        m = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)°", q)
+        if not m:
+            return None
+        lower = float(m.group(1))
+        upper = float(m.group(2))
+        p_yes = _norm_cdf(upper, forecast_temp, sigma) - _norm_cdf(lower, forecast_temp, sigma)
+    else:
+        # "above X" market
+        p_yes = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
+
+    # Clamp
+    p_yes = max(0.001, min(0.999, p_yes))
+
+    # 8. Only return for confident cases: |forecast - threshold| / sigma > 1.5
+    if "bracket" not in t_type:
+        z_score = abs(forecast_temp - t_value) / sigma
+        if z_score < 1.5:
+            logger.info(
+                "weather_direct_ambiguous",
+                city=city,
+                forecast=forecast_temp,
+                threshold=t_value,
+                z_score=round(z_score, 2),
+                msg="Near threshold, deferring to LLM",
+            )
+            return None
+    else:
+        # For brackets, check if forecast is well inside or outside
+        midpoint = t_value
+        z_score = abs(forecast_temp - midpoint) / sigma
+        # For brackets, low z_score means forecast is near the bracket (good for YES)
+        # We return for both confident YES and confident NO cases
+        # Only skip truly ambiguous cases (z_score between 0.5 and 2.0 with moderate p_yes)
+        if 0.15 < p_yes < 0.85 and z_score < 1.5:
+            return None
+
+    confidence = min(0.95, 0.5 + z_score * 0.15) if "bracket" not in t_type else min(0.90, 0.4 + abs(0.5 - p_yes) * 1.5)
+
+    reasoning = (
+        f"NOAA direct: NWS forecast={forecast_temp:.0f}°F, "
+        f"threshold={t_value:.1f}°F, sigma={sigma:.1f}°F, "
+        f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+    )
+
+    logger.info(
+        "noaa_direct_signal",
+        city=city,
+        forecast_temp=forecast_temp,
+        threshold=t_value,
+        t_type=t_type,
+        sigma=sigma,
+        p_yes=round(p_yes, 4),
+        confidence=round(confidence, 3),
+        lead_days=lead_days,
+    )
+
+    return (p_yes, confidence, reasoning)
 
 
 def _format_weather_anchor(

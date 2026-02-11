@@ -196,6 +196,7 @@ class KalshiContrarianEngine(BaseEngine):
                 continue
 
             # Must resolve in >6 hours (not imminent)
+            hours_left = None
             if km.close_time:
                 hours_left = (km.close_time - datetime.now(timezone.utc)).total_seconds() / 3600
                 if hours_left < 6:
@@ -250,13 +251,27 @@ class KalshiContrarianEngine(BaseEngine):
             conviction = getattr(result, "conviction", "low")
             conv_str = conviction.value if hasattr(conviction, "value") else str(conviction).lower()
 
+            # Theta decay timing: adjust min edge based on time-to-resolution
+            # Mean reversion peaks ~5-7 days out, prices become sticky near resolution
+            effective_min_edge = self._min_edge  # default 10%
+            if km.close_time:
+                h_left = (km.close_time - datetime.now(timezone.utc)).total_seconds() / 3600
+                if h_left > 120:       # 5+ days: peak mean reversion window
+                    effective_min_edge = 0.08
+                elif h_left > 48:      # 2-5 days
+                    effective_min_edge = 0.09
+                elif h_left > 24:      # 1-2 days
+                    effective_min_edge = 0.10
+                else:                  # <24 hours: prices sticky, need bigger edge
+                    effective_min_edge = 0.13
+
             # Require minimum contrarian edge
-            if abs(net_edge) < self._min_edge:
+            if abs(net_edge) < effective_min_edge:
                 self.logger.debug(
                     "contrarian_skip_low_edge",
                     ticker=km.ticker,
                     net_edge=net_edge,
-                    min_edge=self._min_edge,
+                    min_edge=effective_min_edge,
                 )
                 continue
 

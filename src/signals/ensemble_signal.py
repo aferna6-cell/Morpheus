@@ -38,7 +38,7 @@ from ..cost_tracker import CostTracker
 from ..markets import Market
 from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
 from ..news import NewsAggregator
-from ..structured_data import get_structured_anchor
+from ..structured_data import get_structured_anchor, compute_weather_probability
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
 
@@ -354,6 +354,76 @@ class EnsembleSignal(Signal):
             market_price = market.midpoint_price
             if market_price is None:
                 return self._hold(market, "No market price available")
+
+            # Weather fast-path: bypass LLM when NOAA data is unambiguous
+            if mtype == "weather":
+                weather_result = await compute_weather_probability(
+                    market.question, market.id, getattr(market, "close_time", market.end_date),
+                )
+                if weather_result is not None:
+                    p_yes, w_confidence, w_reasoning = weather_result
+                    # Compute edge directly (no calibration needed — this is hard data)
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    min_edge = 0.08  # lower threshold for direct NOAA computation
+
+                    if net_edge >= min_edge:
+                        if raw_edge > 0:
+                            side = TradingSide.BUY_YES
+                        elif raw_edge < 0:
+                            side = TradingSide.BUY_NO
+                        else:
+                            side = TradingSide.HOLD
+
+                        # Payout ratio filter
+                        if side != TradingSide.HOLD:
+                            entry_cost = market_price if side == TradingSide.BUY_YES else (1.0 - market_price)
+                            payout_ratio = (1.0 - entry_cost) / entry_cost if entry_cost > 0 else 0
+                            if payout_ratio < 0.12:
+                                side = TradingSide.HOLD
+
+                        conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"
+                        reasoning = (
+                            f"{w_reasoning} | "
+                            f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
+                            f"net_edge={net_edge:+.3f}"
+                        )
+
+                        self.logger.info(
+                            "weather_fast_path",
+                            market_id=market.id,
+                            p_yes=round(p_yes, 4),
+                            market_price=market_price,
+                            raw_edge=round(raw_edge, 4),
+                            net_edge=round(net_edge, 4),
+                            side=side.value,
+                            conviction=conviction,
+                        )
+
+                        result = SignalResult(
+                            estimated_prob=p_yes,
+                            confidence=w_confidence,
+                            edge=raw_edge,
+                            recommended_side=side,
+                            reasoning=reasoning,
+                            signal_name=self.name,
+                            market_price=market_price,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        )
+                        result.net_edge = net_edge  # type: ignore[attr-defined]
+                        result.conviction = conviction  # type: ignore[attr-defined]
+                        return result
+                    else:
+                        self.logger.debug(
+                            "weather_fast_path_low_edge",
+                            market_id=market.id,
+                            net_edge=round(net_edge, 4),
+                            min_edge=min_edge,
+                        )
+                        return self._hold(
+                            market,
+                            f"Weather direct: net edge {net_edge:.3f} < {min_edge:.3f}",
+                        )
 
             # Market quality gate
             if market.liquidity < self.min_market_liquidity:

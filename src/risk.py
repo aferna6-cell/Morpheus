@@ -1,7 +1,8 @@
-"""Risk management — tuned for $200 capital, same-day markets.
+"""Risk management — tuned for ~$6.56 capital, same-day markets.
 
 Position sizing: bankroll * kelly * 0.33 (third-Kelly)
-- Hard cap at 5% of bankroll per trade ($10 on $200)
+- Hard cap at 15% of bankroll per trade (~$1 on $6.56)
+- Minimum position floor: rounds up sub-$0.50 to 1 contract when edge >= 5%
 - 3% minimum edge
 - No conviction gating
 """
@@ -151,6 +152,17 @@ class RiskManager:
                 kelly_bet = available_capital * kelly_f * self.kelly_fraction
                 max_bet = available_capital * self.max_bankroll_pct
                 position_amount = min(kelly_bet, max_bet)
+
+            # Minimum position floor: if Kelly says bet $0.20 but edge is real,
+            # round up to 1 contract minimum. Don't waste LLM budget on dust trades.
+            side_val = getattr(signal.recommended_side, "value", str(signal.recommended_side))
+            entry_cost = market_price if side_val == "buy_yes" else (1.0 - market_price)
+            min_actionable = max(entry_cost, 0.50)
+            if 0 < position_amount < min_actionable:
+                if abs(signal.edge) >= 0.05:  # Only round up if edge justifies it
+                    position_amount = min_actionable
+                else:
+                    position_amount = 0.0
 
             # Apply survival mode multiplier
             if self._survival_multiplier < 1.0:
