@@ -38,7 +38,7 @@ from ..cost_tracker import CostTracker
 from ..markets import Market
 from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
 from ..news import NewsAggregator
-from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability, get_recent_forecast_changes
+from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability, compute_stock_index_probability, get_recent_forecast_changes
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
 
@@ -514,7 +514,66 @@ class EnsembleSignal(Signal):
                             f"Jobless claims direct: net edge {net_edge:.3f} < {min_edge:.3f}",
                         )
 
-            # Budget check — AFTER fast-paths (NOAA/FRED cost $0, only LLM calls need budget)
+            # Stock index fast-path: Yahoo Finance real-time price + normal CDF
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100")
+            if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
+                idx_result = await compute_stock_index_probability(
+                    market.question, market.id,
+                    getattr(market, "close_time", market.end_date),
+                )
+                if idx_result is not None:
+                    p_yes, idx_confidence, idx_reasoning = idx_result
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    min_edge = 0.05  # 5% for index thresholds
+
+                    if net_edge >= min_edge:
+                        if raw_edge > 0:
+                            side = TradingSide.BUY_YES
+                        elif raw_edge < 0:
+                            side = TradingSide.BUY_NO
+                        else:
+                            side = TradingSide.HOLD
+
+                        conviction = "high" if net_edge >= 0.15 else "medium" if net_edge >= 0.08 else "low"
+                        reasoning = (
+                            f"{idx_reasoning} | "
+                            f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
+                            f"net_edge={net_edge:+.3f}"
+                        )
+
+                        self.logger.info(
+                            "stock_index_fast_path_signal",
+                            market_id=market.id,
+                            p_yes=round(p_yes, 4),
+                            market_price=market_price,
+                            raw_edge=round(raw_edge, 4),
+                            net_edge=round(net_edge, 4),
+                            side=side.value,
+                            conviction=conviction,
+                        )
+
+                        result = SignalResult(
+                            estimated_prob=p_yes,
+                            confidence=idx_confidence,
+                            edge=raw_edge,
+                            recommended_side=side,
+                            reasoning=reasoning,
+                            signal_name=self.name,
+                            market_price=market_price,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        )
+                        result.net_edge = net_edge  # type: ignore[attr-defined]
+                        result.conviction = conviction  # type: ignore[attr-defined]
+                        result.signal_source = "yahoo_direct"  # type: ignore[attr-defined]
+                        return result
+                    else:
+                        return self._hold(
+                            market,
+                            f"Stock index direct: net edge {net_edge:.3f} < {min_edge:.3f}",
+                        )
+
+            # Budget check — AFTER fast-paths (NOAA/FRED/Yahoo cost $0, only LLM calls need budget)
             if self.cost_tracker and not self.cost_tracker.check_budget():
                 return self._hold(market, "LLM budget exceeded")
 

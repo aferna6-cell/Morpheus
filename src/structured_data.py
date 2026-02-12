@@ -62,6 +62,12 @@ async def get_structured_anchor(
                              "wind speed", "heat wave", "cold snap"]):
         return await _get_weather_context(question, market_id)
 
+    # Stock index markets — real-time price data
+    if market_id:
+        mid_upper = market_id.upper()
+        if any(mid_upper.startswith(p) for p in ("KXINXU", "KXINX-", "KXNASDAQ100")):
+            return await _get_stock_index_context(question, market_id)
+
     return None
 
 
@@ -1798,6 +1804,260 @@ async def _get_weather_context(question: str, market_id: str = "") -> Optional[s
     )
 
     return anchor
+
+
+# ---------------------------------------------------------------------------
+# Stock index fast-path — Yahoo Finance real-time prices + normal CDF
+# ---------------------------------------------------------------------------
+
+# Yahoo Finance symbol mapping and daily volatility estimates
+_INDEX_CONFIG: Dict[str, Dict[str, Any]] = {
+    "KXINXU": {"yahoo": "^GSPC", "name": "S&P 500", "daily_vol": 0.010, "trading_hours": 6.5},
+    "KXINX": {"yahoo": "^GSPC", "name": "S&P 500", "daily_vol": 0.010, "trading_hours": 6.5},
+    "KXNASDAQ100U": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
+    "KXNASDAQ100": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
+}
+
+# Cache for real-time prices: {symbol: (timestamp, price, prev_close)}
+_index_price_cache: Dict[str, Tuple[float, float, float]] = {}
+_INDEX_PRICE_CACHE_TTL = 60.0  # 60 seconds
+
+
+async def _fetch_index_price(yahoo_symbol: str) -> Optional[Tuple[float, float]]:
+    """Fetch real-time price and previous close from Yahoo Finance.
+
+    Returns (current_price, previous_close) or None on failure.
+    Cached for 60 seconds.
+    """
+    now = time.monotonic()
+    cached = _index_price_cache.get(yahoo_symbol)
+    if cached is not None:
+        ts, price, prev_close = cached
+        if now - ts < _INDEX_PRICE_CACHE_TTL:
+            return (price, prev_close)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+                params={"interval": "1m", "range": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code != 200:
+                logger.debug("yahoo_fetch_failed", symbol=yahoo_symbol, status=resp.status_code)
+                return None
+
+            data = resp.json()
+            result = data["chart"]["result"][0]
+            meta = result["meta"]
+            price = float(meta["regularMarketPrice"])
+            prev_close = float(meta["chartPreviousClose"])
+
+            _index_price_cache[yahoo_symbol] = (now, price, prev_close)
+            return (price, prev_close)
+    except Exception as e:
+        logger.debug("yahoo_fetch_error", symbol=yahoo_symbol, error=str(e))
+        return None
+
+
+def _parse_index_ticker(market_id: str) -> Optional[Dict[str, Any]]:
+    """Parse Kalshi stock index ticker into components.
+
+    Examples:
+        KXINXU-26FEB12H1600-T6974     → S&P threshold 6974
+        KXINXU-26FEB12H1600-T6924.9999 → S&P threshold 6925
+        KXNASDAQ100U-26FEB12H1000-T25279.99 → NASDAQ threshold 25280
+        KXINX-26FEB12H1600-B6987      → S&P bracket 6987
+
+    Returns dict with: prefix, threshold, is_bracket, close_hour, config
+    """
+    mid = market_id.upper()
+
+    # Find matching prefix
+    matched_prefix = None
+    config = None
+    for prefix, cfg in _INDEX_CONFIG.items():
+        if mid.startswith(prefix):
+            # Pick longest matching prefix (KXINXU before KXINX)
+            if matched_prefix is None or len(prefix) > len(matched_prefix):
+                matched_prefix = prefix
+                config = cfg
+
+    if matched_prefix is None or config is None:
+        return None
+
+    # Parse threshold/bracket value
+    t_match = re.search(r"-T([\d.]+)$", mid)
+    b_match = re.search(r"-B([\d.]+)$", mid)
+
+    if t_match:
+        # Round .9999 values up (Kalshi convention for "above X")
+        raw_val = float(t_match.group(1))
+        threshold = round(raw_val + 0.0001)  # 6924.9999 → 6925
+        is_bracket = False
+    elif b_match:
+        threshold = float(b_match.group(1))
+        is_bracket = True
+    else:
+        return None
+
+    # Parse close hour from ticker (H1600 = 16:00 ET)
+    h_match = re.search(r"H(\d{4})", mid)
+    close_hour = int(h_match.group(1)) / 100.0 if h_match else 16.0
+
+    return {
+        "prefix": matched_prefix,
+        "threshold": threshold,
+        "is_bracket": is_bracket,
+        "close_hour_et": close_hour,
+        "config": config,
+    }
+
+
+def _market_hours_remaining(close_hour_et: float) -> Optional[float]:
+    """Compute hours remaining in the trading session.
+
+    Returns None if market is closed or close time has passed.
+    NYSE hours: 9:30 AM - 4:00 PM ET.
+    """
+    from zoneinfo import ZoneInfo
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    current_hour = now_et.hour + now_et.minute / 60.0
+
+    # Market open at 9:30 ET
+    market_open = 9.5
+    # Close hour from ticker (usually 16.0 = 4:00 PM)
+    market_close = close_hour_et
+
+    if current_hour >= market_close:
+        return 0.0  # Market closed
+    if current_hour < market_open:
+        return market_close - market_open  # Full day remaining
+
+    return market_close - current_hour
+
+
+async def compute_stock_index_probability(
+    question: str, market_id: str,
+    close_time: Optional[datetime] = None,
+) -> Optional[Tuple[float, float, str]]:
+    """Compute probability for stock index threshold markets.
+
+    Uses real-time Yahoo Finance price + intraday volatility model.
+    Returns (p_yes, confidence, reasoning) or None if can't compute.
+    """
+    parsed = _parse_index_ticker(market_id)
+    if parsed is None:
+        return None
+
+    config = parsed["config"]
+    threshold = parsed["threshold"]
+    is_bracket = parsed["is_bracket"]
+
+    # Skip brackets for now (need to know bracket width)
+    if is_bracket:
+        return None
+
+    # Fetch real-time price
+    price_data = await _fetch_index_price(config["yahoo"])
+    if price_data is None:
+        return None
+
+    current_price, prev_close = price_data
+    if current_price <= 0:
+        return None
+
+    # Compute remaining time
+    hours_left = _market_hours_remaining(parsed["close_hour_et"])
+    if hours_left is None or hours_left <= 0:
+        # Market closed — use last known price as final
+        hours_left = 0.001  # tiny epsilon to avoid division by zero
+
+    # Intraday volatility: daily_vol * sqrt(hours_left / trading_hours)
+    daily_vol = config["daily_vol"]
+    trading_hours = config["trading_hours"]
+    time_fraction = max(hours_left / trading_hours, 0.001)
+    sigma_remaining = current_price * daily_vol * math.sqrt(time_fraction)
+
+    # Add minimum sigma floor (prevent overconfidence when close to threshold)
+    sigma_remaining = max(sigma_remaining, current_price * 0.001)  # 0.1% floor
+
+    # P(index > threshold at close)
+    p_above = 1.0 - _norm_cdf(threshold, current_price, sigma_remaining)
+    p_above = max(0.001, min(0.999, p_above))
+
+    # z-score for confidence
+    z_score = abs(current_price - threshold) / sigma_remaining if sigma_remaining > 0 else 0
+    if z_score < 0.3:
+        # Very close to threshold — too uncertain, let LLM handle
+        logger.info(
+            "stock_index_ambiguous",
+            market_id=market_id,
+            current=current_price,
+            threshold=threshold,
+            z_score=round(z_score, 2),
+            hours_left=round(hours_left, 2),
+        )
+        return None
+
+    confidence = min(0.90, 0.50 + z_score * 0.10)
+
+    # Direction of daily change for context
+    daily_change_pct = ((current_price - prev_close) / prev_close) * 100
+
+    reasoning = (
+        f"Yahoo Finance direct: {config['name']} = {current_price:.2f} "
+        f"(day: {daily_change_pct:+.2f}%), threshold = {threshold:.0f}, "
+        f"gap = {current_price - threshold:+.1f} pts, "
+        f"σ_remaining = {sigma_remaining:.1f} pts ({hours_left:.1f}h left), "
+        f"z = {z_score:.2f}, P(above) = {p_above:.4f}"
+    )
+
+    logger.info(
+        "stock_index_fast_path",
+        market_id=market_id,
+        index=config["name"],
+        current=current_price,
+        threshold=threshold,
+        gap=round(current_price - threshold, 1),
+        sigma=round(sigma_remaining, 1),
+        hours_left=round(hours_left, 2),
+        z_score=round(z_score, 2),
+        p_above=round(p_above, 4),
+    )
+
+    return (p_above, confidence, reasoning)
+
+
+async def _get_stock_index_context(
+    question: str, market_id: str,
+) -> Optional[str]:
+    """Get structured data context for stock index markets."""
+    parsed = _parse_index_ticker(market_id)
+    if parsed is None:
+        return None
+
+    config = parsed["config"]
+    price_data = await _fetch_index_price(config["yahoo"])
+    if price_data is None:
+        return None
+
+    current_price, prev_close = price_data
+    daily_change_pct = ((current_price - prev_close) / prev_close) * 100
+    hours_left = _market_hours_remaining(parsed["close_hour_et"])
+
+    return (
+        f"\nSTRUCTURED DATA ANCHOR — {config['name']} (Real-Time):\n"
+        f"  Current Level: {current_price:.2f}\n"
+        f"  Previous Close: {prev_close:.2f}\n"
+        f"  Day Change: {daily_change_pct:+.2f}%\n"
+        f"  Threshold: {parsed['threshold']:.0f}\n"
+        f"  Gap to Threshold: {current_price - parsed['threshold']:+.1f} points\n"
+        f"  Hours to Market Close: {hours_left:.1f}h\n"
+        f"  Daily Volatility: ~{config['daily_vol']*100:.1f}%\n"
+        f"  Use this as your primary anchor. The current price is HARD DATA.\n"
+    )
 
 
 # ---------------------------------------------------------------------------

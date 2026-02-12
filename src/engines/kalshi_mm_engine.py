@@ -52,6 +52,7 @@ class MMMarketState:
     total_filled_no: int = 0
     last_quote_time: Optional[datetime] = None
     consecutive_one_sided: int = 0  # adverse selection counter
+    consecutive_ob_errors: int = 0  # orderbook fetch failures
 
 
 class KalshiMMEngine(BaseEngine):
@@ -179,6 +180,20 @@ class KalshiMMEngine(BaseEngine):
                 hours_to_close = (m.close_time - datetime.now(timezone.utc)).total_seconds() / 3600
                 if hours_to_close < 4:
                     continue
+                # Also skip expired markets (close time in the past)
+                if hours_to_close < 0:
+                    continue
+
+            # Skip sports markets — outcome is binary event, not suitable for MM
+            # (price jumps on goals/events cause adverse selection)
+            _SPORTS_PREFIXES = (
+                "KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXMLS", "KXEPL",
+                "KXUFC", "KXSOCCER", "KXSCOTTISHPREM", "KXEFLCHAMPIONSHIP",
+                "KXLALIGA", "KXBUNDESLIGA", "KXSERIEA", "KXLIGUE1",
+                "KXCHAMPIONSLEAGUE", "KXNCAA",
+            )
+            if m.ticker.upper().startswith(_SPORTS_PREFIXES):
+                continue
 
             candidates.append(m)
 
@@ -261,7 +276,17 @@ class KalshiMMEngine(BaseEngine):
         # Get fresh orderbook
         try:
             ob = await self.kalshi_client.get_orderbook(state.ticker)
-        except Exception:
+            state.consecutive_ob_errors = 0  # reset on success
+        except Exception as e:
+            state.consecutive_ob_errors += 1
+            if state.consecutive_ob_errors >= 3:
+                self.logger.warning(
+                    "mm_market_dropped_errors",
+                    ticker=state.ticker,
+                    errors=state.consecutive_ob_errors,
+                    error=str(e)[:100],
+                )
+                self._markets.pop(state.ticker, None)
             return
 
         # Parse best bid/ask from orderbook
