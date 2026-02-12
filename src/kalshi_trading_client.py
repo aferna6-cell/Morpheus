@@ -123,10 +123,13 @@ class KalshiTradingClient:
         self._halt_reason = None
         self.logger.info("kalshi_trading_resumed", label=self.label)
 
-    async def check_and_resume(self, min_balance: float = 1.0) -> bool:
+    async def check_and_resume(self, min_balance: float = 0.25) -> bool:
         """Check balance and auto-resume trading if sufficient funds available.
 
         Returns True if trading was resumed, False otherwise.
+        Lowered from $1.00 to $0.25 — even small balances can trade
+        1-2 weather contracts, and staying halted for hours wastes
+        opportunities.
         """
         if not self._trading_halted:
             return False

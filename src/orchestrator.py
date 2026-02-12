@@ -554,10 +554,12 @@ class Orchestrator:
         for executor in self.kalshi_executors:
             label = executor.trading_client.label
             try:
-                # Skip halted accounts
+                # Try to resume halted accounts before skipping
                 if executor.trading_client.is_halted:
-                    self.logger.info("kalshi_dispatch_skip_halted", label=label, market_id=signal.market_id)
-                    continue
+                    await executor.trading_client.check_and_resume()
+                    if executor.trading_client.is_halted:
+                        self.logger.info("kalshi_dispatch_skip_halted", label=label, market_id=signal.market_id)
+                        continue
 
                 sig_result = SignalResult(
                     estimated_prob=estimated_prob,

@@ -354,7 +354,7 @@ class KalshiClient:
         *,
         max_days: int = 30,
         min_volume: int = 50,
-        max_pages: int = 5,
+        max_pages: int = 15,
     ) -> List[KalshiMarket]:
         """Fetch open markets closing within *max_days*, filtered by volume.
 
