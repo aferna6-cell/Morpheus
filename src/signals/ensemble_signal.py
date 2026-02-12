@@ -385,7 +385,7 @@ class EnsembleSignal(Signal):
                     # Threshold markets (T-prefix) need less edge — one boundary,
                     # higher win rate. Brackets (B-prefix) need more — two edges.
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.05 if is_weather_threshold else 0.10
+                    min_edge = 0.03 if is_weather_threshold else 0.20
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -395,8 +395,9 @@ class EnsembleSignal(Signal):
                         else:
                             side = TradingSide.HOLD
 
-                        # Payout ratio filter
-                        if side != TradingSide.HOLD:
+                        # Payout ratio filter — skip for NOAA thresholds
+                        # ("obvious bet" strategy: buy near-certain at 85-95c)
+                        if side != TradingSide.HOLD and not is_weather_threshold:
                             entry_cost = market_price if side == TradingSide.BUY_YES else (1.0 - market_price)
                             payout_ratio = (1.0 - entry_cost) / entry_cost if entry_cost > 0 else 0
                             if payout_ratio < 0.12:

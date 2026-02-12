@@ -23,6 +23,12 @@ from .kalshi_trading_client import KalshiTradingClient, KalshiPosition
 from .risk import RiskManager
 from .utils import BotConfig
 
+_WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+
+
+def _is_weather_ticker(ticker: str) -> bool:
+    return ticker.upper().startswith(_WEATHER_PREFIXES)
+
 
 @dataclass
 class TrackedPosition:
@@ -75,6 +81,9 @@ class PositionMonitor:
         # Stale market cache: ticker -> (check_time, is_closed)
         self._market_status_cache: Dict[str, tuple[float, bool]] = {}
         self._market_status_ttl = 600.0  # 10 min cache
+
+        # Permanent cache: ticker -> market question text (titles never change)
+        self._market_question_cache: Dict[str, str] = {}
 
         # Callback to trigger engine rescans when an account resumes
         self._on_resume_callbacks: List = []
@@ -302,6 +311,100 @@ class PositionMonitor:
 
         return False
 
+    async def _get_market_question(self, ticker: str) -> Optional[str]:
+        """Fetch market title/question from Kalshi public API. Permanently cached."""
+        if ticker in self._market_question_cache:
+            return self._market_question_cache[ticker]
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._kalshi_base_url,
+                timeout=10.0,
+                headers={"Accept": "application/json"},
+            ) as client:
+                r = await client.get(f"/markets/{ticker}")
+                if r.status_code == 200:
+                    data = r.json()
+                    market = data.get("market", data)
+                    title = market.get("title") or market.get("question") or ""
+                    if title:
+                        self._market_question_cache[ticker] = title
+                        return title
+        except Exception as e:
+            self.logger.debug("market_question_fetch_error", ticker=ticker, error=str(e))
+
+        return None
+
+    async def _check_weather_repricing(
+        self,
+        client: KalshiTradingClient,
+        pos: KalshiPosition,
+        tracked: TrackedPosition,
+    ) -> Optional[str]:
+        """Check if NOAA forecast has shifted against our weather position.
+
+        Returns exit reason string if should exit, None if hold.
+        """
+        from .structured_data import compute_weather_probability
+
+        # Feature flag
+        weather_repricing_enabled = self.config.risk.get("weather_repricing_enabled", True)
+        if not weather_repricing_enabled:
+            return None
+
+        question = await self._get_market_question(pos.ticker)
+        if not question:
+            self.logger.debug("weather_repricing_no_question", ticker=pos.ticker)
+            return None
+
+        result = await compute_weather_probability(question, pos.ticker)
+
+        if result is None:
+            # Ambiguous NOAA signal — don't exit, let P&L thresholds handle it
+            self.logger.debug(
+                "weather_repricing_ambiguous",
+                ticker=pos.ticker,
+                msg="NOAA signal ambiguous, skipping repricing",
+            )
+            return None
+
+        p_yes, confidence, reasoning = result
+        entry_price = tracked.entry_price_cents / 100.0
+
+        # Compute current edge for our held side
+        if tracked.side == "yes":
+            current_edge = p_yes - entry_price
+        else:
+            current_edge = entry_price - p_yes
+
+        # Exit thresholds from config
+        exit_threshold = float(self.config.risk.get("weather_exit_threshold", -0.05))
+        exit_threshold_hc = float(self.config.risk.get("weather_exit_threshold_high_conf", -0.03))
+
+        # High-confidence NOAA signals get tighter exit threshold
+        threshold = exit_threshold_hc if confidence >= 0.85 else exit_threshold
+
+        self.logger.info(
+            "weather_repricing_check",
+            ticker=pos.ticker,
+            side=tracked.side,
+            entry_price=entry_price,
+            p_yes=round(p_yes, 4),
+            confidence=round(confidence, 3),
+            current_edge=round(current_edge, 4),
+            threshold=threshold,
+            should_exit=current_edge < threshold,
+            account=client.label,
+        )
+
+        if current_edge < threshold:
+            return (
+                f"Weather forecast exit: edge={current_edge:+.1%} < {threshold:+.1%} "
+                f"(NOAA p_yes={p_yes:.3f}, conf={confidence:.2f}, side={tracked.side})"
+            )
+
+        return None
+
     async def _check_position(
         self,
         client: KalshiTradingClient,
@@ -348,6 +451,19 @@ class PositionMonitor:
             )
             await self._exit_position(client, pos, tracked, "Market closed/settled (stale position)")
             return
+
+        # Weather repricing: exit if NOAA forecast shifted against our position
+        if _is_weather_ticker(pos.ticker):
+            repricing_reason = await self._check_weather_repricing(client, pos, tracked)
+            if repricing_reason:
+                await self._exit_position(client, pos, tracked, repricing_reason)
+                # Trigger engine rescans for potential opposite-side entry
+                for cb in self._on_resume_callbacks:
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+                return
 
         # Get current market price for P&L calculation
         # We don't have direct price access here, so use exposure-based estimate

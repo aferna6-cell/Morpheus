@@ -110,6 +110,9 @@ risk:
   prevent_retrade: true
   use_quarter_kelly: false          # using third-Kelly now
   max_bankroll_pct: 0.15            # 15% per trade (5% of $6.56 = $0.33, too small)
+  weather_repricing_enabled: true
+  weather_exit_threshold: -0.05     # exit when edge drops to -5%
+  weather_exit_threshold_high_conf: -0.03  # tighter exit for high-confidence NOAA signals
 
 timing:
   loop_interval_seconds: 60

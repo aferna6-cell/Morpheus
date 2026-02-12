@@ -1035,6 +1035,14 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
         # Default: any rain (>0 inches)
         return ("rain", 0.0)
 
+    # Snowfall threshold
+    if "snow" in q or "snowfall" in q:
+        m = re.search(r"(?:>|greater than|more than|exceed)\s*(\d+\.?\d*)", q)
+        if m:
+            return ("snow", float(m.group(1)))
+        # Default: any snow (>0 inches)
+        return ("snow", 0.0)
+
     return None
 
 
@@ -1159,7 +1167,7 @@ async def compute_weather_probability(
     # 5a. METAR actual observation check (same-day only)
     # If we have a real observation that already decisively resolves the market,
     # return near-certain probability. This is the strongest possible signal.
-    if lead_days == 0 and t_type not in ("rain",):
+    if lead_days == 0 and t_type not in ("rain", "snow"):
         obs = await _get_multi_station_observation(city)
         if obs and obs["station_count"] >= 1:
             observed_temp = obs["temperature_f"]
@@ -1304,6 +1312,104 @@ async def compute_weather_probability(
             )
             return None
 
+    # Snow fast-path: use NWS hourly PoP + temperature + shortForecast text
+    if t_type == "snow":
+        # Amount thresholds (>X inches) — too uncertain for heuristic, defer to LLM
+        if t_value > 0.0:
+            logger.info(
+                "snow_amount_threshold_defer",
+                city=city,
+                threshold_inches=t_value,
+                msg="Snow amount thresholds deferred to LLM",
+            )
+            return None
+
+        hourly_periods = await _get_nws_hourly_forecast(forecast_url)
+        if not hourly_periods:
+            return None
+
+        # Determine target date string
+        if target_date:
+            target_str = target_date.strftime("%Y-%m-%d")
+        else:
+            target_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Count hours with snow potential on target date
+        snow_hours = 0
+        total_hours = 0
+        for hp in hourly_periods:
+            start = hp.get("startTime", "")
+            if target_str not in start:
+                continue
+            total_hours += 1
+
+            temp = hp.get("temperature")
+            pop_data = hp.get("probabilityOfPrecipitation", {})
+            pop_val = pop_data.get("value") if isinstance(pop_data, dict) else None
+            short_fc = (hp.get("shortForecast") or "").lower()
+
+            # Snow likely if: (PoP >= 50% AND temp <= 34°F) OR "snow" in forecast text
+            temp_ok = isinstance(temp, (int, float)) and temp <= 34
+            pop_ok = pop_val is not None and pop_val >= 50
+            text_snow = "snow" in short_fc
+
+            if (pop_ok and temp_ok) or text_snow:
+                snow_hours += 1
+
+        if total_hours < 6:
+            # Not enough hourly data to be confident
+            return None
+
+        snow_fraction = snow_hours / total_hours
+
+        # Signal only on clear cases
+        if snow_fraction >= 0.4:
+            p_yes = min(0.95, snow_fraction * 1.1)
+            confidence = 0.70
+            reasoning = (
+                f"NOAA snow direct: {snow_hours}/{total_hours} hours with snow potential, "
+                f"fraction={snow_fraction:.2f}, p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+            )
+            logger.info(
+                "noaa_direct_signal",
+                city=city,
+                t_type="snow",
+                snow_hours=snow_hours,
+                total_hours=total_hours,
+                snow_fraction=round(snow_fraction, 3),
+                p_yes=round(p_yes, 4),
+                confidence=round(confidence, 3),
+                lead_days=lead_days,
+            )
+            return (p_yes, confidence, reasoning)
+        elif snow_fraction <= 0.05:
+            p_yes = 0.05
+            confidence = 0.75
+            reasoning = (
+                f"NOAA snow direct: {snow_hours}/{total_hours} hours with snow potential, "
+                f"fraction={snow_fraction:.2f}, p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+            )
+            logger.info(
+                "noaa_direct_signal",
+                city=city,
+                t_type="snow",
+                snow_hours=snow_hours,
+                total_hours=total_hours,
+                snow_fraction=round(snow_fraction, 3),
+                p_yes=round(p_yes, 4),
+                confidence=round(confidence, 3),
+                lead_days=lead_days,
+            )
+            return (p_yes, confidence, reasoning)
+        else:
+            logger.info(
+                "snow_ambiguous",
+                city=city,
+                snow_fraction=round(snow_fraction, 3),
+                msg="Snow fraction 5-40%, deferring to LLM",
+            )
+            return None
+
     # For day-0 markets, try hourly forecast first (sigma ~1.5F vs 2.5F)
     forecast_temp = None
     period_name = None
@@ -1430,12 +1536,13 @@ async def compute_weather_probability(
     # Clamp
     p_yes = max(0.001, min(0.999, p_yes))
 
-    # 8. Only return for confident cases: |forecast - threshold| / sigma > 1.0
-    # At z=1.0, probability is 84%/16% — clearly directional, not ambiguous.
-    # Previous threshold of 1.5 let the LLM handle cases it consistently gets wrong.
+    # 8. Only return for confident cases.
+    # Lowered from 1.0 to 0.7 — at z=0.7, probability is ~76%/24%.
+    # "Obvious bet" strategy: take many small edges on clearly directional
+    # thresholds rather than waiting for 84%+ certainty.
     if "bracket" not in t_type:
         z_score = abs(forecast_temp - t_value) / sigma
-        if z_score < 1.0:
+        if z_score < 0.7:
             logger.info(
                 "weather_direct_ambiguous",
                 city=city,
@@ -1465,22 +1572,25 @@ async def compute_weather_probability(
             edge_dist = 0  # forecast is inside the bracket
         z_from_edge = edge_dist / sigma
         z_score = abs(forecast_temp - t_value) / sigma
-        # Hard physical floor: forecast must be >=3°F from nearest bracket edge
-        # regardless of sigma. Prevents losses when actual temp is 1-2°F inside edge.
-        if edge_dist < 3.0:
+        # Hard physical floor: day-0 hourly (sigma<=1.5) uses 2°F floor,
+        # longer-lead (sigma>1.5) keeps 3°F floor.
+        floor = 2.0 if used_hourly else 3.0
+        if edge_dist < floor:
             logger.info(
                 "weather_bracket_physical_floor",
                 market_id=market_id,
                 forecast=forecast_temp,
                 bracket=f"{lower_b}-{upper_b}",
                 edge_dist=round(edge_dist, 1),
-                msg="Forecast within 3°F of bracket edge",
+                floor=floor,
+                msg=f"Forecast within {floor:.0f}°F of bracket edge",
             )
             return None
-        # Z-score gate: forecast must be >= 2.0 sigma from nearest bracket edge
-        # (raised from 1.5 — with sigma=1.5 hourly, requires 3.0°F; with
-        # sigma=2.5 day-1+, requires 5.0°F from edge)
-        if z_from_edge < 2.0:
+        # Z-score gate: day-0 hourly uses 1.5 sigma (lets more NOAA signals
+        # through instead of deferring to LLM which has no weather edge);
+        # longer-lead keeps 2.0 sigma.
+        z_gate = 1.5 if used_hourly else 2.0
+        if z_from_edge < z_gate:
             logger.info(
                 "weather_bracket_too_close",
                 market_id=market_id,
@@ -1488,7 +1598,8 @@ async def compute_weather_probability(
                 bracket=f"{lower_b}-{upper_b}",
                 edge_dist=round(edge_dist, 1),
                 z_from_edge=round(z_from_edge, 2),
-                msg="Forecast too close to bracket edge, deferring to LLM",
+                z_gate=z_gate,
+                msg=f"Forecast too close to bracket edge (z_gate={z_gate}), skipping",
             )
             return None
 

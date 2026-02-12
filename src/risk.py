@@ -192,6 +192,15 @@ class RiskManager:
                 effective_kelly = 0.50 if is_noaa else self.kelly_fraction
                 effective_bankroll_pct = 0.10 if is_noaa else self.max_bankroll_pct
 
+                # Brackets have two edges to defend and higher variance than
+                # thresholds.  Reduce Kelly by 1/2 for bracket markets (B-prefix).
+                # This turns half-Kelly into quarter-Kelly for NOAA brackets,
+                # and third-Kelly into sixth-Kelly for LLM brackets.
+                _mid = getattr(market, "id", "") or ""
+                if "-B" in _mid:
+                    effective_kelly *= 0.50
+                    effective_bankroll_pct *= 0.50
+
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, effective_kelly)
 

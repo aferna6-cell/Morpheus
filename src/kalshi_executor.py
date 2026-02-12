@@ -117,17 +117,23 @@ class KalshiExecutor:
                 execution_time=datetime.now(timezone.utc),
             )
 
-        # NOAA weather signals: cross the spread proportionally to improve fill rate.
-        # Dynamic: min(spread/2, 3c) — adapts to actual book depth instead of flat +2c.
-        if signal_source == "noaa_direct" and signal.confidence >= 0.70:
-            # Compute spread from yes_ask and no_ask if available
+        # Weather signals: cross the spread to improve fill rate.
+        # Thresholds get more aggressive crossing (higher fill priority).
+        # Brackets get moderate crossing (lower confidence in edge).
+        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+        is_weather = ticker.upper().startswith(_WEATHER_PREFIXES)
+        if is_weather and signal.confidence >= 0.60:
+            is_threshold = "-T" in ticker and "-B" not in ticker
             yes_ask = meta.get("kalshi_yes_ask")
             no_ask = meta.get("kalshi_no_ask")
             if yes_ask is not None and no_ask is not None:
                 spread_cents = max(0, round((yes_ask + no_ask - 1.0) * 100))
-                cross_amount = min(max(1, spread_cents // 2), 3)
+                # Thresholds: cross up to 5c (aggressive — NOAA has strong edge)
+                # Brackets: cross up to 3c (moderate — lower win rate)
+                max_cross = 5 if is_threshold else 3
+                cross_amount = min(max(1, spread_cents // 2), max_cross)
             else:
-                cross_amount = 2  # fallback to flat 2c if no spread data
+                cross_amount = 3 if is_threshold else 2
             original_price = price_cents
             price_cents = min(99, price_cents + cross_amount)
             self.logger.info(
@@ -138,6 +144,7 @@ class KalshiExecutor:
                 crossed_price=price_cents,
                 cross_amount=cross_amount,
                 spread_cents=spread_cents if yes_ask and no_ask else "unknown",
+                market_type="threshold" if is_threshold else "bracket",
             )
 
         # Calculate contracts: $1 per contract, so USD ≈ contracts
