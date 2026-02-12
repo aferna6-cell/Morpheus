@@ -515,7 +515,7 @@ class EnsembleSignal(Signal):
                         )
 
             # Stock index fast-path: Yahoo Finance real-time price + normal CDF
-            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100")
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,

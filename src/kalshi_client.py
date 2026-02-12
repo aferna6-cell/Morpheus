@@ -434,7 +434,7 @@ class KalshiClient:
 
         Returns dict with 'yes' and 'no' arrays of [price, quantity] levels.
         """
-        data = await self._get(f"/orderbook/v2/{ticker}")
+        data = await self._get(f"/markets/{ticker}/orderbook")
         return data.get("orderbook", data)
 
     async def fetch_market(self, ticker: str) -> Optional[KalshiMarket]:

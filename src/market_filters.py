@@ -34,8 +34,9 @@ _JUNK_TICKER_PREFIXES = [
     # Announcer/host mention markets — no LLM edge on what people will say
     "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION", "KXFOXNEWSMENTION",
     "KXMLBMENTION", "KXNHLMENTION", "KXMLSMENTION",
-    # Crypto price ranges (daily + intraday + bracket) — LLMs have no edge
-    "KXBTCD", "KXBTC15M", "KXBTC",
+    # Crypto price ranges (intraday + bracket) — LLMs have no edge
+    # KXBTCD/KXBTC: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
+    "KXBTC15M",
     "KXETHD", "KXETH15M", "KXETH",
     "KXDOGE", "KXDOGED", "KXSOLD", "KXSOLE", "KXSOL15M",
     "KXBNBD", "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",

@@ -65,7 +65,7 @@ async def get_structured_anchor(
     # Stock index markets — real-time price data
     if market_id:
         mid_upper = market_id.upper()
-        if any(mid_upper.startswith(p) for p in ("KXINXU", "KXINX-", "KXNASDAQ100")):
+        if any(mid_upper.startswith(p) for p in ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC")):
             return await _get_stock_index_context(question, market_id)
 
     return None
@@ -1816,6 +1816,8 @@ _INDEX_CONFIG: Dict[str, Dict[str, Any]] = {
     "KXINX": {"yahoo": "^GSPC", "name": "S&P 500", "daily_vol": 0.010, "trading_hours": 6.5},
     "KXNASDAQ100U": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
     "KXNASDAQ100": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
+    "KXBTCD": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
+    "KXBTC": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
 }
 
 # Cache for real-time prices: {symbol: (timestamp, price, prev_close)}
@@ -1969,10 +1971,16 @@ async def compute_stock_index_probability(
         return None
 
     # Compute remaining time
-    hours_left = _market_hours_remaining(parsed["close_hour_et"])
-    if hours_left is None or hours_left <= 0:
-        # Market closed — use last known price as final
-        hours_left = 0.001  # tiny epsilon to avoid division by zero
+    trading_hours = config["trading_hours"]
+    if trading_hours >= 24.0 and close_time is not None:
+        # 24h market (crypto): use close_time directly
+        remaining = (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
+        hours_left = max(remaining, 0.001)
+    else:
+        # NYSE hours: use ticker close hour
+        hours_left = _market_hours_remaining(parsed["close_hour_et"])
+        if hours_left is None or hours_left <= 0:
+            hours_left = 0.001  # tiny epsilon to avoid division by zero
 
     # Intraday volatility: daily_vol * sqrt(hours_left / trading_hours)
     daily_vol = config["daily_vol"]
