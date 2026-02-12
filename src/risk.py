@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import structlog
 
 from .markets import Market
-from .signals import SignalResult
+from .signals import SignalResult, TradingSide
 from .utils import BotConfig, calculate_kelly_fraction, load_json_state, save_json_state
 
 
@@ -160,25 +160,53 @@ class RiskManager:
                 return PositionSize(0.0, 0.0, RiskLevel.CRITICAL,
                                     "Trading halted — daily loss limit", 0.0)
 
-            # Check for forced size override (arb/copy signals set this)
+            # Check for forced size override (arb/copy/mm signals set this)
             forced_size = None
             meta = getattr(signal, "metadata", None)
             if isinstance(meta, dict):
                 forced_size = meta.get("_force_size_usd")
 
+            # MM signals MUST use forced sizing — fallback if missing/zero
+            strategy = meta.get("strategy") if isinstance(meta, dict) else None
+            if (forced_size is None or forced_size <= 0) and strategy == "mm":
+                self.logger.warning(
+                    "mm_forced_size_missing",
+                    market_id=getattr(market, "id", "?"),
+                    metadata_keys=list(meta.keys()) if isinstance(meta, dict) else [],
+                    force_val=meta.get("_force_size_usd") if isinstance(meta, dict) else None,
+                )
+                mm_cfg = getattr(self.config, "market_making", None) or {}
+                quote_size = int(mm_cfg.get("quote_size", 2)) if isinstance(mm_cfg, dict) else 2
+                # Estimate entry cost from market price
+                side_hint = getattr(signal, "recommended_side", None)
+                side_str = getattr(side_hint, "value", str(side_hint)) if side_hint else "buy_yes"
+                mp = signal.market_price or 0.5
+                ec = mp if side_str == "buy_yes" else (1.0 - mp)
+                forced_size = quote_size * ec
+
             market_price = signal.market_price
             if not market_price or market_price <= 0:
                 return PositionSize(0.0, 0.0, RiskLevel.HIGH, "Invalid market price", 0.0)
 
-            # Odds for Kelly
-            odds = (1.0 / market_price) - 1.0 if market_price > 0 else 0.0
+            # Odds for Kelly — must be relative to the side we're trading.
+            # BUY_YES pays (1/yes_price - 1); BUY_NO pays (1/no_price - 1).
+            if signal.recommended_side == TradingSide.BUY_NO:
+                no_price = 1.0 - market_price
+                odds = (1.0 / no_price) - 1.0 if no_price > 0 else 0.0
+            else:
+                odds = (1.0 / market_price) - 1.0 if market_price > 0 else 0.0
             if odds <= 0 and forced_size is None:
                 return PositionSize(0.0, 0.0, RiskLevel.HIGH, "Invalid odds", 0.0)
 
             if forced_size is not None and forced_size > 0:
-                # Use forced size directly (arb: mathematically sized)
+                # Use forced size directly (arb/mm: mathematically sized)
                 position_amount = float(forced_size)
                 kelly_f = 0.0
+                # Cap MM signals at max_inventory_usd from config
+                if strategy == "mm":
+                    mm_cfg = getattr(self.config, "market_making", None) or {}
+                    max_mm = float(mm_cfg.get("max_inventory_usd", 5.0)) if isinstance(mm_cfg, dict) else 5.0
+                    position_amount = min(position_amount, max_mm)
             else:
                 edge = abs(signal.edge)
 
@@ -190,7 +218,7 @@ class RiskManager:
                 signal_source = getattr(signal, "signal_source", None)
                 is_noaa = signal_source == "noaa_direct"
                 effective_kelly = 0.50 if is_noaa else self.kelly_fraction
-                effective_bankroll_pct = 0.10 if is_noaa else self.max_bankroll_pct
+                effective_bankroll_pct = self.max_bankroll_pct if is_noaa else 0.10
 
                 # Brackets have two edges to defend and higher variance than
                 # thresholds.  Reduce Kelly by 1/2 for bracket markets (B-prefix).
@@ -211,14 +239,16 @@ class RiskManager:
 
             # Minimum position floor: if Kelly says bet $0.20 but edge is real,
             # round up to 1 contract minimum. Don't waste LLM budget on dust trades.
+            # Skip for MM — spread-edge is inherently small (2-4%), not directional.
             side_val = getattr(signal.recommended_side, "value", str(signal.recommended_side))
             entry_cost = market_price if side_val == "buy_yes" else (1.0 - market_price)
-            min_actionable = max(entry_cost, 0.50)
-            if 0 < position_amount < min_actionable:
-                if abs(signal.edge) >= 0.05:  # Only round up if edge justifies it
-                    position_amount = min_actionable
-                else:
-                    position_amount = 0.0
+            if strategy != "mm":
+                min_actionable = max(entry_cost, 0.50)
+                if 0 < position_amount < min_actionable:
+                    if abs(signal.edge) >= 0.05:  # Only round up if edge justifies it
+                        position_amount = min_actionable
+                    else:
+                        position_amount = 0.0
 
             # Apply survival mode multiplier
             if self._survival_multiplier < 1.0:
@@ -275,6 +305,7 @@ class RiskManager:
                 kelly=kelly_f,
                 conviction=conv_str,
                 forced=forced_size is not None,
+                strategy=strategy,
             )
 
             return PositionSize(
@@ -299,17 +330,23 @@ class RiskManager:
         if position_size.risk_level == RiskLevel.CRITICAL:
             return False
 
-        # Edge check using net_edge (already accounts for fees/slippage)
-        net_edge = getattr(signal, "net_edge", None)
-        if net_edge is not None:
-            if abs(net_edge) < self.min_edge:
-                self.logger.debug(
-                    "trade_rejected_low_edge",
-                    market_id=market.id,
-                    net_edge=net_edge,
-                    min_edge=self.min_edge,
-                )
-                return False
+        # MM signals have spread-edge (not directional), contrarian already passed
+        # their own min_edge filter in the engine. Skip generic min_edge for both.
+        meta = getattr(signal, "metadata", None) or {}
+        strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
+
+        if strategy not in ("mm", "contrarian"):
+            # Edge check using net_edge (already accounts for fees/slippage)
+            net_edge = getattr(signal, "net_edge", None)
+            if net_edge is not None:
+                if abs(net_edge) < self.min_edge:
+                    self.logger.debug(
+                        "trade_rejected_low_edge",
+                        market_id=market.id,
+                        net_edge=net_edge,
+                        min_edge=self.min_edge,
+                    )
+                    return False
 
         # No conviction gating — all positive-edge trades approved
         # No closing-soon rejection — we trade same-day markets

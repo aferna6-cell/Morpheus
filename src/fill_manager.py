@@ -37,6 +37,7 @@ class RestingOrder:
     account_label: str = "default"
     strategy: str = "llm"
     signal_source: str = ""  # "noaa_direct", "llm", etc.
+    entry_edge: float = 0.0  # edge at time of entry (for trailing stops)
     filled_count: int = 0
     is_done: bool = False
 
@@ -57,6 +58,7 @@ class RestingOrder:
             "account_label": self.account_label,
             "strategy": self.strategy,
             "signal_source": self.signal_source,
+            "entry_edge": self.entry_edge,
             "filled_count": self.filled_count,
         }
 
@@ -72,6 +74,7 @@ class RestingOrder:
             account_label=d.get("account_label", "default"),
             strategy=d.get("strategy", "llm"),
             signal_source=d.get("signal_source", ""),
+            entry_edge=float(d.get("entry_edge", 0.0)),
             filled_count=d.get("filled_count", 0),
         )
 
@@ -88,6 +91,7 @@ class FillEvent:
     account_label: str
     strategy: str
     is_partial: bool = False
+    entry_edge: float = 0.0
 
 
 class FillManager:
@@ -118,6 +122,11 @@ class FillManager:
         self.total_filled = 0
         self.total_cancelled = 0
         self.total_partial = 0
+
+        # Daily fill rate tracking
+        self._daily_orders_placed = 0
+        self._daily_orders_filled = 0
+        self._daily_date = datetime.now(timezone.utc).date()
 
     def _load_state(self) -> None:
         """Load resting orders from disk."""
@@ -161,6 +170,7 @@ class FillManager:
         account_label: str = "default",
         strategy: str = "llm",
         signal_source: str = "",
+        entry_edge: float = 0.0,
     ) -> None:
         """Register an order for fill tracking."""
         self._resting[order_id] = RestingOrder(
@@ -173,7 +183,16 @@ class FillManager:
             account_label=account_label,
             strategy=strategy,
             signal_source=signal_source,
+            entry_edge=entry_edge,
         )
+        # Daily fill rate tracking — reset on new day
+        today = datetime.now(timezone.utc).date()
+        if today != self._daily_date:
+            self._daily_orders_placed = 0
+            self._daily_orders_filled = 0
+            self._daily_date = today
+        self._daily_orders_placed += 1
+
         self.logger.info(
             "order_tracked",
             order_id=order_id,
@@ -221,12 +240,17 @@ class FillManager:
         if not self._resting:
             return
 
-        # Build a set of currently open orders per account
+        # Build a set of currently open orders per account.
+        # Track which accounts we successfully queried — if an account's
+        # API call fails (network error, rate limit), we must NOT assume
+        # its resting orders are filled.
         open_orders_by_account: Dict[str, set] = {}
+        successful_accounts: set = set()
         for client in self.trading_clients:
             try:
                 orders = await client.get_open_orders()
                 open_orders_by_account[client.label] = {o.order_id for o in orders}
+                successful_accounts.add(client.label)
             except Exception as e:
                 self.logger.warning(
                     "fill_check_get_orders_failed",
@@ -243,14 +267,34 @@ class FillManager:
                 done_ids.append(order_id)
                 continue
 
+            # Skip orders for accounts where API call failed —
+            # we can't determine status, retry next cycle
+            if resting.account_label not in successful_accounts:
+                continue
+
             account_open = open_orders_by_account.get(resting.account_label, set())
 
             if order_id not in account_open:
-                # Order is no longer open — it either filled or was cancelled
-                # Assume filled (conservative: may need to check fill history)
+                # Order disappeared from open list — verify via fills API
+                # before declaring filled (could be cancelled by exchange)
+                was_filled = await self._verify_fill(order_id, resting)
+
                 resting.is_done = True
-                resting.filled_count = resting.count
                 done_ids.append(order_id)
+
+                if not was_filled:
+                    # No fill record — likely cancelled by exchange
+                    self.total_cancelled += 1
+                    self.logger.info(
+                        "order_cancelled_not_filled",
+                        order_id=order_id,
+                        ticker=resting.ticker,
+                        account=resting.account_label,
+                    )
+                    continue
+
+                # Confirmed fill
+                resting.filled_count = resting.count
                 self.total_filled += 1
 
                 fill_event = FillEvent(
@@ -261,7 +305,10 @@ class FillManager:
                     price_cents=resting.price_cents,
                     account_label=resting.account_label,
                     strategy=resting.strategy,
+                    entry_edge=resting.entry_edge,
                 )
+
+                self._daily_orders_filled += 1
 
                 self.logger.info(
                     "order_filled",
@@ -332,6 +379,29 @@ class FillManager:
             self._resting.pop(oid, None)
         if done_ids:
             self._save_state()
+
+        # Log daily fill rate
+        if self._daily_orders_placed > 0:
+            self.logger.info(
+                "fill_rate_daily",
+                placed=self._daily_orders_placed,
+                filled=self._daily_orders_filled,
+                rate=round(self._daily_orders_filled / self._daily_orders_placed, 3),
+            )
+
+    async def _verify_fill(self, order_id: str, resting: RestingOrder) -> bool:
+        """Check if a disappeared order was actually filled via fills API."""
+        for client in self.trading_clients:
+            if client.label == resting.account_label:
+                try:
+                    fills = await client.get_recent_fills(
+                        ticker=resting.ticker, limit=50,
+                    )
+                    return any(f["order_id"] == order_id for f in fills)
+                except Exception:
+                    # If fills API also fails, assume filled (safer than dropping)
+                    return True
+        return True  # No matching client — assume filled to be safe
 
     @property
     def pending_count(self) -> int:

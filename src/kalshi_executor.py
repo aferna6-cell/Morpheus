@@ -147,6 +147,59 @@ class KalshiExecutor:
                 market_type="threshold" if is_threshold else "bracket",
             )
 
+        # Non-weather spread crossing: index, contrarian, and high-edge generic signals.
+        # These were previously posting at the ask and expiring unfilled.
+        _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
+                           "KXSPY", "KXQQQ", "KXIWM", "KXDIA", "KXETHD", "KXETH")
+        net_edge_pre = getattr(signal, "net_edge", signal.edge)
+        strategy = meta.get("strategy", "standard")
+        is_index = not is_weather and any(ticker.upper().startswith(p) for p in _INDEX_PREFIXES)
+        is_contrarian = strategy == "contrarian"
+
+        if not is_weather:
+            cross_amount = 0
+            yes_ask = meta.get("kalshi_yes_ask")
+            no_ask = meta.get("kalshi_no_ask")
+            spread_cents = 0
+            if yes_ask is not None and no_ask is not None:
+                spread_cents = max(0, round((yes_ask + no_ask - 1.0) * 100))
+
+            if is_index and signal.confidence >= 0.60:
+                # Index signals: cross up to 3c
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 3)
+                else:
+                    cross_amount = 2
+            elif is_contrarian and abs(net_edge_pre) >= 0.10:
+                # Contrarian signals with 10%+ edge: cross up to 2c
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 2)
+                else:
+                    cross_amount = 1
+            elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.65:
+                # High-edge signals: cross 2c
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 2)
+                else:
+                    cross_amount = 2
+            elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.55:
+                # Moderate-edge signals: cross 1c
+                cross_amount = 1
+
+            if cross_amount > 0:
+                original_price = price_cents
+                price_cents = min(99, price_cents + cross_amount)
+                self.logger.info(
+                    "non_weather_spread_cross",
+                    ticker=ticker,
+                    side=side,
+                    original_price=original_price,
+                    crossed_price=price_cents,
+                    cross_amount=cross_amount,
+                    spread_cents=spread_cents if spread_cents else "unknown",
+                    signal_type="index" if is_index else "contrarian" if is_contrarian else "high_edge",
+                )
+
         # Calculate contracts: $1 per contract, so USD ≈ contracts
         # But we pay price_cents/100 per contract (cost = count * price / 100)
         entry_cost = price_cents / 100.0

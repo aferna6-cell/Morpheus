@@ -42,6 +42,7 @@ class TrackedPosition:
     strategy: str = "llm"
     order_id: str = ""
     account_label: str = "default"
+    entry_edge: float = 0.0  # edge at time of entry (for trailing stops)
 
 
 class PositionMonitor:
@@ -129,6 +130,7 @@ class PositionMonitor:
         strategy: str = "llm",
         order_id: str = "",
         account_label: str = "default",
+        entry_edge: float = 0.0,
     ) -> None:
         """Register a new position for monitoring."""
         key = f"{account_label}:{ticker}"
@@ -141,6 +143,7 @@ class PositionMonitor:
             strategy=strategy,
             order_id=order_id,
             account_label=account_label,
+            entry_edge=entry_edge,
         )
         self.logger.info(
             "position_tracked",
@@ -384,6 +387,18 @@ class PositionMonitor:
         # High-confidence NOAA signals get tighter exit threshold
         threshold = exit_threshold_hc if confidence >= 0.85 else exit_threshold
 
+        # Trailing stop: if edge has improved significantly since entry,
+        # tighten exit threshold to protect profit (lock in at break-even)
+        if tracked.entry_edge > 0 and current_edge > tracked.entry_edge + 0.15:
+            threshold = 0.0  # exit if edge drops below break-even
+            self.logger.info(
+                "weather_trailing_stop_tightened",
+                ticker=pos.ticker,
+                entry_edge=round(tracked.entry_edge, 4),
+                current_edge=round(current_edge, 4),
+                new_threshold=threshold,
+            )
+
         self.logger.info(
             "weather_repricing_check",
             ticker=pos.ticker,
@@ -505,9 +520,9 @@ class PositionMonitor:
             )
             return
 
-        # Exponential backoff: wait 5min, 15min, 45min between retries
+        # Linear backoff: 60s, 120s, 180s between retries (was 300, 900, 2700)
         if retry_count > 0:
-            backoff_seconds = 300 * (3 ** (retry_count - 1))  # 300, 900, 2700
+            backoff_seconds = 60 * retry_count  # 60, 120, 180
             elapsed = _time.monotonic() - last_attempt
             if elapsed < backoff_seconds:
                 return  # Not enough time has passed since last attempt

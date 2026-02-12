@@ -218,11 +218,11 @@ class BraveSearchSource:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(self.base_url, headers=headers, params=params)
                 if resp.status_code == 429:
-                    # Set 60s cooldown — all subsequent calls fall through to Google RSS
-                    self._cooldown_until = asyncio.get_event_loop().time() + 60.0
+                    # Set 120s cooldown — all subsequent calls fall through to Google RSS
+                    self._cooldown_until = asyncio.get_event_loop().time() + 120.0
                     structlog.get_logger().warning(
                         "brave_search_429_cooldown",
-                        cooldown_seconds=60,
+                        cooldown_seconds=120,
                     )
                     return []
                 resp.raise_for_status()
@@ -245,7 +245,7 @@ class BraveSearchSource:
             return articles
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                self._cooldown_until = asyncio.get_event_loop().time() + 60.0
+                self._cooldown_until = asyncio.get_event_loop().time() + 120.0
             structlog.get_logger().warning("brave_search_error", error=str(e))
             return []
         except Exception as e:
@@ -473,11 +473,11 @@ class NewsAggregator:
 
             result = unique[:self.max_articles_per_query]
 
-            # Fetch full article content for top 5 articles (increased from 3)
+            # Fetch full article content for top 3 articles (reduced from 5 — saves 10s worst-case)
             fetch_full = self.config.news.get("fetch_full_articles", True)
             if fetch_full and result:
                 max_article_chars = int(self.config.news.get("max_article_chars", 1500))
-                top_articles = result[:5]
+                top_articles = result[:3]
                 tasks = [
                     _fetch_article_text(a.url, timeout=5.0, max_chars=max_article_chars)
                     for a in top_articles

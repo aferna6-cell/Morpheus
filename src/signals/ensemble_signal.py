@@ -123,6 +123,7 @@ def calibrate_probability(
     yes_dampen: float = 0.15,
     floor: float = 0.05,
     ceiling: float = 0.95,
+    skip_mushy: bool = False,
 ) -> float:
     """Apply shrinkage toward 0.5 with asymmetric YES dampening.
 
@@ -130,6 +131,7 @@ def calibrate_probability(
     → 18-29% actual). NO predictions are well-calibrated. So:
     - Symmetric shrinkage toward 0.5 (baseline correction)
     - Asymmetric: pull YES-leaning predictions (p > 0.5) back toward 0.5
+    - Mushy-middle correction: remap 0.40-0.70 based on 200-market backtest
     - Leave NO-leaning predictions (p < 0.5) untouched
     """
     # Symmetric shrink toward 0.5
@@ -139,6 +141,19 @@ def calibrate_probability(
     if p > 0.5 and yes_dampen > 0:
         overshoot = p - 0.5
         p = 0.5 + overshoot * (1.0 - yes_dampen)
+
+    # Mushy-middle correction: empirical remap for 0.40-0.70
+    # 200-market backtest: predicted 40-50% → actual 27%, 50-60% → 18%, 60-70% → 29%
+    # LLM is systematically wrong here — predicted YES ≈ actual NO
+    # Maps: 0.40→0.28, 0.55→0.22 (worst), 0.70→0.30
+    if not skip_mushy and 0.40 <= p <= 0.70:
+        midpoint = 0.55
+        if p <= midpoint:
+            t = (p - 0.40) / (midpoint - 0.40)
+            p = 0.28 - t * 0.06  # 0.28 → 0.22
+        else:
+            t = (p - midpoint) / (0.70 - midpoint)
+            p = 0.22 + t * 0.08  # 0.22 → 0.30
 
     p = max(floor, min(ceiling, p))
     return round(p, 4)
@@ -515,7 +530,9 @@ class EnsembleSignal(Signal):
                         )
 
             # Stock index fast-path: Yahoo Finance real-time price + normal CDF
-            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC")
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+                                "KXETHD", "KXETH")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,
@@ -525,7 +542,8 @@ class EnsembleSignal(Signal):
                     p_yes, idx_confidence, idx_reasoning = idx_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-                    min_edge = 0.05  # 5% for index thresholds
+                    is_index_bracket = "-B" in market.id and "-T" not in market.id
+                    min_edge = 0.20 if is_index_bracket else 0.05
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -693,22 +711,37 @@ class EnsembleSignal(Signal):
             # Weighted average (falls back to simple average if no weights)
             p_yes_raw = weighted_average(model_predictions, self._model_weights)
 
-            # Model disagreement gate: if models diverge wildly, the signal
-            # is noise. Skip rather than averaging garbage.
+            # Model disagreement gate: if models diverge wildly, increase
+            # shrinkage rather than dropping the signal entirely. One model
+            # may be well-calibrated while the other is wrong.
+            _high_divergence = False
             if len(p_values) == 2:
                 divergence = abs(p_values[0] - p_values[1])
                 if divergence > 0.35:
-                    self.logger.warning(
-                        "ensemble_model_disagreement",
-                        market_id=market.id,
-                        divergence=round(divergence, 3),
-                        openai=round(p_values[0], 3),
-                        anthropic=round(p_values[1], 3),
-                    )
-                    return self._hold(
-                        market,
-                        f"Model disagreement too high ({divergence:.0%})",
-                    )
+                    if self._model_weights and len(self._model_weights) >= 2:
+                        # Use weighted average (already computed as p_yes_raw)
+                        # but increase shrinkage to compensate for uncertainty
+                        _high_divergence = True
+                        self.logger.info(
+                            "ensemble_high_divergence_weighted",
+                            market_id=market.id,
+                            divergence=round(divergence, 3),
+                            openai=round(p_values[0], 3),
+                            anthropic=round(p_values[1], 3),
+                        )
+                    else:
+                        # No weights available — fall back to dropping
+                        self.logger.warning(
+                            "ensemble_model_disagreement",
+                            market_id=market.id,
+                            divergence=round(divergence, 3),
+                            openai=round(p_values[0], 3),
+                            anthropic=round(p_values[1], 3),
+                        )
+                        return self._hold(
+                            market,
+                            f"Model disagreement too high ({divergence:.0%})",
+                        )
 
             # Log per-model predictions for future weight computation
             if model_predictions:
@@ -728,6 +761,8 @@ class EnsembleSignal(Signal):
                 mtype, MarketTypeCalibration()
             )
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
+            if _high_divergence:
+                total_shrink = min(0.50, total_shrink + 0.10)
             yes_dampen = 0.15  # base YES dampening
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
@@ -738,8 +773,10 @@ class EnsembleSignal(Signal):
 
             # Reduce calibration when structured data shows extreme confidence.
             # Hard FRED/NOAA data should override generic LLM overconfidence adjustments.
+            _skip_mushy = False  # set True when structured data overrides calibration
             if isinstance(structured_context, str):
                 if "FAR ABOVE" in structured_context or "FAR BELOW" in structured_context:
+                    _skip_mushy = True
                     total_shrink *= 0.15
                     yes_dampen = min(yes_dampen, 0.05)
                     self.logger.info(
@@ -748,6 +785,7 @@ class EnsembleSignal(Signal):
                         effective_shrink=round(total_shrink, 3),
                     )
                 elif "well above" in structured_context or "well below" in structured_context:
+                    _skip_mushy = True
                     total_shrink *= 0.50
                     yes_dampen = min(yes_dampen, 0.10)
                     self.logger.info(
@@ -776,6 +814,7 @@ class EnsembleSignal(Signal):
                 elif mtype == "weather" and "FAR OUTSIDE bracket range" in structured_context:
                     # NOAA forecast is 4°F+ from the bracket — genuine disagreement.
                     # Trust the data, reduce calibration to let the prediction through.
+                    _skip_mushy = True
                     total_shrink *= 0.25
                     yes_dampen = min(yes_dampen, 0.05)
                     self.logger.info(
@@ -788,6 +827,7 @@ class EnsembleSignal(Signal):
                 p_yes_raw,
                 shrink_strength=total_shrink,
                 yes_dampen=yes_dampen,
+                skip_mushy=_skip_mushy,
             )
 
             self.logger.info(
@@ -802,7 +842,7 @@ class EnsembleSignal(Signal):
             # Adversarial challenge: when p_yes is in the danger zone (35-75%)
             # and would result in BUY_YES, get a cheap second opinion
             raw_edge_preliminary = p_yes - market_price
-            if 0.20 <= p_yes <= 0.85 and raw_edge_preliminary > 0:
+            if 0.35 <= p_yes <= 0.70 and raw_edge_preliminary > 0:
                 p_yes = await self._challenge_estimate(market, p_yes, market_price)
 
             # Get metadata from whichever response succeeded
@@ -1074,13 +1114,14 @@ class EnsembleSignal(Signal):
 
 The market price is {market_price:.0%}. The forecaster wants to BUY YES.
 
-Your job: argue that the probability is LOWER than {p_yes:.0%}. Consider:
+Your job: critically evaluate whether {p_yes:.0%} is too high. Consider:
 - What could go wrong? What obstacles exist?
 - Is the forecaster anchored to a narrative?
 - What's the base rate for events like this?
 - Is the timeline realistic?
 
-Output JSON: {{"p_yes": <your lower estimate, float 0.0-1.0>, "reason": "why it's lower"}}"""
+If you believe the estimate is reasonable, output your own independent estimate (which may be similar).
+Output JSON: {{"p_yes": <your estimate, float 0.0-1.0>, "reason": "your reasoning"}}"""
 
         try:
             await self.rate_limiter.acquire()
@@ -1090,8 +1131,9 @@ Output JSON: {{"p_yes": <your lower estimate, float 0.0-1.0>, "reason": "why it'
                     {
                         "role": "system",
                         "content": (
-                            "You are a skeptical analyst. Your job is to find reasons "
-                            "why a probability estimate is too high. Output ONLY valid JSON."
+                            "You are a critical analyst. Evaluate whether a probability estimate "
+                            "is well-calibrated. If it's too high, explain why. If it seems "
+                            "reasonable, say so. Output ONLY valid JSON."
                         ),
                     },
                     {"role": "user", "content": challenge_prompt},
@@ -1116,8 +1158,11 @@ Output JSON: {{"p_yes": <your lower estimate, float 0.0-1.0>, "reason": "why it'
             challenge_p = float(data.get("p_yes", p_yes))
             challenge_p = max(0.01, min(0.99, challenge_p))
 
-            # Blend: 60% original, 40% challenge
-            blended = 0.60 * p_yes + 0.40 * challenge_p
+            # Only blend when challenger meaningfully disagrees (>15% lower)
+            if challenge_p < p_yes * 0.85:
+                blended = 0.75 * p_yes + 0.25 * challenge_p
+            else:
+                blended = p_yes  # Challenger agrees — keep original
 
             self.logger.info(
                 "adversarial_challenge",
@@ -1209,12 +1254,7 @@ the probability that this blocking factor prevents the event. This step
 is CRITICAL — LLMs systematically over-predict YES by 15-30 percentage
 points. Force yourself to seriously consider the NO case.
 
-STEP 5 — MARKET PRICE CHECK:
-The market currently prices this at {market_price:.0%}. Consider why the market might
-be right or wrong. Is there information the market is missing? Or are you missing
-something the market knows?
-
-STEP 6 — FINAL ESTIMATE:
+STEP 5 — FINAL ESTIMATE:
 Combine everything into your final p_yes. After completing the pre-mortem,
 is your estimate still the same? Adjust downward if the pre-mortem revealed
 strong reasons for NO that you initially overlooked.
@@ -1380,8 +1420,19 @@ Rules:
             if self.cost_tracker and not self.cost_tracker.check_budget():
                 return self._hold(market, "LLM budget exceeded")
 
-            # Get news context
-            news_articles = await self.news_aggregator.get_market_news(market)
+            # Get news context (cached per question to reduce Brave API calls)
+            cache_key = (market.question or "")[:100]
+            if hasattr(self, '_contrarian_news_cache'):
+                cached = self._contrarian_news_cache.get(cache_key)
+                if cached and (time.monotonic() - cached[0]) < 600:  # 10 min cache
+                    news_articles = cached[1]
+                else:
+                    news_articles = await self.news_aggregator.get_market_news(market)
+                    self._contrarian_news_cache[cache_key] = (time.monotonic(), news_articles)
+            else:
+                self._contrarian_news_cache = {}
+                news_articles = await self.news_aggregator.get_market_news(market)
+                self._contrarian_news_cache[cache_key] = (time.monotonic(), news_articles)
             news_context = self.news_aggregator.format_news_context(news_articles)
 
             # Build contrarian-specific prompt

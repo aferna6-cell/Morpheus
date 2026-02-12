@@ -200,7 +200,7 @@ class KalshiLLMEngine(BaseEngine):
         scan_days = self._max_resolution_days + 1  # weather look-ahead
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=scan_days,
-            min_volume=100,  # low threshold, we filter below
+            min_volume=500,  # weather markets pass regardless via lookahead path
         )
 
         self.logger.info("kalshi_llm_scan_raw", markets_fetched=len(kalshi_markets))
@@ -293,7 +293,7 @@ class KalshiLLMEngine(BaseEngine):
         # Evaluate remaining markets with ensemble (soonest-closing first)
         # Cap evaluations per scan to control LLM budget
         # 25 evals × ~$0.03/eval = $0.75/scan, well under $3/day budget
-        max_evals_per_scan = 25
+        max_evals_per_scan = 35  # fast-paths are $0, only LLM calls cost
         evals_this_scan = 0
         cooldown_skipped = 0
         now_ts = time.monotonic()
@@ -325,6 +325,21 @@ class KalshiLLMEngine(BaseEngine):
                                 ticker=km.ticker,
                                 elapsed=round(elapsed),
                                 msg="Re-evaluating weather market (forecast may have updated)",
+                            )
+                        else:
+                            cooldown_skipped += 1
+                            continue
+                    elif any(km.ticker.upper().startswith(p) for p in (
+                        "KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
+                        "KXSPY", "KXQQQ", "KXIWM", "KXDIA", "KXETHD", "KXETH",
+                    )):
+                        # Index fast-path: re-evaluate after 5 min (prices change fast, $0 LLM cost)
+                        if elapsed > 300:
+                            self.logger.info(
+                                "index_cooldown_override",
+                                ticker=km.ticker,
+                                elapsed=round(elapsed),
+                                msg="Re-evaluating index market (price may have moved)",
                             )
                         else:
                             cooldown_skipped += 1
