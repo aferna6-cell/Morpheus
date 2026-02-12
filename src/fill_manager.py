@@ -238,7 +238,7 @@ class FillManager:
         done_ids = []
         now = datetime.now(timezone.utc)
 
-        for order_id, resting in self._resting.items():
+        for order_id, resting in list(self._resting.items()):
             if resting.is_done:
                 done_ids.append(order_id)
                 continue

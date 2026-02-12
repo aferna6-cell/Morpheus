@@ -292,8 +292,8 @@ class KalshiLLMEngine(BaseEngine):
 
         # Evaluate remaining markets with ensemble (soonest-closing first)
         # Cap evaluations per scan to control LLM budget
-        # Increased from 8 to 15 to handle weather lookahead markets
-        max_evals_per_scan = 15
+        # 25 evals × ~$0.03/eval = $0.75/scan, well under $3/day budget
+        max_evals_per_scan = 25
         evals_this_scan = 0
         cooldown_skipped = 0
         now_ts = time.monotonic()

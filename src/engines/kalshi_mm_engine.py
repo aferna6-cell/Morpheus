@@ -142,9 +142,9 @@ class KalshiMMEngine(BaseEngine):
     async def _select_markets(self) -> None:
         """Find markets suitable for market making."""
         try:
-            all_markets = await self.kalshi_client.fetch_markets(
-                status="open",
-                limit=200,
+            all_markets = await self.kalshi_client.fetch_markets_by_close_date(
+                max_days=7,
+                min_volume=100,
             )
         except Exception as e:
             self.logger.error("mm_fetch_markets_error", error=str(e))
@@ -188,6 +188,13 @@ class KalshiMMEngine(BaseEngine):
             return m.volume * spread
 
         candidates.sort(key=_mm_score, reverse=True)
+
+        self.logger.info(
+            "mm_scan_complete",
+            total_fetched=len(all_markets),
+            candidates=len(candidates),
+            selected=min(len(candidates), self._max_markets),
+        )
 
         # Keep top N
         selected = candidates[: self._max_markets]
