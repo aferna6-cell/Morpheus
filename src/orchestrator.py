@@ -623,6 +623,7 @@ class Orchestrator:
                             price_cents=kalshi_trade.price_cents,
                             account_label=label,
                             strategy=signal.engine,
+                            signal_source=signal.metadata.get("signal_source", ""),
                         )
 
                 if kalshi_trade and kalshi_trade.was_successful and first_result is None:

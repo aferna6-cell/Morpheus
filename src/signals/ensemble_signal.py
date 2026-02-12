@@ -38,7 +38,7 @@ from ..cost_tracker import CostTracker
 from ..markets import Market
 from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
 from ..news import NewsAggregator
-from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability
+from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability, get_recent_forecast_changes
 from ..utils import BotConfig, RateLimiter
 from .base import Signal, SignalResult, TradingSide
 
@@ -355,6 +355,22 @@ class EnsembleSignal(Signal):
             market_price = market.midpoint_price
             if market_price is None:
                 return self._hold(market, "No market price available")
+
+            # Weather forecast change detection: if NWS revised forecast by >=2°F,
+            # invalidate any cached result for this market so we re-evaluate with fresh data.
+            if mtype == "weather":
+                recent_changes = get_recent_forecast_changes(since_seconds=600.0)
+                if recent_changes:
+                    ck_weather = _cache_key(market.id, market.question or "", market_price)
+                    cached_weather = self._cache.get(ck_weather)
+                    if cached_weather is not None:
+                        # Force cache miss — re-evaluate with updated forecast
+                        self._cache._store.pop(ck_weather, None)
+                        self.logger.info(
+                            "weather_cache_invalidated",
+                            market_id=market.id,
+                            changes=len(recent_changes),
+                        )
 
             # Weather fast-path: bypass LLM when NOAA data is unambiguous
             if mtype == "weather":

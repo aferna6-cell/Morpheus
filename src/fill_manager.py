@@ -36,8 +36,15 @@ class RestingOrder:
     placed_at: datetime
     account_label: str = "default"
     strategy: str = "llm"
+    signal_source: str = ""  # "noaa_direct", "llm", etc.
     filled_count: int = 0
     is_done: bool = False
+
+    @property
+    def is_weather(self) -> bool:
+        """Check if this is a weather market order."""
+        t = self.ticker.upper()
+        return any(t.startswith(p) for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP"))
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +56,7 @@ class RestingOrder:
             "placed_at": self.placed_at.isoformat(),
             "account_label": self.account_label,
             "strategy": self.strategy,
+            "signal_source": self.signal_source,
             "filled_count": self.filled_count,
         }
 
@@ -63,6 +71,7 @@ class RestingOrder:
             placed_at=datetime.fromisoformat(d["placed_at"]),
             account_label=d.get("account_label", "default"),
             strategy=d.get("strategy", "llm"),
+            signal_source=d.get("signal_source", ""),
             filled_count=d.get("filled_count", 0),
         )
 
@@ -151,6 +160,7 @@ class FillManager:
         price_cents: int,
         account_label: str = "default",
         strategy: str = "llm",
+        signal_source: str = "",
     ) -> None:
         """Register an order for fill tracking."""
         self._resting[order_id] = RestingOrder(
@@ -162,6 +172,7 @@ class FillManager:
             placed_at=datetime.now(timezone.utc),
             account_label=account_label,
             strategy=strategy,
+            signal_source=signal_source,
         )
         self.logger.info(
             "order_tracked",
@@ -292,8 +303,11 @@ class FillManager:
 
             else:
                 # Still resting — check if stale
+                # Weather orders get shorter timeout (5 min) — weather markets
+                # move fast and capital should be freed for better opportunities.
                 age = (now - resting.placed_at).total_seconds()
-                if age > self.stale_timeout:
+                effective_timeout = 300.0 if resting.is_weather else self.stale_timeout
+                if age > effective_timeout:
                     # Cancel stale order
                     for client in self.trading_clients:
                         if client.label == resting.account_label:
@@ -307,6 +321,8 @@ class FillManager:
                                     order_id=order_id,
                                     ticker=resting.ticker,
                                     age_seconds=age,
+                                    timeout=effective_timeout,
+                                    is_weather=resting.is_weather,
                                     account=resting.account_label,
                                 )
                             break

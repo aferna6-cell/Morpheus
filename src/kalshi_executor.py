@@ -117,17 +117,27 @@ class KalshiExecutor:
                 execution_time=datetime.now(timezone.utc),
             )
 
-        # NOAA weather signals: cross the spread by 2c to improve fill rate.
-        # These are data-driven (z>1), high-confidence bets where getting filled
-        # at 2c worse is much better than not getting filled at all.
+        # NOAA weather signals: cross the spread proportionally to improve fill rate.
+        # Dynamic: min(spread/2, 3c) — adapts to actual book depth instead of flat +2c.
         if signal_source == "noaa_direct" and signal.confidence >= 0.70:
-            price_cents = min(99, price_cents + 2)
+            # Compute spread from yes_ask and no_ask if available
+            yes_ask = meta.get("kalshi_yes_ask")
+            no_ask = meta.get("kalshi_no_ask")
+            if yes_ask is not None and no_ask is not None:
+                spread_cents = max(0, round((yes_ask + no_ask - 1.0) * 100))
+                cross_amount = min(max(1, spread_cents // 2), 3)
+            else:
+                cross_amount = 2  # fallback to flat 2c if no spread data
+            original_price = price_cents
+            price_cents = min(99, price_cents + cross_amount)
             self.logger.info(
                 "weather_spread_cross",
                 ticker=ticker,
                 side=side,
-                original_price=price_cents - 2,
+                original_price=original_price,
                 crossed_price=price_cents,
+                cross_amount=cross_amount,
+                spread_cents=spread_cents if yes_ask and no_ask else "unknown",
             )
 
         # Calculate contracts: $1 per contract, so USD ≈ contracts

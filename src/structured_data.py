@@ -621,12 +621,93 @@ _CITY_ALIASES: Dict[str, str] = {
     "mia": "miami",
 }
 
+# ICAO station codes for METAR/ASOS observations per city
+# Multiple stations per metro area for multi-station averaging
+_CITY_STATIONS: Dict[str, List[str]] = {
+    "new york": ["KJFK", "KLGA", "KEWR"],
+    "los angeles": ["KLAX", "KBUR", "KSNA"],
+    "chicago": ["KORD", "KMDW"],
+    "houston": ["KIAH", "KHOU"],
+    "phoenix": ["KPHX", "KDVT"],
+    "philadelphia": ["KPHL"],
+    "san antonio": ["KSAT"],
+    "san diego": ["KSAN"],
+    "dallas": ["KDFW", "KDAL"],
+    "san jose": ["KSJC"],
+    "austin": ["KAUS"],
+    "jacksonville": ["KJAX"],
+    "fort worth": ["KDFW"],
+    "columbus": ["KCMH"],
+    "charlotte": ["KCLT"],
+    "indianapolis": ["KIND"],
+    "san francisco": ["KSFO", "KOAK"],
+    "seattle": ["KSEA"],
+    "denver": ["KDEN", "KAPA"],
+    "washington": ["KDCA", "KIAD"],
+    "nashville": ["KBNA"],
+    "oklahoma city": ["KOKC"],
+    "el paso": ["KELP"],
+    "boston": ["KBOS"],
+    "portland": ["KPDX"],
+    "las vegas": ["KLAS"],
+    "memphis": ["KMEM"],
+    "louisville": ["KSDF"],
+    "baltimore": ["KBWI"],
+    "milwaukee": ["KMKE"],
+    "albuquerque": ["KABQ"],
+    "tucson": ["KTUS"],
+    "fresno": ["KFAT"],
+    "miami": ["KMIA", "KFLL"],
+    "atlanta": ["KATL"],
+    "detroit": ["KDTW"],
+    "minneapolis": ["KMSP"],
+    "tampa": ["KTPA"],
+    "new orleans": ["KMSY"],
+    "cleveland": ["KCLE"],
+    "kansas city": ["KMCI"],
+    "st. louis": ["KSTL"],
+    "pittsburgh": ["KPIT"],
+    "cincinnati": ["KCVG"],
+    "raleigh": ["KRDU"],
+    "salt lake city": ["KSLC"],
+}
+
+# City-specific sigma (forecast error std dev in °F) for hourly forecasts.
+# Coastal cities have tighter forecasts; inland/desert cities are more variable.
+_CITY_SIGMA_HOURLY: Dict[str, float] = {
+    # Coastal — marine layer stabilizes temps (sigma ~1.0-1.2°F)
+    "san francisco": 1.0, "san diego": 1.0, "los angeles": 1.2,
+    "miami": 1.2, "tampa": 1.2, "seattle": 1.2, "portland": 1.2,
+    "boston": 1.3, "new york": 1.3,
+    # Moderate — humid subtropical or maritime-influenced (sigma ~1.3-1.5°F)
+    "houston": 1.3, "new orleans": 1.3, "jacksonville": 1.3,
+    "atlanta": 1.4, "charlotte": 1.4, "raleigh": 1.4,
+    "philadelphia": 1.4, "washington": 1.4, "baltimore": 1.4,
+    "nashville": 1.4, "memphis": 1.4, "louisville": 1.4,
+    "cleveland": 1.4, "pittsburgh": 1.4, "detroit": 1.4,
+    "chicago": 1.5, "milwaukee": 1.5, "indianapolis": 1.5,
+    "columbus": 1.5, "cincinnati": 1.5, "st. louis": 1.5,
+    "kansas city": 1.5, "fort worth": 1.5,
+    # High variability — inland/desert/elevation (sigma ~1.8-2.5°F)
+    "dallas": 1.6, "austin": 1.6, "san antonio": 1.6,
+    "oklahoma city": 1.8, "minneapolis": 1.8,
+    "denver": 2.2, "salt lake city": 2.0, "albuquerque": 2.0,
+    "el paso": 2.0, "las vegas": 2.0, "phoenix": 2.2,
+    "tucson": 2.0, "fresno": 1.8,
+    "san jose": 1.3,
+}
+_DEFAULT_SIGMA_HOURLY = 1.5  # fallback for unlisted cities
+
 # Cache for NWS gridpoint URLs (permanent — grid doesn't change)
 _gridpoint_cache: Dict[str, str] = {}
 
-# Cache for forecast data (1 hour TTL)
+# Cache for forecast data (10 min TTL — tighter for same-day accuracy)
 _forecast_cache: Dict[str, Tuple[float, Dict]] = {}
-_FORECAST_CACHE_TTL = 1200.0  # 20 min — catch NOAA forecast updates faster
+_FORECAST_CACHE_TTL = 600.0  # 10 min — catch NOAA forecast updates faster
+
+# Cache for METAR observations (5 min TTL — observations update hourly but we want freshness)
+_observation_cache: Dict[str, Tuple[float, Dict]] = {}
+_OBSERVATION_CACHE_TTL = 300.0  # 5 min
 
 
 def _parse_city(question: str) -> Optional[str]:
@@ -798,6 +879,113 @@ async def _get_nws_hourly_forecast(forecast_url: str) -> Optional[List[Dict]]:
     return None
 
 
+async def _get_metar_observation(city: str) -> Optional[Dict]:
+    """Fetch latest METAR/ASOS observation for a city.
+
+    Returns dict with 'temperature_f', 'timestamp', 'station' or None.
+    Uses NWS observations API (free, no key needed).
+    """
+    stations = _CITY_STATIONS.get(city)
+    if not stations:
+        return None
+
+    # Try each station, return first successful
+    for station in stations:
+        cache_key = station
+        now = time.monotonic()
+        if cache_key in _observation_cache:
+            cached_time, cached_data = _observation_cache[cache_key]
+            if now - cached_time < _OBSERVATION_CACHE_TTL:
+                return cached_data
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0,
+                headers={"User-Agent": "(Morpheus Trading Bot, contact@example.com)"},
+            ) as client:
+                resp = await client.get(
+                    f"https://api.weather.gov/stations/{station}/observations/latest"
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    props = data.get("properties", {})
+                    temp_c = props.get("temperature", {}).get("value")
+                    if temp_c is not None and isinstance(temp_c, (int, float)):
+                        temp_f = temp_c * 9.0 / 5.0 + 32.0
+                        obs_time = props.get("timestamp", "")
+                        result = {
+                            "temperature_f": round(temp_f, 1),
+                            "timestamp": obs_time,
+                            "station": station,
+                        }
+                        _observation_cache[cache_key] = (now, result)
+                        return result
+        except Exception as e:
+            logger.debug("metar_fetch_error", station=station, error=str(e))
+            continue
+
+    return None
+
+
+async def _get_multi_station_observation(city: str) -> Optional[Dict]:
+    """Fetch observations from multiple stations and average them.
+
+    Returns dict with 'temperature_f' (averaged), 'station_count', 'stations'.
+    Averaging reduces noise from any single station's microclimate.
+    """
+    stations = _CITY_STATIONS.get(city, [])
+    if not stations:
+        return None
+
+    temps: List[float] = []
+    station_names: List[str] = []
+
+    for station in stations[:3]:  # max 3 stations
+        cache_key = station
+        now = time.monotonic()
+        cached = _observation_cache.get(cache_key)
+        if cached and now - cached[0] < _OBSERVATION_CACHE_TTL:
+            temps.append(cached[1]["temperature_f"])
+            station_names.append(station)
+            continue
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0,
+                headers={"User-Agent": "(Morpheus Trading Bot, contact@example.com)"},
+            ) as client:
+                resp = await client.get(
+                    f"https://api.weather.gov/stations/{station}/observations/latest"
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    props = data.get("properties", {})
+                    temp_c = props.get("temperature", {}).get("value")
+                    if temp_c is not None and isinstance(temp_c, (int, float)):
+                        temp_f = round(temp_c * 9.0 / 5.0 + 32.0, 1)
+                        obs_data = {
+                            "temperature_f": temp_f,
+                            "timestamp": props.get("timestamp", ""),
+                            "station": station,
+                        }
+                        _observation_cache[station] = (now, obs_data)
+                        temps.append(temp_f)
+                        station_names.append(station)
+        except Exception:
+            continue
+
+    if not temps:
+        return None
+
+    avg_temp = sum(temps) / len(temps)
+    return {
+        "temperature_f": round(avg_temp, 1),
+        "station_count": len(temps),
+        "stations": station_names,
+        "temps": temps,
+    }
+
+
 def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
     """Parse weather market question for threshold type and value.
 
@@ -854,11 +1042,15 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
 # NWS forecast error sigma (empirical, Fahrenheit) and direct probability
 # ---------------------------------------------------------------------------
 
-# NWS forecast error standard deviation by lead time in days
-_NWS_SIGMA = {0: 2.5, 1: 2.5, 2: 3.5, 3: 5.5}
+# NWS forecast error standard deviation by lead time in days (12h forecast)
+# Day-0 uses city-specific hourly sigma; this is for 12h fallback
+_NWS_SIGMA_12H = {0: 2.5, 1: 2.5, 2: 3.5, 3: 5.5}
 
 # Track previous forecast temps for change detection
 _previous_forecasts: Dict[str, float] = {}  # "city:period" -> temp
+
+# Track forecast changes for cache invalidation
+_forecast_change_events: List[Dict] = []  # recent change events
 
 
 def _norm_cdf(x: float, mu: float, sigma: float) -> float:
@@ -868,13 +1060,47 @@ def _norm_cdf(x: float, mu: float, sigma: float) -> float:
 
 
 def weather_forecast_changed(city: str, period_name: str, new_temp: float) -> bool:
-    """Return True if forecast temp shifted >= 1F from last seen value."""
+    """Return True if forecast temp shifted >= 2F from last seen value.
+
+    When a significant change is detected, logs it for potential cache invalidation.
+    """
     key = f"{city}:{period_name}"
     prev = _previous_forecasts.get(key)
     _previous_forecasts[key] = new_temp
     if prev is None:
         return False
-    return abs(new_temp - prev) >= 1.0
+    delta = abs(new_temp - prev)
+    if delta >= 2.0:
+        _forecast_change_events.append({
+            "city": city,
+            "period": period_name,
+            "old_temp": prev,
+            "new_temp": new_temp,
+            "delta": delta,
+            "time": time.monotonic(),
+        })
+        # Keep only last 20 events
+        while len(_forecast_change_events) > 20:
+            _forecast_change_events.pop(0)
+        logger.info(
+            "weather_forecast_change_detected",
+            city=city,
+            period=period_name,
+            old_temp=prev,
+            new_temp=new_temp,
+            delta=round(delta, 1),
+        )
+        return True
+    return False
+
+
+def get_recent_forecast_changes(since_seconds: float = 600.0) -> List[Dict]:
+    """Return forecast change events in the last N seconds.
+
+    Used by ensemble_signal to invalidate cache when forecasts shift.
+    """
+    cutoff = time.monotonic() - since_seconds
+    return [e for e in _forecast_change_events if e["time"] > cutoff]
 
 
 async def compute_weather_probability(
@@ -912,7 +1138,14 @@ async def compute_weather_probability(
     else:
         lead_days = 0
 
-    sigma = _NWS_SIGMA.get(min(lead_days, 3), 5.0)
+    # City-specific sigma for hourly forecasts; fall back to 12h sigma for longer lead
+    if lead_days == 0:
+        sigma = _CITY_SIGMA_HOURLY.get(city, _DEFAULT_SIGMA_HOURLY)
+    else:
+        base_12h = _NWS_SIGMA_12H.get(min(lead_days, 3), 5.0)
+        # Scale 12h sigma by city's relative variability
+        city_hourly = _CITY_SIGMA_HOURLY.get(city, _DEFAULT_SIGMA_HOURLY)
+        sigma = base_12h * (city_hourly / _DEFAULT_SIGMA_HOURLY)
 
     # 5. Fetch NWS forecast
     coords = _WEATHER_CITIES.get(city)
@@ -922,6 +1155,87 @@ async def compute_weather_probability(
     forecast_url = await _get_nws_gridpoint_url(coords[0], coords[1])
     if not forecast_url:
         return None
+
+    # 5a. METAR actual observation check (same-day only)
+    # If we have a real observation that already decisively resolves the market,
+    # return near-certain probability. This is the strongest possible signal.
+    if lead_days == 0 and t_type not in ("rain",):
+        obs = await _get_multi_station_observation(city)
+        if obs and obs["station_count"] >= 1:
+            observed_temp = obs["temperature_f"]
+            # For HIGH temp markets: if observed temp already exceeds threshold,
+            # the high for the day is AT LEAST this value (can only go higher).
+            if "high" in t_type and "bracket" not in t_type:
+                if "below" in t_type:
+                    # "<X" market: YES means temp stays below X
+                    if observed_temp >= t_value:
+                        # Already at/above threshold — YES is impossible
+                        p_yes = 0.02
+                        logger.info(
+                            "metar_decisive_signal",
+                            city=city, observed=observed_temp,
+                            threshold=t_value, t_type=t_type,
+                            stations=obs["stations"], p_yes=p_yes,
+                        )
+                        return (p_yes, 0.95, f"METAR decisive: observed {observed_temp:.0f}°F >= threshold {t_value:.0f}°F, high_below impossible ({obs['stations']})")
+                else:
+                    # ">X" market: YES means temp exceeds X
+                    if observed_temp >= t_value + 1.0:
+                        # Already above threshold — YES is near-certain
+                        p_yes = 0.98
+                        logger.info(
+                            "metar_decisive_signal",
+                            city=city, observed=observed_temp,
+                            threshold=t_value, t_type=t_type,
+                            stations=obs["stations"], p_yes=p_yes,
+                        )
+                        return (p_yes, 0.95, f"METAR decisive: observed {observed_temp:.0f}°F > threshold {t_value:.0f}°F ({obs['stations']})")
+
+            # For LOW temp markets with observations:
+            # We can't be as decisive since low hasn't fully occurred yet,
+            # but if current temp is already well below threshold, it helps.
+            if "low" in t_type and "bracket" not in t_type:
+                if "below" not in t_type:
+                    # ">X" low: YES means low stays above X
+                    if observed_temp < t_value - 1.0:
+                        # Current temp already below threshold — low likely below too
+                        p_yes = 0.05
+                        logger.info(
+                            "metar_decisive_signal",
+                            city=city, observed=observed_temp,
+                            threshold=t_value, t_type=t_type,
+                            stations=obs["stations"], p_yes=p_yes,
+                        )
+                        return (p_yes, 0.90, f"METAR: current {observed_temp:.0f}°F already below low threshold {t_value:.0f}°F ({obs['stations']})")
+
+            # For bracket markets: if observed temp is far outside bracket, decisive
+            if "bracket" in t_type:
+                q_lower = question.lower()
+                m_br = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)°", q_lower)
+                if m_br:
+                    bracket_lo = float(m_br.group(1))
+                    bracket_hi = float(m_br.group(2))
+                    if "high" in t_type and observed_temp > bracket_hi + 2.0:
+                        # High already exceeds bracket upper bound
+                        p_yes = 0.03
+                        logger.info(
+                            "metar_bracket_decisive",
+                            city=city, observed=observed_temp,
+                            bracket=f"{bracket_lo}-{bracket_hi}",
+                            stations=obs["stations"],
+                        )
+                        return (p_yes, 0.92, f"METAR: observed {observed_temp:.0f}°F already above bracket {bracket_lo}-{bracket_hi}°F ({obs['stations']})")
+
+            # Even if not decisive, use observation to refine forecast
+            # Blend: when we have an observation, reduce sigma (more certain)
+            if obs["station_count"] >= 2:
+                sigma *= 0.85  # multi-station observation tightens estimate
+                logger.debug(
+                    "metar_sigma_tightened",
+                    city=city, observed=observed_temp,
+                    station_count=obs["station_count"],
+                    sigma=round(sigma, 2),
+                )
 
     # Rain fast-path: use NWS hourly probabilityOfPrecipitation (PoP)
     if t_type == "rain":
@@ -1024,21 +1338,22 @@ async def compute_weather_probability(
                     if hour_str.isdigit() and int(hour_str) < 12:
                         overnight_temps.append(float(t))
 
+            hourly_sigma = _CITY_SIGMA_HOURLY.get(city, _DEFAULT_SIGMA_HOURLY)
             if "high" in t_type and today_temps:
                 forecast_temp = max(today_temps)
                 period_name = f"Today hourly max ({len(today_temps)} hours)"
-                sigma = 1.5
+                sigma = hourly_sigma
                 used_hourly = True
             elif "low" in t_type and overnight_temps:
                 forecast_temp = min(overnight_temps)
                 period_name = f"Overnight hourly min ({len(overnight_temps)} hours)"
-                sigma = 1.5
+                sigma = hourly_sigma
                 used_hourly = True
             elif "low" in t_type and today_temps:
                 # Fallback: use today's min if no overnight data yet
                 forecast_temp = min(today_temps)
                 period_name = f"Today hourly min ({len(today_temps)} hours)"
-                sigma = 1.5
+                sigma = hourly_sigma
                 used_hourly = True
 
     # Fallback to standard 12-hour forecast
