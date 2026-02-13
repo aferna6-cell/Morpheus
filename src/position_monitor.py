@@ -646,10 +646,13 @@ class PositionMonitor:
             return
 
         if result:
-            # Calculate approximate P&L
+            # Calculate P&L from actual sell price
             entry_cost = tracked.entry_price_cents * tracked.count / 100.0
-            exit_cost = pos.market_exposure
-            pnl = exit_cost - entry_cost
+            if tracked.side == "yes":
+                exit_proceeds = sell_price * tracked.count / 100.0
+            else:
+                exit_proceeds = (100 - sell_price) * tracked.count / 100.0
+            pnl = exit_proceeds - entry_cost
 
             self._tracked.pop(key, None)
             self._exit_retries.pop(key, None)  # Clear retry tracker on success

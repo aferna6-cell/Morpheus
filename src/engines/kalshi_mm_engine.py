@@ -427,14 +427,9 @@ class KalshiMMEngine(BaseEngine):
             state.inventory -= count
             state.total_filled_no += count
 
-        # Track adverse selection: one-sided fills = informed traders picking us off
-        if state.total_filled_yes > 0 and state.total_filled_no == 0:
-            state.consecutive_one_sided = state.total_filled_yes
-        elif state.total_filled_no > 0 and state.total_filled_yes == 0:
-            state.consecutive_one_sided = state.total_filled_no
-        else:
-            # Both sides have fills — decay counter instead of resetting
-            state.consecutive_one_sided = max(0, state.consecutive_one_sided - 1)
+        # Track adverse selection via net fill imbalance
+        imbalance = state.total_filled_yes - state.total_filled_no
+        state.consecutive_one_sided = abs(imbalance)
 
         # Drop market if adverse selection detected (3+ one-sided fills)
         if state.consecutive_one_sided >= 3:

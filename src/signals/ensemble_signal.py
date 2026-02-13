@@ -754,7 +754,7 @@ class EnsembleSignal(Signal):
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.10  # base YES dampening (0.15→0.05 Wave 10→0.10 Wave 13)
+            yes_dampen = 0.15  # base YES dampening (0.10→0.15 Wave 14: YES 14% WR)
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
                 yes_dampen += type_cal.yes_boost
@@ -1388,6 +1388,9 @@ Rules:
                     p_yes, jc_conf, jc_reasoning = claims_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+
+                    if net_edge < 0.03:  # Min edge gate (same as weather thresholds)
+                        return None
 
                     if raw_edge > 0:
                         side = TradingSide.BUY_YES

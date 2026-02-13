@@ -3,7 +3,7 @@
 
 strategy:
   enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]
-  min_edge: 0.03                    # 3% minimum edge (was 5%)
+  min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.33              # third-Kelly (was quarter)
   max_position_pct: 0.05            # 5% of bankroll cap
   max_position_size: 3.0            # $3 max (scaled for ~$6.56 bankroll)

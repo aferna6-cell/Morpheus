@@ -40,6 +40,7 @@ class KalshiMarket:
     yes_ask: float = 0.0
     no_bid: float = 0.0
     no_ask: float = 0.0
+    subtitle: str = ""
 
 
 class KalshiClient:
@@ -220,6 +221,7 @@ class KalshiClient:
             yes_ask=yes_ask,
             no_bid=no_bid,
             no_ask=no_ask,
+            subtitle=m.get("subtitle", ""),
         )
 
     async def fetch_markets(

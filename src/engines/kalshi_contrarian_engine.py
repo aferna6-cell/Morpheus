@@ -51,7 +51,7 @@ def _kalshi_to_market(km: KalshiMarket) -> Market:
     return Market(
         id=km.ticker,
         question=km.title,
-        description="",
+        description=km.subtitle,
         category=km.category,
         end_date=km.close_time,
         volume_24h=float(km.volume_24h),

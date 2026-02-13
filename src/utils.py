@@ -312,5 +312,5 @@ def calculate_kelly_fraction(edge: float, odds: float, fraction: float = 1.0) ->
     if odds <= 0:
         return 0.0
 
-    kelly = edge / odds
+    kelly = edge * (1.0 + odds) / odds
     return max(0.0, kelly * fraction)
