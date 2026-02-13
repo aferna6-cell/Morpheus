@@ -388,10 +388,11 @@ class EnsembleSignal(Signal):
                     # Compute edge directly (no calibration needed — this is hard data)
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
                     # Threshold markets (T-prefix) need less edge — one boundary,
                     # higher win rate. Brackets (B-prefix) need more — two edges.
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.03 if is_weather_threshold else 0.25
+                    min_edge = 0.08 if is_weather_threshold else 0.25
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -473,6 +474,7 @@ class EnsembleSignal(Signal):
                     p_yes, jc_confidence, jc_reasoning = claims_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
                     min_edge = 0.08
 
                     if net_edge >= min_edge:
@@ -533,6 +535,7 @@ class EnsembleSignal(Signal):
                     p_yes, idx_confidence, idx_reasoning = idx_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
                     is_index_bracket = "-B" in market.id and "-T" not in market.id
                     min_edge = 0.20 if is_index_bracket else 0.05
 
@@ -810,7 +813,7 @@ class EnsembleSignal(Signal):
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.25  # base YES dampening (0.15→0.25 Wave 16: YES 21% WR, -$17.97)
+            yes_dampen = 0.35  # base YES dampening (0.25→0.35 Wave 21: predicted avg 0.50 vs actual 0.25)
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
                 yes_dampen += type_cal.yes_boost
@@ -911,6 +914,7 @@ class EnsembleSignal(Signal):
             # Compute edge
             raw_edge = p_yes - market_price
             net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+            net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
 
             # Category min edge + price-tiered adjustment
             # Extreme prices (>85% or <15%) need higher edge to be meaningful
@@ -941,10 +945,10 @@ class EnsembleSignal(Signal):
             # - Makers buying NO earn +1.25% vs +0.77% for YES
             # - Longshot YES (<30c) lose 60%+ of investment
             #
-            # Wave 16 base: buy_yes needs 10% min edge
+            # Wave 21: buy_yes needs 15% min edge (was 10%, still 21% WR -$17.97)
             # Wave 20: add longshot premium + NO-side discount
             if side == TradingSide.BUY_YES:
-                yes_min_edge = 0.10  # base YES edge gate
+                yes_min_edge = 0.15  # base YES edge gate (raised Wave 21)
                 # Longshot premium: cheap YES contracts are the biggest
                 # money pit in prediction markets (Whelan: lose 60%+)
                 # Check deep longshots first (order matters!)

@@ -127,7 +127,7 @@ class RiskManager:
         base_max_exp = self.config.strategy.get("max_total_exposure", 10.0)
 
         self.max_position_size = min(base_max_pos * scale_factor, total_balance * 0.15)
-        self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
+        self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.65)  # Wave 21: 80%→65%
 
         # Scale contrarian position limit
         contrarian_cfg = getattr(self.config, "contrarian", None) or {}
@@ -230,6 +230,13 @@ class RiskManager:
                 _mid = getattr(market, "id", "") or ""
                 if "-B" in _mid:
                     effective_kelly *= 0.50
+
+                # Simultaneous-bet Kelly adjustment (Meister arXiv 2412.14144):
+                # With N concurrent bets, reduce individual Kelly fractions to
+                # avoid over-leveraging. ~10% reduction per open position.
+                n_open = len(current_positions)
+                if n_open > 0:
+                    effective_kelly /= (1 + 0.1 * n_open)
 
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, effective_kelly)

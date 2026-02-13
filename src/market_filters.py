@@ -68,6 +68,9 @@ _JUNK_TICKER_PREFIXES = [
     "KXEOWEEK", "KXTRUMPACT", "KXEXECORDER",
     # Person-specific mention markets
     "KXVLADTENEV", "KXELONMENTION",
+    # Economics — Wave 21: 0W/4L -$3.08, near-efficient (Becker: 0.17pp gap)
+    # Block until FRED sniping engine is validated
+    "KXCPI", "KXCPICORE", "KXCPICOREYOY", "KXCPIYOY", "KXEGGS",
 ]
 
 

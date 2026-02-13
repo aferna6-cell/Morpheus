@@ -226,6 +226,9 @@ class CapitalManager:
         engine: str = "unknown",
     ) -> None:
         """Add a new position to track."""
+        # Wave 21: track which market_ids already have CLV entries
+        # to prevent duplicate logging on re-adds
+        _already_tracked = market_id in self._positions
         self._positions[market_id] = OpenPosition(
             market_id=market_id,
             ticker=ticker,
@@ -239,17 +242,19 @@ class CapitalManager:
         )
 
         # Log CLV entry with market type, signal_source, engine for per-dimension tracking
-        self._log_clv_entry(
-            market_id=market_id,
-            ticker=ticker,
-            platform=platform,
-            entry_probability=entry_probability,
-            entry_market_price=entry_price,
-            direction=side,
-            market_type=market_type,
-            signal_source=signal_source,
-            engine=engine,
-        )
+        # Only log on first add — re-adds (e.g. scan cycle re-dispatch) must not duplicate
+        if not _already_tracked:
+            self._log_clv_entry(
+                market_id=market_id,
+                ticker=ticker,
+                platform=platform,
+                entry_probability=entry_probability,
+                entry_market_price=entry_price,
+                direction=side,
+                market_type=market_type,
+                signal_source=signal_source,
+                engine=engine,
+            )
 
         self._save_state()
         self.logger.info(

@@ -682,28 +682,30 @@ _CITY_STATIONS: Dict[str, List[str]] = {
 # City-specific sigma (forecast error std dev in °F) for hourly forecasts.
 # Coastal cities have tighter forecasts; inland/desert cities are more variable.
 _CITY_SIGMA_HOURLY: Dict[str, float] = {
-    # Coastal — marine layer stabilizes temps (sigma ~1.0-1.2°F)
-    "san francisco": 1.0, "san diego": 1.0, "los angeles": 1.2,
-    "miami": 1.2, "tampa": 1.2, "seattle": 1.2, "portland": 1.2,
-    "boston": 1.3, "new york": 1.3,
-    # Moderate — humid subtropical or maritime-influenced (sigma ~1.3-1.5°F)
-    "houston": 1.3, "new orleans": 1.3, "jacksonville": 1.3,
-    "atlanta": 1.4, "charlotte": 1.4, "raleigh": 1.4,
-    "philadelphia": 1.4, "washington": 1.4, "baltimore": 1.4,
-    "nashville": 1.4, "memphis": 1.4, "louisville": 1.4,
-    "cleveland": 1.4, "pittsburgh": 1.4, "detroit": 1.4,
-    "chicago": 1.5, "milwaukee": 1.5, "indianapolis": 1.5,
-    "columbus": 1.5, "cincinnati": 1.5, "st. louis": 1.5,
-    "kansas city": 1.5, "fort worth": 1.5,
-    # High variability — inland/desert/elevation (sigma ~1.8-2.5°F)
-    "dallas": 1.6, "austin": 1.6, "san antonio": 1.6,
-    "oklahoma city": 1.8, "minneapolis": 1.8,
-    "denver": 2.2, "salt lake city": 2.0, "albuquerque": 2.0,
-    "el paso": 2.0, "las vegas": 2.0, "phoenix": 2.2,
-    "tucson": 2.0, "fresno": 1.8,
-    "san jose": 1.3,
+    # Wave 21: All values increased 30% — NOAA direct was 16.7% WR (-$3.82)
+    # because overconfident sigma led to extreme CDF probs that passed z-gate
+    # Coastal — marine layer stabilizes temps
+    "san francisco": 1.3, "san diego": 1.3, "los angeles": 1.6,
+    "miami": 1.6, "tampa": 1.6, "seattle": 1.6, "portland": 1.6,
+    "boston": 1.7, "new york": 1.7,
+    # Moderate — humid subtropical or maritime-influenced
+    "houston": 1.7, "new orleans": 1.7, "jacksonville": 1.7,
+    "atlanta": 1.8, "charlotte": 1.8, "raleigh": 1.8,
+    "philadelphia": 1.8, "washington": 1.8, "baltimore": 1.8,
+    "nashville": 1.8, "memphis": 1.8, "louisville": 1.8,
+    "cleveland": 1.8, "pittsburgh": 1.8, "detroit": 1.8,
+    "chicago": 2.0, "milwaukee": 2.0, "indianapolis": 2.0,
+    "columbus": 2.0, "cincinnati": 2.0, "st. louis": 2.0,
+    "kansas city": 2.0, "fort worth": 2.0,
+    # High variability — inland/desert/elevation
+    "dallas": 2.1, "austin": 2.1, "san antonio": 2.1,
+    "oklahoma city": 2.3, "minneapolis": 2.3,
+    "denver": 2.9, "salt lake city": 2.6, "albuquerque": 2.6,
+    "el paso": 2.6, "las vegas": 2.6, "phoenix": 2.9,
+    "tucson": 2.6, "fresno": 2.3,
+    "san jose": 1.7,
 }
-_DEFAULT_SIGMA_HOURLY = 1.5  # fallback for unlisted cities
+_DEFAULT_SIGMA_HOURLY = 2.0  # fallback for unlisted cities (was 1.5)
 
 # Cache for NWS gridpoint URLs (permanent — grid doesn't change)
 _gridpoint_cache: Dict[str, str] = {}
@@ -1582,14 +1584,19 @@ async def compute_weather_probability(
             )
             return None
 
+        # Compute cumulative daily rain probability (not just max hourly)
+        p_no_rain = 1.0
+        for pop in pop_values:
+            p_no_rain *= (1.0 - pop / 100.0)
+        p_yes_cumulative = 1.0 - p_no_rain
+
         # Confidence gate: only signal when clearly raining or clearly dry
-        if max_pop >= 80 or max_pop <= 15:
-            p_yes = max_pop / 100.0
-            p_yes = max(0.001, min(0.999, p_yes))
-            confidence = 0.85 if (max_pop >= 90 or max_pop <= 5) else 0.70
+        if p_yes_cumulative >= 0.80 or p_yes_cumulative <= 0.15:
+            p_yes = max(0.001, min(0.999, p_yes_cumulative))
+            confidence = 0.85 if (p_yes_cumulative >= 0.90 or p_yes_cumulative <= 0.05) else 0.70
             reasoning = (
-                f"NOAA rain direct: NWS max PoP={max_pop:.0f}% across {len(pop_values)} hours, "
-                f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+                f"NOAA rain direct: cumulative p_rain={p_yes_cumulative:.3f} (max hourly PoP={max_pop:.0f}%) "
+                f"across {len(pop_values)} hours, p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
             )
             logger.info(
                 "noaa_direct_signal",
@@ -1751,7 +1758,7 @@ async def compute_weather_probability(
         p_yes = max(0.001, min(0.999, p_yes))
         z_score = abs(max_wind - t_value) / wind_sigma
 
-        if z_score < 0.7:
+        if z_score < 1.0:  # Wave 21: raised from 0.7
             logger.info(
                 "wind_ambiguous",
                 city=city,
@@ -2153,7 +2160,7 @@ async def compute_weather_probability(
     # thresholds rather than waiting for 84%+ certainty.
     if "bracket" not in t_type:
         z_score = abs(forecast_temp - t_value) / sigma
-        if z_score < 0.7:
+        if z_score < 1.0:  # Wave 21: raised from 0.7 (NOAA direct 16.7% WR at 0.7)
             logger.info(
                 "weather_direct_ambiguous",
                 city=city,

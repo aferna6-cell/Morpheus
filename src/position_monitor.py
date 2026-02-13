@@ -479,7 +479,7 @@ class PositionMonitor:
             "weather_repricing_check",
             ticker=pos.ticker,
             side=tracked.side,
-            entry_price=entry_price,
+            entry_price=tracked.entry_price_cents / 100.0,
             p_yes=round(p_yes, 4),
             confidence=round(confidence, 3),
             current_edge=round(current_edge, 4),
