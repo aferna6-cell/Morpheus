@@ -44,6 +44,7 @@ class TrackedPosition:
     account_label: str = "default"
     entry_edge: float = 0.0  # edge at time of entry (for trailing stops)
     close_time: Optional[datetime] = None  # market close time (for dynamic max hold)
+    signal_source: str = ""  # "noaa_direct", "llm", "yahoo_direct"
 
 
 class PositionMonitor:
@@ -137,6 +138,7 @@ class PositionMonitor:
         account_label: str = "default",
         entry_edge: float = 0.0,
         close_time: Optional[datetime] = None,
+        signal_source: str = "",
     ) -> None:
         """Register a new position for monitoring."""
         key = f"{account_label}:{ticker}"
@@ -151,6 +153,7 @@ class PositionMonitor:
             account_label=account_label,
             entry_edge=entry_edge,
             close_time=close_time,
+            signal_source=signal_source,
         )
         self.logger.info(
             "position_tracked",
@@ -574,8 +577,16 @@ class PositionMonitor:
         side = "yes" if pos.count > 0 else "no"
         count = abs(pos.count)
 
-        # Aggressive limit price to ensure fill
-        sell_price = 1 if side == "yes" else 99
+        # Smart exit pricing: cross spread by 3c instead of posting at extreme 1c/99c
+        yes_price = await self._get_current_yes_price(pos.ticker)
+        if yes_price is not None:
+            if side == "yes":
+                sell_price = max(1, int(yes_price * 100) - 3)
+            else:
+                no_price = 1.0 - yes_price
+                sell_price = max(1, int(no_price * 100) - 3)
+        else:
+            sell_price = 1 if side == "yes" else 99  # fallback
 
         self.logger.info(
             "exiting_position",
@@ -607,6 +618,9 @@ class PositionMonitor:
                     error=str(e),
                 )
                 self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
+                # Permanently skip this position — let market settle naturally
+                self._known_closed.add(key)
+                self._save_known_closed()
                 return
             # Detect market_closed — Kalshi will settle automatically, stop retrying
             if "market_closed" in error_str or "market closed" in error_str:

@@ -754,7 +754,7 @@ class EnsembleSignal(Signal):
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.05  # base YES dampening (reduced from 0.15, Wave 10)
+            yes_dampen = 0.10  # base YES dampening (0.15→0.05 Wave 10→0.10 Wave 13)
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
                 yes_dampen += type_cal.yes_boost
@@ -926,6 +926,7 @@ class EnsembleSignal(Signal):
             # Attach extras for downstream
             result.net_edge = net_edge  # type: ignore[attr-defined]
             result.conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"  # type: ignore[attr-defined]
+            result.signal_source = "llm"  # type: ignore[attr-defined]
 
             self.logger.info(
                 "ensemble_signal",

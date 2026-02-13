@@ -46,6 +46,7 @@ class TradeLogger:
         entry_probability: Optional[float] = None,
         market_price: Optional[float] = None,
         account_label: Optional[str] = None,
+        signal_source: Optional[str] = None,
     ) -> None:
         """Log a successfully placed order with CLV tracking fields."""
         self._write({
@@ -64,6 +65,7 @@ class TradeLogger:
             # CLV tracking fields
             "entry_probability": entry_probability,  # our model's prediction
             "market_price_at_entry": market_price,   # market price when we entered
+            "signal_source": signal_source,
         })
 
     def log_order_failed(

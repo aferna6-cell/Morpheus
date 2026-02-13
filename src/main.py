@@ -154,6 +154,7 @@ async def run(
                     account_label=event.account_label,
                     entry_edge=getattr(event, "entry_edge", 0.0),
                     close_time=getattr(event, "close_time", None),
+                    signal_source=getattr(event, "signal_source", ""),
                 )
             fill_manager.on_fill(_on_fill)
 

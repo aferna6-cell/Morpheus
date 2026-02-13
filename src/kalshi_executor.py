@@ -183,6 +183,12 @@ class KalshiExecutor:
                     cross_amount = min(max(1, spread_cents // 2), 2)
                 else:
                     cross_amount = 2
+            elif strategy == "market_making" and signal.confidence >= 0.60:
+                # MM: cross 1-2c to improve fill rate
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 2)
+                else:
+                    cross_amount = 1
             elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.55:
                 # Moderate-edge signals: cross 1c
                 cross_amount = 1
@@ -290,6 +296,7 @@ class KalshiExecutor:
         if is_success:
             # Get entry probability for CLV tracking
             entry_probability = signal.estimated_prob if hasattr(signal, "estimated_prob") else entry_cost
+            signal_source = getattr(signal, "signal_source", None) or meta.get("signal_source", "llm")
 
             trade_logger.log_order_placed(
                 platform="kalshi",
@@ -305,6 +312,7 @@ class KalshiExecutor:
                 entry_probability=entry_probability,
                 market_price=entry_cost,
                 account_label=self.trading_client.label,
+                signal_source=signal_source,
             )
         else:
             trade_logger.log_order_failed(
