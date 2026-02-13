@@ -345,9 +345,9 @@ MARKET_TYPE_CALIBRATION: Dict[str, MarketTypeCalibration] = {
     # Physical outcomes / coin flips — LLM has zero edge
     "coin_flip":   MarketTypeCalibration(skip=True, min_edge=0.10),
     # Trump/volatile actors — LLM underestimates chaos; require higher edge
-    "wild_card":   MarketTypeCalibration(extra_shrink=0.05, yes_boost=-0.10, no_dampen=0.0, min_edge=0.07),
-    # Politics — LLM has some edge here (decent backtest), lower threshold
-    "politics":    MarketTypeCalibration(extra_shrink=0.0, yes_boost=-0.08, no_dampen=0.10, min_edge=0.04),
+    "wild_card":   MarketTypeCalibration(extra_shrink=0.05, yes_boost=0.10, no_dampen=0.0, min_edge=0.07),
+    # Politics — mild extra YES dampening (universal YES-overconfidence applies)
+    "politics":    MarketTypeCalibration(extra_shrink=0.0, yes_boost=0.05, no_dampen=0.10, min_edge=0.04),
     # Economics — data-driven, LLM does well with structured economic data
     "economics":   MarketTypeCalibration(extra_shrink=0.20, yes_boost=0.15, no_dampen=0.05, min_edge=0.08),
     # Normal markets — asymmetric correction based on backtest data

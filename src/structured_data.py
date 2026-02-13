@@ -1049,6 +1049,20 @@ def _parse_weather_threshold(question: str) -> Optional[Tuple[str, float]]:
         # Default: any snow (>0 inches)
         return ("snow", 0.0)
 
+    # Wind speed threshold
+    if "wind" in q:
+        m = re.search(r"(?:>|greater than|more than|exceed)\s*(\d+\.?\d*)", q)
+        if m:
+            return ("wind", float(m.group(1)))
+        m = re.search(r"(?:<|less than|under|below)\s*(\d+\.?\d*)", q)
+        if m:
+            return ("wind_below", float(m.group(1)))
+        m = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)\s*mph", q)
+        if m:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            return ("wind_bracket", (lo + hi) / 2)
+        return None
+
     return None
 
 
@@ -1071,6 +1085,17 @@ def _norm_cdf(x: float, mu: float, sigma: float) -> float:
     """Normal CDF using math.erfc (no scipy needed)."""
     z = (x - mu) / sigma
     return 0.5 * math.erfc(-z / math.sqrt(2))
+
+
+def _parse_nws_wind_speed(wind_str: str) -> Optional[float]:
+    """Parse NWS wind speed '15 mph' or '10 to 20 mph' → average mph."""
+    if not wind_str or wind_str == "?":
+        return None
+    m = re.search(r"(\d+)\s*to\s*(\d+)", wind_str)
+    if m:
+        return (float(m.group(1)) + float(m.group(2))) / 2
+    m = re.search(r"(\d+)", wind_str)
+    return float(m.group(1)) if m else None
 
 
 def weather_forecast_changed(city: str, period_name: str, new_temp: float) -> bool:
@@ -1416,6 +1441,81 @@ async def compute_weather_probability(
             )
             return None
 
+    # Wind speed fast-path: use NWS hourly windSpeed field
+    if t_type in ("wind", "wind_below", "wind_bracket"):
+        hourly_periods = await _get_nws_hourly_forecast(forecast_url)
+        if not hourly_periods:
+            return None
+
+        if target_date:
+            target_str = target_date.strftime("%Y-%m-%d")
+        else:
+            target_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        wind_speeds: List[float] = []
+        for hp in hourly_periods:
+            start = hp.get("startTime", "")
+            if target_str not in start:
+                continue
+            ws = _parse_nws_wind_speed(hp.get("windSpeed", ""))
+            if ws is not None:
+                wind_speeds.append(ws)
+
+        if not wind_speeds:
+            return None
+
+        max_wind = max(wind_speeds)
+        avg_wind = sum(wind_speeds) / len(wind_speeds)
+        wind_sigma = 4.0  # empirical NWS wind forecast error (~4 mph)
+
+        if t_type == "wind":
+            # ">X mph" threshold
+            p_yes = 1.0 - _norm_cdf(t_value, max_wind, wind_sigma)
+        elif t_type == "wind_below":
+            # "<X mph" threshold
+            p_yes = _norm_cdf(t_value, max_wind, wind_sigma)
+        else:
+            # wind_bracket — t_value is midpoint
+            bracket_half = 2.5  # assume ~5 mph bracket width
+            p_yes = (_norm_cdf(t_value + bracket_half, avg_wind, wind_sigma)
+                     - _norm_cdf(t_value - bracket_half, avg_wind, wind_sigma))
+
+        p_yes = max(0.001, min(0.999, p_yes))
+        z_score = abs(max_wind - t_value) / wind_sigma
+
+        if z_score < 0.7:
+            logger.info(
+                "wind_ambiguous",
+                city=city,
+                max_wind=max_wind,
+                threshold=t_value,
+                z_score=round(z_score, 2),
+                msg="Wind near threshold, deferring to LLM",
+            )
+            return None
+
+        confidence = min(0.90, 0.5 + z_score * 0.15)
+        reasoning = (
+            f"NOAA wind direct: NWS max wind={max_wind:.0f} mph, "
+            f"avg={avg_wind:.0f} mph across {len(wind_speeds)} hours, "
+            f"threshold={t_value:.0f} mph, sigma={wind_sigma:.0f}, "
+            f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+        )
+
+        logger.info(
+            "noaa_direct_signal",
+            city=city,
+            t_type=t_type,
+            max_wind=max_wind,
+            avg_wind=round(avg_wind, 1),
+            threshold=t_value,
+            p_yes=round(p_yes, 4),
+            confidence=round(confidence, 3),
+            lead_days=lead_days,
+        )
+
+        return (p_yes, confidence, reasoning)
+
     # For day-0 markets, try hourly forecast first (sigma ~1.5F vs 2.5F)
     forecast_temp = None
     period_name = None
@@ -1735,7 +1835,7 @@ def _parse_city_from_ticker(ticker: str) -> Optional[str]:
     # Extract 2-4 char city code after KXHIGH/KXHIGHT/KXLOW/KXLOWT
     t = ticker.upper()
     code = None
-    for prefix in ("KXHIGHT", "KXHIGH", "KXLOWT", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP"):
+    for prefix in ("KXHIGHT", "KXHIGH", "KXLOWT", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND"):
         if t.startswith(prefix):
             rest = t[len(prefix):]
             # Extract code before the dash (e.g., "SFO" from "SFO-26FEB10-B56.5")
@@ -1818,11 +1918,59 @@ _INDEX_CONFIG: Dict[str, Dict[str, Any]] = {
     "KXNASDAQ100": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
     "KXBTCD": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
     "KXBTC": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
+    # ETH — Ethereum (same pattern as BTC)
+    "KXETHD": {"yahoo": "ETH-USD", "name": "Ethereum", "daily_vol": 0.040, "trading_hours": 24.0},
+    "KXETH": {"yahoo": "ETH-USD", "name": "Ethereum", "daily_vol": 0.040, "trading_hours": 24.0},
+    # SPY/QQQ/IWM/DIA — ETF mirrors of existing index configs
+    "KXSPY": {"yahoo": "^GSPC", "name": "S&P 500 (SPY)", "daily_vol": 0.010, "trading_hours": 6.5},
+    "KXQQQ": {"yahoo": "^NDX", "name": "NASDAQ 100 (QQQ)", "daily_vol": 0.013, "trading_hours": 6.5},
+    "KXIWM": {"yahoo": "^RUT", "name": "Russell 2000 (IWM)", "daily_vol": 0.012, "trading_hours": 6.5},
+    "KXDIA": {"yahoo": "^DJI", "name": "Dow Jones (DIA)", "daily_vol": 0.009, "trading_hours": 6.5},
 }
 
 # Cache for real-time prices: {symbol: (timestamp, price, prev_close)}
 _index_price_cache: Dict[str, Tuple[float, float, float]] = {}
 _INDEX_PRICE_CACHE_TTL = 60.0  # 60 seconds
+
+# Cache for realized volatility: {symbol: (timestamp, vol)}
+_realized_vol_cache: Dict[str, Tuple[float, float]] = {}
+_REALIZED_VOL_CACHE_TTL = 3600.0  # 1 hour
+
+
+async def _fetch_realized_volatility(yahoo_symbol: str) -> Optional[float]:
+    """Fetch 10-day realized volatility from Yahoo Finance daily bars.
+
+    Returns annualized daily vol (stdev of log returns) or None on failure.
+    Cached for 1 hour.
+    """
+    now = time.monotonic()
+    cached = _realized_vol_cache.get(yahoo_symbol)
+    if cached and now - cached[0] < _REALIZED_VOL_CACHE_TTL:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+                params={"interval": "1d", "range": "10d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code != 200:
+                return None
+
+            closes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+            closes = [c for c in closes if c is not None]
+            if len(closes) < 3:
+                return None
+
+            returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+            mean_r = sum(returns) / len(returns)
+            var = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+            vol = math.sqrt(var)
+            _realized_vol_cache[yahoo_symbol] = (now, vol)
+            return vol
+    except Exception:
+        return None
 
 
 async def _fetch_index_price(yahoo_symbol: str) -> Optional[Tuple[float, float]]:
@@ -1940,6 +2088,32 @@ def _market_hours_remaining(close_hour_et: float) -> Optional[float]:
     return market_close - current_hour
 
 
+def _parse_bracket_range(question: str) -> Optional[Tuple[float, float]]:
+    """Parse bracket range from Kalshi market question text.
+
+    Examples:
+        "Will the S&P 500 close between 6,950 and 7,000?" → (6950, 7000)
+        "Will Bitcoin be between $95,000 and $97,500?" → (95000, 97500)
+        "...close between 21,000 and 21,050..." → (21000, 21050)
+
+    Returns (lower, upper) or None if can't parse.
+    """
+    # Pattern: "between X and Y" where X, Y may have commas, $, decimals
+    match = re.search(
+        r'between\s+\$?([\d,]+(?:\.\d+)?)\s+and\s+\$?([\d,]+(?:\.\d+)?)',
+        question, re.IGNORECASE,
+    )
+    if match:
+        try:
+            lower = float(match.group(1).replace(",", ""))
+            upper = float(match.group(2).replace(",", ""))
+            if lower < upper:
+                return (lower, upper)
+        except ValueError:
+            pass
+    return None
+
+
 async def compute_stock_index_probability(
     question: str, market_id: str,
     close_time: Optional[datetime] = None,
@@ -1957,9 +2131,84 @@ async def compute_stock_index_probability(
     threshold = parsed["threshold"]
     is_bracket = parsed["is_bracket"]
 
-    # Skip brackets for now (need to know bracket width)
+    # Bracket markets: P(inside range) = CDF(upper) - CDF(lower)
     if is_bracket:
-        return None
+        bracket_range = _parse_bracket_range(question)
+        if bracket_range is None:
+            logger.debug("index_bracket_parse_fail", market_id=market_id, question=question[:100])
+            return None
+
+        lower, upper = bracket_range
+
+        # Fetch real-time price for bracket
+        price_data = await _fetch_index_price(config["yahoo"])
+        if price_data is None:
+            return None
+        current_price, prev_close = price_data
+        if current_price <= 0:
+            return None
+
+        # Compute remaining time
+        trading_hours = config["trading_hours"]
+        if trading_hours >= 24.0 and close_time is not None:
+            remaining = (close_time - datetime.now(timezone.utc)).total_seconds() / 3600
+            hours_left = max(remaining, 0.001)
+        else:
+            hours_left = _market_hours_remaining(parsed["close_hour_et"])
+            if hours_left is None or hours_left <= 0:
+                hours_left = 0.001
+
+        daily_vol = config["daily_vol"]  # floor
+        realized = await _fetch_realized_volatility(config["yahoo"])
+        if realized is not None and realized > daily_vol:
+            daily_vol = realized
+        time_fraction = max(hours_left / trading_hours, 0.001)
+        sigma_remaining = current_price * daily_vol * math.sqrt(time_fraction)
+        sigma_remaining = max(sigma_remaining, current_price * 0.001)
+
+        # P(lower < price < upper at close)
+        p_inside = _norm_cdf(upper, current_price, sigma_remaining) - _norm_cdf(lower, current_price, sigma_remaining)
+        p_inside = max(0.001, min(0.999, p_inside))
+
+        # Safety gate: z-score from nearest bracket edge must be >= 1.5
+        dist_lower = abs(current_price - lower)
+        dist_upper = abs(current_price - upper)
+        z_from_edge = min(dist_lower, dist_upper) / sigma_remaining if sigma_remaining > 0 else 0
+        if z_from_edge < 1.5:
+            logger.info(
+                "index_bracket_ambiguous",
+                market_id=market_id,
+                current=current_price,
+                lower=lower,
+                upper=upper,
+                z_from_edge=round(z_from_edge, 2),
+            )
+            return None
+
+        confidence = min(0.85, 0.45 + z_from_edge * 0.08)
+        daily_change_pct = ((current_price - prev_close) / prev_close) * 100
+
+        reasoning = (
+            f"Yahoo Finance direct (bracket): {config['name']} = {current_price:.2f} "
+            f"(day: {daily_change_pct:+.2f}%), range = [{lower:.0f}, {upper:.0f}], "
+            f"σ_remaining = {sigma_remaining:.1f} pts ({hours_left:.1f}h left), "
+            f"z_from_edge = {z_from_edge:.2f}, P(inside) = {p_inside:.4f}"
+        )
+
+        logger.info(
+            "stock_index_bracket_fast_path",
+            market_id=market_id,
+            index=config["name"],
+            current=current_price,
+            lower=lower,
+            upper=upper,
+            sigma=round(sigma_remaining, 1),
+            hours_left=round(hours_left, 2),
+            z_from_edge=round(z_from_edge, 2),
+            p_inside=round(p_inside, 4),
+        )
+
+        return (p_inside, confidence, reasoning)
 
     # Fetch real-time price
     price_data = await _fetch_index_price(config["yahoo"])
@@ -1983,7 +2232,10 @@ async def compute_stock_index_probability(
             hours_left = 0.001  # tiny epsilon to avoid division by zero
 
     # Intraday volatility: daily_vol * sqrt(hours_left / trading_hours)
-    daily_vol = config["daily_vol"]
+    daily_vol = config["daily_vol"]  # floor
+    realized = await _fetch_realized_volatility(config["yahoo"])
+    if realized is not None and realized > daily_vol:
+        daily_vol = realized
     trading_hours = config["trading_hours"]
     time_fraction = max(hours_left / trading_hours, 0.001)
     sigma_remaining = current_price * daily_vol * math.sqrt(time_fraction)

@@ -224,10 +224,11 @@ class RiskManager:
                 # thresholds.  Reduce Kelly by 1/2 for bracket markets (B-prefix).
                 # This turns half-Kelly into quarter-Kelly for NOAA brackets,
                 # and third-Kelly into sixth-Kelly for LLM brackets.
+                # NOTE: only penalize Kelly, NOT bankroll cap — applying both
+                # was a bug that made bracket bets ~$2 instead of ~$5-6.
                 _mid = getattr(market, "id", "") or ""
                 if "-B" in _mid:
                     effective_kelly *= 0.50
-                    effective_bankroll_pct *= 0.50
 
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, effective_kelly)
@@ -245,7 +246,7 @@ class RiskManager:
             if strategy != "mm":
                 min_actionable = max(entry_cost, 0.50)
                 if 0 < position_amount < min_actionable:
-                    if abs(signal.edge) >= 0.05:  # Only round up if edge justifies it
+                    if abs(signal.edge) >= self.min_edge:  # match config min_edge
                         position_amount = min_actionable
                     else:
                         position_amount = 0.0
@@ -430,6 +431,7 @@ class RiskManager:
         current_price: float,
         entry_time: datetime,
         position_amount: float,
+        close_time: Optional[datetime] = None,
     ) -> tuple[bool, str]:
         now = datetime.now(timezone.utc)
         pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
@@ -437,11 +439,25 @@ class RiskManager:
         if pnl_pct <= -self.stop_loss_pct:
             return True, f"Stop loss: {pnl_pct:.1%}"
         if pnl_pct >= self.take_profit_pct:
+            # In binary markets, if price > 90c or < 10c it's near-certain — lock in.
+            # If price is in the 65-89c range, thesis is playing out — let it run.
+            if current_price >= 0.90 or current_price <= 0.10:
+                return True, f"Take profit (near-certain): {pnl_pct:.1%}"
             return True, f"Take profit: {pnl_pct:.1%}"
 
+        # Dynamic max hold: use 80% of time-to-close, capped at config max
+        if close_time is not None:
+            hours_to_close = max(0, (close_time - now).total_seconds() / 3600)
+            effective_max_hold = min(
+                self.max_position_hold_hours,
+                max(hours_to_close * 0.80, 1.0),
+            )
+        else:
+            effective_max_hold = self.max_position_hold_hours
+
         hours_held = (now - entry_time).total_seconds() / 3600
-        if hours_held >= self.max_position_hold_hours:
-            return True, f"Max hold time: {hours_held:.1f}h"
+        if hours_held >= effective_max_hold:
+            return True, f"Max hold time: {hours_held:.1f}h (max={effective_max_hold:.1f}h)"
 
         return False, "Within risk parameters"
 

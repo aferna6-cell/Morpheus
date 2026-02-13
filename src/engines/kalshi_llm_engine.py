@@ -196,7 +196,7 @@ class KalshiLLMEngine(BaseEngine):
 
         # Fetch markets — extend window to +1 day for weather (NOAA fast-path
         # is free, and placing orders early gets better prices).
-        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
         scan_days = self._max_resolution_days + 1  # weather look-ahead
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=scan_days,

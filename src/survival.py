@@ -179,7 +179,7 @@ class SurvivalTracker:
 
         # Prorate monthly LLM spend to the window
         now = datetime.now(timezone.utc)
-        days_into_month = now.day
+        days_into_month = max(now.day, 7)  # 7-day floor prevents day-1 spike
         if days_into_month > 0:
             daily_llm_rate = monthly_llm / days_into_month
         else:

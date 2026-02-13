@@ -401,6 +401,35 @@ class KalshiTradingClient:
             return []
 
     # ------------------------------------------------------------------
+    # Fills
+    # ------------------------------------------------------------------
+
+    async def get_recent_fills(self, ticker: str = None, limit: int = 20) -> List[dict]:
+        """Fetch recent fills, optionally filtered by ticker."""
+        if self.dry_run:
+            return []
+
+        await self._ensure_init()
+        try:
+            kwargs = {"limit": limit}
+            if ticker:
+                kwargs["ticker"] = ticker
+            result = await self._run_in_executor(self._portfolio.get_fills, **kwargs)
+            fills = result.fills if hasattr(result, "fills") else []
+            return [
+                {
+                    "order_id": getattr(f, "order_id", ""),
+                    "ticker": getattr(f, "ticker", ""),
+                    "count": getattr(f, "count", 0),
+                    "side": getattr(f, "side", ""),
+                }
+                for f in fills
+            ]
+        except Exception as e:
+            self.logger.debug("kalshi_get_fills_failed", label=self.label, error=str(e))
+            return []
+
+    # ------------------------------------------------------------------
     # Positions
     # ------------------------------------------------------------------
 

@@ -191,7 +191,7 @@ class KalshiContrarianEngine(BaseEngine):
         # Fetch markets closing within 1-7 days (wider than standard engine's same-day)
         kalshi_markets = await self.kalshi_client.fetch_markets_by_close_date(
             max_days=self._max_resolution_days,
-            min_volume=100,
+            min_volume=500,  # Reduced API payload (was 100, Python filter is min_volume_24h)
         )
 
         self.logger.info("contrarian_scan_raw", markets_fetched=len(kalshi_markets))
@@ -199,6 +199,11 @@ class KalshiContrarianEngine(BaseEngine):
         # Filter for overconfident crowd markets
         candidates: List[KalshiMarket] = []
         now_ts = time.monotonic()
+        filter_stats: Dict[str, int] = {
+            "cooldown": 0, "low_volume": 0, "invalid_price": 0,
+            "not_overconfident": 0, "too_soon": 0, "ticker_prefix": 0,
+            "price_filter": 0, "market_type": 0, "sports": 0,
+        }
 
         for km in kalshi_markets:
             self._markets_scanned += 1
@@ -206,19 +211,23 @@ class KalshiContrarianEngine(BaseEngine):
             # Skip recently evaluated
             prev_ts = self._recently_evaluated.get(km.ticker)
             if prev_ts and (now_ts - prev_ts) < self._eval_cooldown:
+                filter_stats["cooldown"] += 1
                 continue
 
             # Must have decent volume (real crowd consensus, not illiquid)
             if km.volume_24h < self._min_volume:
+                filter_stats["low_volume"] += 1
                 continue
 
             # Must have valid price
             if km.yes_price <= 0 or km.yes_price >= 1:
+                filter_stats["invalid_price"] += 1
                 continue
 
             # Check if crowd is overconfident on either side
             crowd_confidence = max(km.yes_price, km.no_price)
             if crowd_confidence < self._min_crowd or crowd_confidence > self._max_crowd:
+                filter_stats["not_overconfident"] += 1
                 continue
 
             # Must resolve in >6 hours (not imminent)
@@ -226,21 +235,25 @@ class KalshiContrarianEngine(BaseEngine):
             if km.close_time:
                 hours_left = (km.close_time - datetime.now(timezone.utc)).total_seconds() / 3600
                 if hours_left < 6:
+                    filter_stats["too_soon"] += 1
                     continue
 
             # Ticker prefix filter (junk markets — crypto ranges, mentions, etc.)
             prefix_result = self._filters.check_ticker_prefix(km.ticker)
             if not prefix_result.passed:
+                filter_stats["ticker_prefix"] += 1
                 continue
 
             # Price filter — skip extreme prices where LLM has no edge
             price_result = self._filters.check_price(km.ticker, km.yes_bid, km.yes_ask)
             if not price_result.passed:
+                filter_stats["price_filter"] += 1
                 continue
 
             # Market type skip (sports, coin flips)
             mtype = detect_market_type(km.title)
             if mtype in _SKIP_TYPES:
+                filter_stats["market_type"] += 1
                 continue
 
             # Apply sports filter
@@ -251,6 +264,7 @@ class KalshiContrarianEngine(BaseEngine):
                 is_live=False,
             )
             if not filter_result.passed:
+                filter_stats["sports"] += 1
                 continue
 
             candidates.append(km)
@@ -263,8 +277,22 @@ class KalshiContrarianEngine(BaseEngine):
         )
 
         # Evaluate each candidate with the contrarian prompt
+        screened_out = 0
         for km in candidates:
             market = _kalshi_to_market(km)
+
+            # Cheap gpt-4o-mini screen before expensive evaluate_contrarian
+            if self._signal.screening_enabled:
+                mid_price = max(km.yes_price, km.no_price)
+                try:
+                    passed = await self._signal._screen_market(market, mid_price)
+                except Exception:
+                    passed = True  # Don't block on screening errors
+                if not passed:
+                    screened_out += 1
+                    self.logger.debug("contrarian_screened_out", ticker=km.ticker)
+                    continue
+
             result = await self._signal.evaluate_contrarian(market)
 
             # Record evaluation
@@ -383,3 +411,13 @@ class KalshiContrarianEngine(BaseEngine):
         stale_keys = [k for k, ts in self._recently_evaluated.items() if ts < stale_cutoff]
         for k in stale_keys:
             del self._recently_evaluated[k]
+
+        # Scan summary
+        self.logger.info(
+            "contrarian_scan_summary",
+            markets_fetched=len(kalshi_markets),
+            candidates=len(candidates),
+            screened_out=screened_out,
+            signals_generated=self._signals_generated,
+            filter_stats={k: v for k, v in filter_stats.items() if v > 0},
+        )

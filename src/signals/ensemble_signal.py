@@ -108,8 +108,8 @@ _MIN_EDGE_BY_TYPE = {
 }
 # Ensure defaults
 _MIN_EDGE_BY_TYPE.setdefault("normal", 0.05)
-_MIN_EDGE_BY_TYPE.setdefault("politics", 0.04)
-_MIN_EDGE_BY_TYPE.setdefault("economics", 0.04)
+_MIN_EDGE_BY_TYPE.setdefault("politics", 0.05)
+_MIN_EDGE_BY_TYPE.setdefault("economics", 0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -142,18 +142,9 @@ def calibrate_probability(
         overshoot = p - 0.5
         p = 0.5 + overshoot * (1.0 - yes_dampen)
 
-    # Mushy-middle correction: empirical remap for 0.40-0.70
-    # 200-market backtest: predicted 40-50% → actual 27%, 50-60% → 18%, 60-70% → 29%
-    # LLM is systematically wrong here — predicted YES ≈ actual NO
-    # Maps: 0.40→0.28, 0.55→0.22 (worst), 0.70→0.30
-    if not skip_mushy and 0.40 <= p <= 0.70:
-        midpoint = 0.55
-        if p <= midpoint:
-            t = (p - 0.40) / (midpoint - 0.40)
-            p = 0.28 - t * 0.06  # 0.28 → 0.22
-        else:
-            t = (p - midpoint) / (0.70 - midpoint)
-            p = 0.22 + t * 0.08  # 0.22 → 0.30
+    # Mushy-middle remap REMOVED in Wave 10.
+    # The 200-market backtest remap was over-dampening: 60% YES → 22%,
+    # flipping most signals to NO. Actual data: 50/50 YES/NO resolution.
 
     p = max(floor, min(ceiling, p))
     return round(p, 4)
@@ -400,7 +391,7 @@ class EnsembleSignal(Signal):
                     # Threshold markets (T-prefix) need less edge — one boundary,
                     # higher win rate. Brackets (B-prefix) need more — two edges.
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.03 if is_weather_threshold else 0.20
+                    min_edge = 0.03 if is_weather_threshold else 0.25
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -763,7 +754,7 @@ class EnsembleSignal(Signal):
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.15  # base YES dampening
+            yes_dampen = 0.05  # base YES dampening (reduced from 0.15, Wave 10)
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
                 yes_dampen += type_cal.yes_boost
@@ -1341,6 +1332,12 @@ Rules:
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
 
+                    # Min-edge gate for contrarian weather
+                    is_weather_threshold = "-T" in market.id and "-B" not in market.id
+                    min_edge = 0.03 if is_weather_threshold else 0.20
+                    if net_edge < min_edge:
+                        return self._hold(market, f"Contrarian weather: net edge {net_edge:.3f} < {min_edge:.3f}")
+
                     if raw_edge > 0:
                         side = TradingSide.BUY_YES
                     elif raw_edge < 0:
@@ -1416,105 +1413,71 @@ Rules:
                     sig.signal_source = "fred_direct"  # type: ignore[attr-defined]
                     return sig
 
-            # Budget check — AFTER fast-paths (NOAA/FRED cost $0, only LLM calls need budget)
-            if self.cost_tracker and not self.cost_tracker.check_budget():
-                return self._hold(market, "LLM budget exceeded")
+            # Stock index fast-path for contrarian: Yahoo Finance real-time price
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+                                "KXETHD", "KXETH")
+            if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
+                idx_result = await compute_stock_index_probability(
+                    market.question, market.id,
+                    getattr(market, "close_time", market.end_date),
+                )
+                if idx_result is not None:
+                    p_yes, idx_confidence, idx_reasoning = idx_result
+                    raw_edge = p_yes - market_price
+                    net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
 
-            # Get news context (cached per question to reduce Brave API calls)
-            cache_key = (market.question or "")[:100]
-            if hasattr(self, '_contrarian_news_cache'):
-                cached = self._contrarian_news_cache.get(cache_key)
-                if cached and (time.monotonic() - cached[0]) < 600:  # 10 min cache
-                    news_articles = cached[1]
-                else:
-                    news_articles = await self.news_aggregator.get_market_news(market)
-                    self._contrarian_news_cache[cache_key] = (time.monotonic(), news_articles)
-            else:
-                self._contrarian_news_cache = {}
-                news_articles = await self.news_aggregator.get_market_news(market)
-                self._contrarian_news_cache[cache_key] = (time.monotonic(), news_articles)
-            news_context = self.news_aggregator.format_news_context(news_articles)
+                    # Min-edge gate for contrarian index
+                    is_index_bracket = "-B" in market.id and "-T" not in market.id
+                    min_edge = 0.20 if is_index_bracket else 0.05
+                    if net_edge < min_edge:
+                        return self._hold(market, f"Contrarian index: net edge {net_edge:.3f} < {min_edge:.3f}")
 
-            # Build contrarian-specific prompt
-            prompt = self._build_contrarian_prompt(market, news_context, market_price)
-            system = self._contrarian_system_prompt()
+                    if raw_edge > 0:
+                        side = TradingSide.BUY_YES
+                    elif raw_edge < 0:
+                        side = TradingSide.BUY_NO
+                    else:
+                        side = TradingSide.HOLD
 
-            # Use GPT-4o for contrarian (cheaper + better Brier score than Claude)
-            result = await self._call_openai(system, prompt)
+                    conviction = "high" if net_edge >= 0.15 else "medium" if net_edge >= 0.08 else "low"
+                    reasoning = (
+                        f"CONTRARIAN INDEX DIRECT: {idx_reasoning} | "
+                        f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
+                        f"net_edge={net_edge:+.3f}"
+                    )
 
-            if result is None or _validate_llm_response(result) is not None:
-                # Fallback to Anthropic
-                result = await self._call_anthropic(system, prompt)
+                    self.logger.info(
+                        "contrarian_index_fast_path",
+                        market_id=market.id,
+                        p_yes=round(p_yes, 4),
+                        market_price=market_price,
+                        net_edge=round(net_edge, 4),
+                        side=side.value,
+                    )
 
-            if result is None or _validate_llm_response(result) is not None:
-                return self._hold(market, "Contrarian LLM call failed")
+                    sig = SignalResult(
+                        estimated_prob=p_yes,
+                        confidence=idx_confidence,
+                        edge=raw_edge,
+                        recommended_side=side,
+                        reasoning=reasoning,
+                        signal_name="Contrarian",
+                        market_price=market_price,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+                    sig.net_edge = net_edge  # type: ignore[attr-defined]
+                    sig.conviction = conviction  # type: ignore[attr-defined]
+                    sig.contrarian_thesis = idx_reasoning  # type: ignore[attr-defined]
+                    sig.crowd_wrong_reason = f"Yahoo Finance data disagrees with market by {abs(raw_edge):.0%}"  # type: ignore[attr-defined]
+                    sig.signal_source = "yahoo_direct"  # type: ignore[attr-defined]
+                    return sig
 
-            p_yes = float(result["p_yes"])
-            p_yes = max(0.001, min(0.999, p_yes))
-
-            # Mild calibration
-            p_yes = calibrate_probability(p_yes, shrink_strength=self.calibration_shrink)
-
-            # Compute contrarian edge
-            raw_edge = p_yes - market_price
-            net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-
-            crowd_wrong_reason = result.get("crowd_wrong_reason", "")
-            contrarian_thesis = result.get("contrarian_thesis", "")
-            confidence_str = result.get("confidence", "medium")
-
-            # Confidence mapping
-            confidence_map = {"low": 0.5, "medium": 0.7, "high": 0.9}
-            confidence = confidence_map.get(confidence_str, 0.7)
-
-            # Determine side
-            if raw_edge > 0 and net_edge > 0:
-                side = TradingSide.BUY_YES
-            elif raw_edge < 0 and net_edge > 0:
-                side = TradingSide.BUY_NO
-            else:
-                side = TradingSide.HOLD
-
-            # Conviction from confidence + edge
-            conviction = "high" if confidence_str == "high" and net_edge >= 0.10 else (
-                "medium" if net_edge >= 0.05 else "low"
-            )
-
-            reasoning = (
-                f"CONTRARIAN: {contrarian_thesis} | "
-                f"Crowd wrong because: {crowd_wrong_reason} | "
-                f"p_yes={p_yes:.3f} mkt={market_price:.3f} "
-                f"raw_edge={raw_edge:+.3f} net_edge={net_edge:+.3f}"
-            )
-
-            self.logger.info(
-                "contrarian_signal",
-                market_id=market.id,
-                p_yes=p_yes,
-                market_price=market_price,
-                raw_edge=raw_edge,
-                net_edge=net_edge,
-                side=side.value,
-                confidence=confidence,
-                conviction=conviction,
-                crowd_wrong_reason=crowd_wrong_reason[:100],
-            )
-
-            sig = SignalResult(
-                estimated_prob=p_yes,
-                confidence=confidence,
-                edge=raw_edge,
-                recommended_side=side,
-                reasoning=reasoning,
-                signal_name="Contrarian",
-                market_price=market_price,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-            sig.net_edge = net_edge  # type: ignore[attr-defined]
-            sig.conviction = conviction  # type: ignore[attr-defined]
-            sig.contrarian_thesis = contrarian_thesis  # type: ignore[attr-defined]
-            sig.crowd_wrong_reason = crowd_wrong_reason  # type: ignore[attr-defined]
-            return sig
+            # After all fast-paths (weather, jobless, index):
+            # Skip LLM for contrarian — historical data shows LLM contrarian signals
+            # are unreliable, and fast-path data (NOAA/Yahoo/FRED) is the only
+            # profitable signal source. Save LLM budget for kalshi_llm engine.
+            return self._hold(market, "Contrarian: no fast-path data, skip LLM")
 
         except Exception as e:
             self.logger.error("contrarian_evaluate_error", market_id=market.id, error=str(e))

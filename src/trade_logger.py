@@ -99,6 +99,8 @@ class TradeLogger:
         fill_price_cents: int,
         order_id: str,
         account_label: Optional[str] = None,
+        strategy: Optional[str] = None,
+        signal_source: Optional[str] = None,
     ) -> None:
         """Log an order fill."""
         self._write({
@@ -110,6 +112,8 @@ class TradeLogger:
             "count": count,
             "fill_price_cents": fill_price_cents,
             "order_id": order_id,
+            "strategy": strategy,
+            "signal_source": signal_source,
         })
 
     def log_position_closed(

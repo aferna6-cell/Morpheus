@@ -111,8 +111,11 @@ class PerfTracker:
             except (ValueError, TypeError):
                 return default
 
-        # Separate orders placed vs exits (market_resolved, position_closed)
-        orders = [t for t in trades if t.get("event") == "order_placed"]
+        # Separate fills/orders vs exits (market_resolved, position_closed)
+        # Prefer order_filled events for cost (only counts actual fills, not
+        # unfilled/cancelled orders). Fall back to order_placed if no fills.
+        filled = [t for t in trades if t.get("event") == "order_filled"]
+        orders = filled if filled else [t for t in trades if t.get("event") == "order_placed"]
         _EXIT_EVENTS = {"position_exit", "position_closed", "market_resolved"}
         exits = [t for t in trades if t.get("event") in _EXIT_EVENTS]
 

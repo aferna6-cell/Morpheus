@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]
   min_edge: 0.03                    # 3% minimum edge (was 5%)
   kelly_fraction: 0.33              # third-Kelly (was quarter)
   max_position_pct: 0.05            # 5% of bankroll cap
@@ -17,12 +17,12 @@ strategy:
 
 # Market filters — loosened for volume
 market_filters:
-  min_volume_24h: 1000              # lowered — $17 bankroll needs fewer fills
+  min_volume_24h: 500               # lowered — small positions don't need deep liquidity
   min_price: 0.05
   max_price: 0.95
   min_liquidity: 200                # lowered
   min_liquidity_aggressive: 200
-  max_spread_pct: 0.12              # relaxed — 8c at 90c mid = 8.4%, need headroom
+  max_spread_pct: 0.10              # relaxed — 8c at 90c mid = 8.4%, need headroom
   min_data_sources: 0               # no data source requirement
   exclude_closing_within_hours: 0   # trade right up to close
   max_markets_per_scan: 200
@@ -80,7 +80,7 @@ llm:
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
-  calibration_shrink_strength: 0.25  # increased from 0.10 — 29% phantom edge was too high
+  calibration_shrink_strength: 0.15  # reduced from 0.30 (Wave 10) — was over-dampening YES signals
   consensus_enabled: false           # replaced by ensemble
   monthly_budget_usd: 25.0
   daily_budget_usd: 3.0
@@ -103,7 +103,7 @@ risk:
   max_loss_per_trade: 2.0           # $2 max loss per trade
   max_daily_loss: 3.0               # $3 daily loss limit
   stop_loss_pct: 0.35               # 35% stop loss (was 25%)
-  take_profit_pct: 0.30             # 30% take profit (was 40%)
+  take_profit_pct: 0.60             # 60% take profit — let winners run in binary markets
   max_position_hold_hours: 24       # same-day (was 168)
   position_check_interval_minutes: 5
   cooldown_minutes: 15              # shorter cooldown
@@ -133,7 +133,7 @@ orchestrator:
   enabled: true
   signal_ttl_seconds: 300
   max_signals_per_cycle: 10         # more signals per cycle (was 5)
-  multi_engine_boost: 1.0
+  multi_engine_boost: 1.5
   cycle_interval_seconds: 60
   liquidate_on_startup: false       # Only use for one-time manual cleanup
 
@@ -154,7 +154,7 @@ kalshi:
     - "Companies"
     - "Financials"
   max_resolution_days: 1            # same-day only
-  max_spread_pct: 0.12              # matches market_filters
+  max_spread_pct: 0.10              # matches market_filters
 
 # Survival mode — self-sustainability gate
 survival:
@@ -172,11 +172,11 @@ contrarian:
   min_crowd_confidence: 0.80    # market must be 80%+ one side
   max_crowd_confidence: 0.95    # don't bet against 95%+ (usually right)
   min_contrarian_edge: 0.10     # LLM must disagree by 10%+
-  min_conviction: "medium"      # medium+ conviction (high too restrictive with few candidates)
+  min_conviction: "low"         # was "medium" — too restrictive for contrarian plays
   max_position_size: 4.0        # $4 per contrarian trade
   max_total_exposure: 8.0       # $8 total contrarian exposure
   max_resolution_days: 7        # 1-7 day markets (not just same-day)
-  min_volume_24h: 1000          # lowered — small bets fill on thin markets
+  min_volume_24h: 500           # lowered — small bets fill on thin markets
   categories:
     - "Politics"
     - "Economics"
@@ -207,7 +207,7 @@ clv_tracking:
   enabled: true
   check_interval_minutes: 60
   alert_threshold: -0.01
-  halt_threshold: 0.01
+  halt_threshold: -0.01
   min_samples: 10
   per_type_tracking: true
   per_type_halt_threshold: -0.01

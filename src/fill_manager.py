@@ -38,6 +38,7 @@ class RestingOrder:
     strategy: str = "llm"
     signal_source: str = ""  # "noaa_direct", "llm", etc.
     entry_edge: float = 0.0  # edge at time of entry (for trailing stops)
+    close_time: Optional[datetime] = None  # market close time
     filled_count: int = 0
     is_done: bool = False
 
@@ -45,7 +46,7 @@ class RestingOrder:
     def is_weather(self) -> bool:
         """Check if this is a weather market order."""
         t = self.ticker.upper()
-        return any(t.startswith(p) for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP"))
+        return any(t.startswith(p) for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND"))
 
     def to_dict(self) -> dict:
         return {
@@ -59,11 +60,13 @@ class RestingOrder:
             "strategy": self.strategy,
             "signal_source": self.signal_source,
             "entry_edge": self.entry_edge,
+            "close_time": self.close_time.isoformat() if self.close_time else None,
             "filled_count": self.filled_count,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "RestingOrder":
+        ct = d.get("close_time")
         return cls(
             order_id=d["order_id"],
             ticker=d["ticker"],
@@ -75,6 +78,7 @@ class RestingOrder:
             strategy=d.get("strategy", "llm"),
             signal_source=d.get("signal_source", ""),
             entry_edge=float(d.get("entry_edge", 0.0)),
+            close_time=datetime.fromisoformat(ct) if ct else None,
             filled_count=d.get("filled_count", 0),
         )
 
@@ -92,6 +96,7 @@ class FillEvent:
     strategy: str
     is_partial: bool = False
     entry_edge: float = 0.0
+    close_time: Optional[datetime] = None  # market close time
 
 
 class FillManager:
@@ -171,6 +176,7 @@ class FillManager:
         strategy: str = "llm",
         signal_source: str = "",
         entry_edge: float = 0.0,
+        close_time: Optional[datetime] = None,
     ) -> None:
         """Register an order for fill tracking."""
         self._resting[order_id] = RestingOrder(
@@ -184,6 +190,7 @@ class FillManager:
             strategy=strategy,
             signal_source=signal_source,
             entry_edge=entry_edge,
+            close_time=close_time,
         )
         # Daily fill rate tracking — reset on new day
         today = datetime.now(timezone.utc).date()
@@ -306,6 +313,7 @@ class FillManager:
                     account_label=resting.account_label,
                     strategy=resting.strategy,
                     entry_edge=resting.entry_edge,
+                    close_time=resting.close_time,
                 )
 
                 self._daily_orders_filled += 1
@@ -329,6 +337,8 @@ class FillManager:
                     fill_price_cents=resting.price_cents,
                     order_id=order_id,
                     account_label=resting.account_label,
+                    strategy=resting.strategy,
+                    signal_source=resting.signal_source,
                 )
 
                 # Notify callbacks
@@ -353,7 +363,24 @@ class FillManager:
                 # Weather orders get shorter timeout (5 min) — weather markets
                 # move fast and capital should be freed for better opportunities.
                 age = (now - resting.placed_at).total_seconds()
-                effective_timeout = 300.0 if resting.is_weather else self.stale_timeout
+                if resting.strategy == "kalshi_mm":
+                    effective_timeout = 120.0  # MM quotes: 2 min expiry (refresh is 60s)
+                elif resting.is_weather:
+                    if resting.signal_source == "noaa_direct":
+                        effective_timeout = 480.0  # NOAA-direct: 8 min (high confidence)
+                    else:
+                        effective_timeout = 300.0  # LLM weather: 5 min
+                else:
+                    # Time-aware timeout: 5% of time-to-close, bounded [120s, 600s]
+                    # 2h→360s, 1h→180s, 30m→120s floor (Wave 10)
+                    if resting.close_time is not None:
+                        time_to_close = (resting.close_time - now).total_seconds()
+                        if time_to_close > 0:
+                            effective_timeout = max(120.0, min(600.0, time_to_close * 0.05))
+                        else:
+                            effective_timeout = 0.0  # already closed, cancel immediately
+                    else:
+                        effective_timeout = self.stale_timeout  # Default: 10 min
                 if age > effective_timeout:
                     # Cancel stale order
                     for client in self.trading_clients:

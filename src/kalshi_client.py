@@ -7,6 +7,7 @@ Uses async httpx with rate limiting and pagination.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -64,6 +65,10 @@ class KalshiClient:
         self._client: Optional[httpx.AsyncClient] = None
         # event_ticker -> category cache (populated lazily)
         self._event_categories: Dict[str, str] = {}
+
+        # Market cache: avoids duplicate paginated fetches across engines
+        self._market_cache: Dict[str, Tuple[float, List]] = {}  # key -> (mono_ts, markets)
+        self._market_cache_ttl = 300.0  # 5 minutes
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -364,6 +369,15 @@ class KalshiClient:
         """
         from datetime import timedelta
 
+        # Check cache first — avoids duplicate paginated fetches across engines
+        cache_key = f"close_date:{max_days}:{min_volume}"
+        cached = self._market_cache.get(cache_key)
+        if cached:
+            ts, markets = cached
+            if time.monotonic() - ts < self._market_cache_ttl:
+                self.logger.debug("kalshi_market_cache_hit", key=cache_key, count=len(markets))
+                return list(markets)
+
         now = datetime.now(timezone.utc)
         min_ts = int(now.timestamp())
         max_ts = int((now + timedelta(days=max_days)).timestamp())
@@ -390,7 +404,13 @@ class KalshiClient:
                 if "KXMVESPORTS" in ticker or "MULTIGAME" in ticker:
                     continue
                 vol = int(m.get("volume", 0) or 0)
-                if vol < min_volume:
+                # Weather markets bypass volume filter (NOAA fast-path is free,
+                # and newly listed weather markets start at low volume)
+                is_weather = any(
+                    ticker.upper().startswith(p)
+                    for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
+                )
+                if vol < min_volume and not is_weather:
                     continue
 
                 parsed = self._parse_market(m)
@@ -402,6 +422,10 @@ class KalshiClient:
                 break
 
         self.logger.info("kalshi_markets_by_close_date", total=len(all_markets), max_days=max_days)
+
+        # Cache result
+        self._market_cache[cache_key] = (time.monotonic(), all_markets)
+
         return all_markets
 
     async def get_public_trades(

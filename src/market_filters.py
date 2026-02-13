@@ -34,10 +34,12 @@ _JUNK_TICKER_PREFIXES = [
     # Announcer/host mention markets — no LLM edge on what people will say
     "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION", "KXFOXNEWSMENTION",
     "KXMLBMENTION", "KXNHLMENTION", "KXMLSMENTION",
+    "KXCONGRESSMENTION",  # Congress mention — unpredictable speech, no edge
     # Crypto price ranges (intraday + bracket) — LLMs have no edge
     # KXBTCD/KXBTC: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
     "KXBTC15M",
-    "KXETHD", "KXETH15M", "KXETH",
+    # KXETHD/KXETH: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
+    "KXETH15M",
     "KXDOGE", "KXDOGED", "KXSOLD", "KXSOLE", "KXSOL15M",
     "KXBNBD", "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
     "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",
@@ -47,8 +49,8 @@ _JUNK_TICKER_PREFIXES = [
     "KXTRUMPMENTION",
     # Word/phrase mention markets
     "KXWOMENTION", "KXWMENTION",
-    # Stock intraday ranges
-    "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+    # Stock intraday ranges — NOW UNBLOCKED (Yahoo Finance real-time price fast-path)
+    # "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
     # Entertainment / pop culture — LLMs have no edge on celebrity/media outcomes
     "KXSUPERBOWLAD", "KXRT", "KXSPOTIFY", "KXSPOTIFYD", "KXSPOTIFYGLOBALD",
     "KXSBADAPPEARANCES", "KXTOPSONG", "KXTOPALBUM", "KXALBUMDEBUT",

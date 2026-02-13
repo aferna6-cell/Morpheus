@@ -242,6 +242,9 @@ class Orchestrator:
         if not fresh:
             return
 
+        # 2c. Multi-engine consensus detection + boosting
+        fresh = self._apply_consensus(fresh)
+
         # 3. Score and rank
         ranked = self._score_signals(fresh)
 
@@ -260,10 +263,18 @@ class Orchestrator:
             except Exception:
                 pass  # If we can't check, skip guard rather than block trading
 
-        # Merge held positions into event dispatch tracker
-        # (ensures correlation limits respect existing positions, not just this session)
-        for ep, count in held_event_counts.items():
-            self._event_dispatched[ep] = max(self._event_dispatched.get(ep, 0), count)
+        # Prune stale _dispatched entries for markets no longer held.
+        # Without this, the set grows forever and prevents re-entry on
+        # resolved markets (opportunity starvation).
+        stale = {key for key in self._dispatched if key[0] not in held_tickers}
+        if stale:
+            self._dispatched -= stale
+            self.logger.debug("dispatched_pruned", count=len(stale))
+
+        # Reset event dispatch tracker to match actual held positions.
+        # Direct assignment instead of max() merge — when positions resolve,
+        # the counter must go down so new entries are allowed.
+        self._event_dispatched = dict(held_event_counts)
 
         # 5. Execute top N within risk limits
         executed = 0
@@ -292,13 +303,15 @@ class Orchestrator:
                 continue
 
             # Position dedup: skip markets where we already hold a position
+            # Exception: MM signals — market makers should quote on held markets
             if signal.market_id in held_tickers:
-                self.logger.info(
-                    "dispatch_position_dedup_skip",
-                    market_id=signal.market_id,
-                    engine=signal.engine,
-                )
-                continue
+                if signal.metadata.get("strategy") != "mm":
+                    self.logger.info(
+                        "dispatch_position_dedup_skip",
+                        market_id=signal.market_id,
+                        engine=signal.engine,
+                    )
+                    continue
 
             # Event-level dedup: prevent correlated trades
             # (e.g., NO on 5 different BTC threshold tickers)
@@ -308,9 +321,9 @@ class Orchestrator:
             event_count = self._event_dispatched.get(event_prefix, 0)
             is_weather_event = any(
                 event_prefix.startswith(p)
-                for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+                for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
             )
-            max_event = 3 if is_weather_event else self._max_per_event
+            max_event = 2 if is_weather_event else self._max_per_event
             if event_count >= max_event:
                 self.logger.info(
                     "dispatch_event_dedup_skip",
@@ -339,11 +352,16 @@ class Orchestrator:
                         if signal.engine in _KALSHI_ENGINES:
                             platform = "kalshi"
 
+                        # Resting orders report executed_amount_usd=0; use
+                        # intended cost so capital manager tracks real exposure.
+                        intended_cost = trade.intended_contracts * (trade.price_cents / 100.0)
+                        actual_amount = trade.executed_amount_usd if trade.executed_amount_usd > 0 else intended_cost
+
                         self._capital_manager.add_position(
                             market_id=signal.market_id,
                             ticker=signal.token_id or signal.market_id,
                             platform=platform,
-                            amount_usd=trade.executed_amount_usd,
+                            amount_usd=actual_amount,
                             entry_price=trade.average_price,
                             entry_probability=entry_prob,
                             side=side,
@@ -388,10 +406,13 @@ class Orchestrator:
                     error=str(exc),
                 )
 
-        if executed:
+        if executed or len(all_signals) > 5:
+            engine_counts = {}
+            for s in all_signals:
+                engine_counts[s.engine] = engine_counts.get(s.engine, 0) + 1
             self.logger.info("orchestrator_cycle_summary", cycle=cycle,
                              signals_in=len(all_signals), fresh=len(fresh),
-                             executed=executed)
+                             executed=executed, by_engine=engine_counts)
 
         # Periodic capital management status check (every 10 cycles)
         if cycle % 10 == 0 and self._capital_manager:
@@ -412,12 +433,13 @@ class Orchestrator:
             # Multi-engine bonus stored by _apply_consensus
             multi_bonus = s.metadata.get("_multi_engine_bonus", 0.0)
 
-            # Urgency is the dominant factor — closing-soon markets first
+            # Confidence-weighted edge = expected value accounting for uncertainty
+            ev_edge = max(s.edge, 0.0) * s.confidence
             score = (
-                (urgency_bonus * 0.40)
-                + (max(s.edge, 0.0) * 0.25)
-                + (s.confidence * 0.20)
-                + (multi_bonus * 0.15)
+                (ev_edge * 0.45)
+                + (s.confidence * 0.30)
+                + (urgency_bonus * 0.15)
+                + (multi_bonus * 0.10)
             )
             # Tie-break with engine priority
             score += engine_priority * 0.01
@@ -429,6 +451,10 @@ class Orchestrator:
                     score += 0.30
                 elif conv == "medium":
                     score += 0.10
+
+            # MM boost: spread capture with zero fees deserves priority
+            if s.metadata.get("strategy") == "mm":
+                score += 0.20
 
             return score
 
@@ -581,6 +607,7 @@ class Orchestrator:
                     "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
                     "strategy": signal.metadata.get("strategy", "standard"),
                     "signal_source": signal.metadata.get("signal_source"),
+                    "_force_size_usd": signal.metadata.get("_force_size_usd"),
                 }
 
                 # Each account sizes independently based on its own balance
@@ -617,6 +644,8 @@ class Orchestrator:
                 # Register ALL successful orders with fill manager for tracking
                 if kalshi_trade and kalshi_trade.was_successful and self.fill_manager:
                     if kalshi_trade.order_id:
+                        # Get market close time for dynamic max-hold
+                        _close_time = getattr(market_data, "end_date", None)
                         self.fill_manager.track_order(
                             order_id=kalshi_trade.order_id,
                             ticker=kalshi_trade.ticker,
@@ -626,6 +655,8 @@ class Orchestrator:
                             account_label=label,
                             strategy=signal.engine,
                             signal_source=signal.metadata.get("signal_source", ""),
+                            entry_edge=float(signal.metadata.get("net_edge", signal.edge or 0.0)),
+                            close_time=_close_time,
                         )
 
                 if kalshi_trade and kalshi_trade.was_successful and first_result is None:

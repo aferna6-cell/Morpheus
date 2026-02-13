@@ -23,7 +23,7 @@ from .kalshi_trading_client import KalshiTradingClient, KalshiPosition
 from .risk import RiskManager
 from .utils import BotConfig
 
-_WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+_WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
 
 
 def _is_weather_ticker(ticker: str) -> bool:
@@ -43,6 +43,7 @@ class TrackedPosition:
     order_id: str = ""
     account_label: str = "default"
     entry_edge: float = 0.0  # edge at time of entry (for trailing stops)
+    close_time: Optional[datetime] = None  # market close time (for dynamic max hold)
 
 
 class PositionMonitor:
@@ -82,6 +83,10 @@ class PositionMonitor:
         # Stale market cache: ticker -> (check_time, is_closed)
         self._market_status_cache: Dict[str, tuple[float, bool]] = {}
         self._market_status_ttl = 600.0  # 10 min cache
+
+        # Live price cache for SL/TP: ticker -> (monotonic_time, price)
+        self._price_cache: Dict[str, tuple[float, float]] = {}
+        self._price_cache_ttl = 120.0  # 2 min cache
 
         # Permanent cache: ticker -> market question text (titles never change)
         self._market_question_cache: Dict[str, str] = {}
@@ -131,6 +136,7 @@ class PositionMonitor:
         order_id: str = "",
         account_label: str = "default",
         entry_edge: float = 0.0,
+        close_time: Optional[datetime] = None,
     ) -> None:
         """Register a new position for monitoring."""
         key = f"{account_label}:{ticker}"
@@ -144,6 +150,7 @@ class PositionMonitor:
             order_id=order_id,
             account_label=account_label,
             entry_edge=entry_edge,
+            close_time=close_time,
         )
         self.logger.info(
             "position_tracked",
@@ -314,6 +321,34 @@ class PositionMonitor:
 
         return False
 
+    async def _get_current_yes_price(self, ticker: str) -> Optional[float]:
+        """Fetch current YES midpoint price from Kalshi public API. Cached 2min."""
+        import time as _time
+        now = _time.monotonic()
+        cached = self._price_cache.get(ticker)
+        if cached and now - cached[0] < self._price_cache_ttl:
+            return cached[1]
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._kalshi_base_url,
+                timeout=10.0,
+                headers={"Accept": "application/json"},
+            ) as client:
+                r = await client.get(f"/markets/{ticker}")
+                if r.status_code == 200:
+                    data = r.json()
+                    m = data.get("market", data)
+                    yb = (m.get("yes_bid") or 0) / 100.0
+                    ya = (m.get("yes_ask") or 0) / 100.0
+                    lp = (m.get("last_price") or 0) / 100.0
+                    price = (yb + ya) / 2.0 if yb > 0 and ya > 0 else lp if lp > 0 else None
+                    if price:
+                        self._price_cache[ticker] = (now, price)
+                    return price
+        except Exception as e:
+            self.logger.debug("price_fetch_error", ticker=ticker, error=str(e))
+        return None
+
     async def _get_market_question(self, ticker: str) -> Optional[str]:
         """Fetch market title/question from Kalshi public API. Permanently cached."""
         if ticker in self._market_question_cache:
@@ -360,6 +395,11 @@ class PositionMonitor:
             self.logger.debug("weather_repricing_no_question", ticker=pos.ticker)
             return None
 
+        # Min hold time: don't reprice positions entered < 2 min ago
+        hold_seconds = (datetime.now(timezone.utc) - tracked.entry_time).total_seconds()
+        if hold_seconds < 120:
+            return None
+
         result = await compute_weather_probability(question, pos.ticker)
 
         if result is None:
@@ -378,7 +418,7 @@ class PositionMonitor:
         if tracked.side == "yes":
             current_edge = p_yes - entry_price
         else:
-            current_edge = entry_price - p_yes
+            current_edge = (1.0 - p_yes) - entry_price
 
         # Exit thresholds from config
         exit_threshold = float(self.config.risk.get("weather_exit_threshold", -0.05))
@@ -480,17 +520,21 @@ class PositionMonitor:
                         pass
                 return
 
-        # Get current market price for P&L calculation
-        # We don't have direct price access here, so use exposure-based estimate
-        # This is approximate — the fill manager will have more precise data
+        # Get current market price for P&L calculation (Wave 10: real price)
         entry_price = tracked.entry_price_cents / 100.0
-        current_price = pos.market_exposure / abs(pos.count) if pos.count != 0 else entry_price
+        yes_price = await self._get_current_yes_price(pos.ticker)
+        if yes_price is not None:
+            current_price = yes_price if tracked.side == "yes" else (1.0 - yes_price)
+        else:
+            # Fallback to static exposure (SL/TP won't trigger, but max-hold still works)
+            current_price = pos.market_exposure / abs(pos.count) if pos.count != 0 else entry_price
 
         should_exit, reason = self.risk_manager.should_close_position(
             entry_price=entry_price,
             current_price=current_price,
             entry_time=tracked.entry_time,
             position_amount=pos.market_exposure,
+            close_time=tracked.close_time,
         )
 
         if should_exit:

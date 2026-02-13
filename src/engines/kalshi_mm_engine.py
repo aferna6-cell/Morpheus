@@ -265,11 +265,21 @@ class KalshiMMEngine(BaseEngine):
 
     async def _update_all_quotes(self) -> None:
         """Generate quote signals for all tracked MM markets."""
+        signals_before = len(self._pending_signals)
         for ticker, state in list(self._markets.items()):
             try:
                 await self._generate_quotes(state)
             except Exception as e:
                 self.logger.warning("mm_quote_gen_error", ticker=ticker, error=str(e))
+
+        quotes_generated = len(self._pending_signals) - signals_before
+        if self._markets:
+            self.logger.info(
+                "mm_cycle_summary",
+                active_markets=len(self._markets),
+                quotes_generated=quotes_generated,
+                inventory={t: s.inventory for t, s in self._markets.items()},
+            )
 
     async def _generate_quotes(self, state: MMMarketState) -> None:
         """Generate bid/ask signals for a market."""
@@ -370,6 +380,10 @@ class KalshiMMEngine(BaseEngine):
         # Edge is half the spread we're capturing
         spread_edge = state.last_spread / 2.0 if state.last_spread > 0 else 0.01
 
+        # Fixed size: quote_size contracts × entry cost
+        entry_cost = price_cents / 100.0
+        force_size = self._quote_size * entry_cost
+
         signal = TradeSignal(
             engine=self.name,
             market_id=ticker,
@@ -390,6 +404,8 @@ class KalshiMMEngine(BaseEngine):
                 "kalshi_no_ask": price_frac if side == "buy_no" else None,
                 "mm_inventory": state.inventory,
                 "platform": "kalshi",
+                "strategy": "mm",
+                "_force_size_usd": force_size,
             },
         )
         self._pending_signals.append(signal)
@@ -410,6 +426,27 @@ class KalshiMMEngine(BaseEngine):
         else:
             state.inventory -= count
             state.total_filled_no += count
+
+        # Track adverse selection: one-sided fills = informed traders picking us off
+        if state.total_filled_yes > 0 and state.total_filled_no == 0:
+            state.consecutive_one_sided = state.total_filled_yes
+        elif state.total_filled_no > 0 and state.total_filled_yes == 0:
+            state.consecutive_one_sided = state.total_filled_no
+        else:
+            # Both sides have fills — decay counter instead of resetting
+            state.consecutive_one_sided = max(0, state.consecutive_one_sided - 1)
+
+        # Drop market if adverse selection detected (3+ one-sided fills)
+        if state.consecutive_one_sided >= 3:
+            self.logger.warning(
+                "mm_adverse_selection_drop",
+                ticker=ticker,
+                one_sided_fills=state.consecutive_one_sided,
+                filled_yes=state.total_filled_yes,
+                filled_no=state.total_filled_no,
+            )
+            self._markets.pop(ticker, None)
+            return
 
         self.logger.info(
             "mm_inventory_updated",

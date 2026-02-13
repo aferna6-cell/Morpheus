@@ -152,6 +152,8 @@ async def run(
                     strategy=event.strategy,
                     order_id=event.order_id,
                     account_label=event.account_label,
+                    entry_edge=getattr(event, "entry_edge", 0.0),
+                    close_time=getattr(event, "close_time", None),
                 )
             fill_manager.on_fill(_on_fill)
 
@@ -206,6 +208,19 @@ async def run(
                     kalshi_client=kalshi_read,
                 )
                 engines.append(mm_engine)
+
+                # Wire MM inventory tracking to fill manager
+                def _on_mm_fill(event):
+                    try:
+                        mm_engine.update_inventory(
+                            event.ticker,
+                            event.side,
+                            event.filled_count,
+                        )
+                    except Exception:
+                        pass
+                fill_manager.on_fill(_on_mm_fill)
+
                 logger.info("kalshi_mm_engine_initialized")
 
             # Wire resume callback: when a halted account resumes, trigger engine rescans

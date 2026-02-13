@@ -120,7 +120,7 @@ class KalshiExecutor:
         # Weather signals: cross the spread to improve fill rate.
         # Thresholds get more aggressive crossing (higher fill priority).
         # Brackets get moderate crossing (lower confidence in edge).
-        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP")
+        _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
         is_weather = ticker.upper().startswith(_WEATHER_PREFIXES)
         if is_weather and signal.confidence >= 0.60:
             is_threshold = "-T" in ticker and "-B" not in ticker
@@ -171,11 +171,12 @@ class KalshiExecutor:
                 else:
                     cross_amount = 2
             elif is_contrarian and abs(net_edge_pre) >= 0.10:
-                # Contrarian signals with 10%+ edge: cross up to 2c
+                # Contrarian signals with 10%+ edge: cross up to 4c
+                # (10%+ edge easily absorbs 4c crossing cost)
                 if spread_cents > 0:
-                    cross_amount = min(max(1, spread_cents // 2), 2)
+                    cross_amount = min(max(1, spread_cents // 2), 4)
                 else:
-                    cross_amount = 1
+                    cross_amount = 2
             elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.65:
                 # High-edge signals: cross 2c
                 if spread_cents > 0:
