@@ -91,6 +91,9 @@ class BotConfig(BaseModel):
     # Alerts (Telegram)
     alerts: Dict[str, Any] = Field(default_factory=dict)
 
+    # 15-minute crypto engine
+    crypto_engine: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,
