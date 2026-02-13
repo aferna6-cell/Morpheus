@@ -233,8 +233,8 @@ async def run(
 
                     binance_feed = BinancePriceFeed(
                         ws_url=crypto_cfg.get(
-                            "binance_ws_url",
-                            "wss://stream.binance.com:9443/ws/btcusdt@trade",
+                            "ws_url",
+                            "wss://ws-feed.exchange.coinbase.com",
                         ),
                     )
                     await binance_feed.start()

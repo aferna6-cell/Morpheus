@@ -218,7 +218,7 @@ crypto_engine:
   min_confidence: 0.45              # minimum confidence to trade
   cooldown_per_window_seconds: 120  # only 1 signal per window per 2 min
   maker_fee_coefficient: 0.0175     # Kalshi maker fee formula coefficient
-  binance_ws_url: "wss://stream.binance.com:9443/ws/btcusdt@trade"
+  ws_url: "wss://ws-feed.exchange.coinbase.com"  # Coinbase (US-friendly)
   ticker_prefix: "KXBTC15M"
 
 # CLV tracking
