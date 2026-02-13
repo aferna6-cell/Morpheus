@@ -723,12 +723,13 @@ _ENSEMBLE_CACHE_TTL = 900.0  # 15 min
 async def _fetch_open_meteo_ensemble(
     lat: float, lon: float, target_date: str,
 ) -> Optional[Dict[str, List[float]]]:
-    """Fetch GFS ensemble (31 members) from Open-Meteo.
+    """Fetch multi-model ensemble from Open-Meteo (GFS + GEM + ICON).
 
     Returns dict with:
-      temperature_max: List[float]  — 31 high temp values (°F)
-      temperature_min: List[float]  — 31 low temp values (°F)
+      temperature_max: List[float]  — combined ensemble high temps (°F)
+      temperature_min: List[float]  — combined ensemble low temps (°F)
 
+    GFS: 31 members, GEM: 21 members, ICON: 40 members = ~92 total.
     Free API, no key required. Rate limit: ~10K/day.
     """
     cache_key = f"{lat:.2f},{lon:.2f}:{target_date}"
@@ -744,33 +745,45 @@ async def _fetch_open_meteo_ensemble(
         "longitude": lon,
         "daily": "temperature_2m_max,temperature_2m_min",
         "temperature_unit": "fahrenheit",
-        "models": "gfs_seamless",
+        "models": "gfs_seamless,gem_global,icon_seamless",
         "start_date": target_date,
         "end_date": target_date,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
                 logger.debug("open_meteo_http_error", status=resp.status_code)
                 return None
             data = resp.json()
 
-        # Parse ensemble members from response
+        # Parse ensemble members from response.
+        # Multi-model responses use per-member keys like:
+        #   temperature_2m_max_ncep_gefs_seamless (control)
+        #   temperature_2m_max_member01_ncep_gefs_seamless
+        #   temperature_2m_max_member01_gem_global  etc.
+        # Single-model uses simple: temperature_2m_max
         daily = data.get("daily", {})
-        max_temps = daily.get("temperature_2m_max", [])
-        min_temps = daily.get("temperature_2m_min", [])
+
+        # Collect all max/min values across all model/member keys
+        max_temps: list = []
+        min_temps: list = []
+        for key, vals in daily.items():
+            if not isinstance(vals, list):
+                continue
+            if "temperature_2m_max" in key:
+                max_temps.extend(v for v in vals if v is not None)
+            elif "temperature_2m_min" in key:
+                min_temps.extend(v for v in vals if v is not None)
 
         if not max_temps and not min_temps:
-            logger.debug("open_meteo_no_data", response_keys=list(data.keys()))
+            logger.debug("open_meteo_no_data", response_keys=list(daily.keys())[:10])
             return None
 
-        # Open-Meteo returns one value per member per day
-        # For 31-member GFS ensemble, we get 31 values
         result = {
-            "temperature_max": [float(t) for t in max_temps if t is not None],
-            "temperature_min": [float(t) for t in min_temps if t is not None],
+            "temperature_max": [float(t) for t in max_temps],
+            "temperature_min": [float(t) for t in min_temps],
         }
 
         _ensemble_cache[cache_key] = (time.monotonic(), result)
@@ -784,6 +797,74 @@ async def _fetch_open_meteo_ensemble(
 
     except Exception as e:
         logger.debug("open_meteo_fetch_error", error=str(e))
+        return None
+
+
+# Cache for HRRR forecasts (10 min TTL — updates hourly)
+_hrrr_cache: Dict[str, Tuple[float, Dict]] = {}
+_HRRR_CACHE_TTL = 600.0  # 10 min
+
+
+async def _fetch_open_meteo_hrrr(
+    lat: float, lon: float, target_date: str,
+) -> Optional[Dict[str, float]]:
+    """Fetch HRRR hourly temps from Open-Meteo forecast API.
+
+    HRRR is 3km resolution, US-only, 48h horizon.
+    Returns {"temperature_max": float, "temperature_min": float} computed
+    from hourly temps for the target date.
+    """
+    cache_key = f"hrrr:{lat:.2f},{lon:.2f}:{target_date}"
+    cached = _hrrr_cache.get(cache_key)
+    if cached:
+        ts, data = cached
+        if time.monotonic() - ts < _HRRR_CACHE_TTL:
+            return data
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "models": "gfs_hrrr",
+        "start_date": target_date,
+        "end_date": target_date,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.debug("hrrr_http_error", status=resp.status_code)
+                return None
+            data = resp.json()
+
+        hourly = data.get("hourly", {})
+        temps = hourly.get("temperature_2m", [])
+        temps = [float(t) for t in temps if t is not None]
+
+        if len(temps) < 12:
+            logger.debug("hrrr_insufficient_data", n_hours=len(temps))
+            return None
+
+        result = {
+            "temperature_max": max(temps),
+            "temperature_min": min(temps),
+        }
+
+        _hrrr_cache[cache_key] = (time.monotonic(), result)
+        logger.info(
+            "hrrr_fetched",
+            lat=lat, lon=lon, date=target_date,
+            t_max=round(result["temperature_max"], 1),
+            t_min=round(result["temperature_min"], 1),
+            n_hours=len(temps),
+        )
+        return result
+
+    except Exception as e:
+        logger.debug("hrrr_fetch_error", error=str(e))
         return None
 
 
@@ -1746,7 +1827,7 @@ async def compute_weather_probability(
         # ">X" market: YES means temp is above threshold
         p_nws = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
 
-    # 7b. Open-Meteo GFS ensemble blend (31 members, empirical probability)
+    # 7b. Multi-model ensemble blend (GFS+GEM+ICON ~92 members, empirical probability)
     p_ensemble = None
     if coords:
         target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
@@ -1772,15 +1853,52 @@ async def compute_weather_probability(
                     bracket_bounds=bracket_bounds,
                 )
 
-    # Blend NWS + ensemble: NWS is more accurate for 1-2 day, ensemble
-    # captures tails better. If they disagree by >15%, trust ensemble more.
-    if p_ensemble is not None:
+    # 7c. HRRR high-resolution forecast (3km, deterministic, same-day only)
+    p_hrrr = None
+    if coords:
+        target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
+        hrrr_data = await _fetch_open_meteo_hrrr(coords[0], coords[1], target_str)
+        if hrrr_data:
+            if "high" in t_type:
+                hrrr_temp = hrrr_data.get("temperature_max")
+            elif "low" in t_type:
+                hrrr_temp = hrrr_data.get("temperature_min")
+            else:
+                hrrr_temp = hrrr_data.get("temperature_max")
+
+            if hrrr_temp is not None:
+                # HRRR is deterministic — use normal CDF with city sigma
+                if "below" in t_type:
+                    p_hrrr = _norm_cdf(t_value, hrrr_temp, sigma)
+                else:
+                    p_hrrr = 1.0 - _norm_cdf(t_value, hrrr_temp, sigma)
+
+    # Blend NWS + ensemble + HRRR:
+    # NWS is calibrated point forecast, ensemble captures tails,
+    # HRRR adds high-resolution spatial detail for same-day.
+    if p_ensemble is not None and p_hrrr is not None:
         disagreement = abs(p_nws - p_ensemble)
         if disagreement > 0.15:
-            # Large disagreement: ensemble likely captures tail risk better
+            # Large NWS/ensemble disagreement: weight ensemble more, HRRR breaks ties
+            p_yes = 0.30 * p_nws + 0.50 * p_ensemble + 0.20 * p_hrrr
+        else:
+            # Agreement: NWS-weighted blend with HRRR confirming
+            p_yes = 0.40 * p_nws + 0.35 * p_ensemble + 0.25 * p_hrrr
+        logger.info(
+            "weather_multi_model_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_ensemble=round(p_ensemble, 4),
+            p_hrrr=round(p_hrrr, 4),
+            p_blended=round(p_yes, 4),
+            disagreement=round(disagreement, 4),
+            n_members=len(members) if members else 0,
+        )
+    elif p_ensemble is not None:
+        disagreement = abs(p_nws - p_ensemble)
+        if disagreement > 0.15:
             p_yes = 0.4 * p_nws + 0.6 * p_ensemble
         else:
-            # Agreement: NWS-weighted blend
             p_yes = 0.6 * p_nws + 0.4 * p_ensemble
         logger.info(
             "weather_ensemble_blend",
@@ -1790,6 +1908,16 @@ async def compute_weather_probability(
             p_blended=round(p_yes, 4),
             disagreement=round(disagreement, 4),
             n_members=len(members) if members else 0,
+        )
+    elif p_hrrr is not None:
+        # HRRR only (ensemble failed) — blend with NWS
+        p_yes = 0.55 * p_nws + 0.45 * p_hrrr
+        logger.info(
+            "weather_hrrr_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_hrrr=round(p_hrrr, 4),
+            p_blended=round(p_yes, 4),
         )
     else:
         p_yes = p_nws
@@ -2080,6 +2208,11 @@ _INDEX_CONFIG: Dict[str, Dict[str, Any]] = {
     "KXQQQ": {"yahoo": "^NDX", "name": "NASDAQ 100 (QQQ)", "daily_vol": 0.013, "trading_hours": 6.5},
     "KXIWM": {"yahoo": "^RUT", "name": "Russell 2000 (IWM)", "daily_vol": 0.012, "trading_hours": 6.5},
     "KXDIA": {"yahoo": "^DJI", "name": "Dow Jones (DIA)", "daily_vol": 0.009, "trading_hours": 6.5},
+    # WTI Crude Oil — near-continuous futures (CME Globex), ~2.5% daily vol
+    "KXWTI": {"yahoo": "CL=F", "name": "WTI Crude Oil", "daily_vol": 0.025, "trading_hours": 23.0},
+    "KXWTIW": {"yahoo": "CL=F", "name": "WTI Crude Oil (Weekly)", "daily_vol": 0.025, "trading_hours": 23.0},
+    # Gold — safe haven, ~1.2% daily vol
+    "KXGOLD": {"yahoo": "GC=F", "name": "Gold", "daily_vol": 0.012, "trading_hours": 23.0},
 }
 
 # Cache for real-time prices: {symbol: (timestamp, price, prev_close)}

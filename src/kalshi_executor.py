@@ -150,7 +150,8 @@ class KalshiExecutor:
         # Non-weather spread crossing: index, contrarian, and high-edge generic signals.
         # These were previously posting at the ask and expiring unfilled.
         _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
-                           "KXSPY", "KXQQQ", "KXIWM", "KXDIA", "KXETHD", "KXETH")
+                           "KXSPY", "KXQQQ", "KXIWM", "KXDIA", "KXETHD", "KXETH",
+                           "KXWTI", "KXGOLD")
         net_edge_pre = getattr(signal, "net_edge", signal.edge)
         strategy = meta.get("strategy", "standard")
         is_index = not is_weather and any(ticker.upper().startswith(p) for p in _INDEX_PREFIXES)

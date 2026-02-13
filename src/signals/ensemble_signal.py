@@ -522,7 +522,8 @@ class EnsembleSignal(Signal):
 
             # Stock index fast-path: Yahoo Finance real-time price + normal CDF
             _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100",
-                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA")
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+                                "KXWTI", "KXGOLD")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,
@@ -1484,7 +1485,8 @@ Rules:
 
             # Stock index fast-path for contrarian: Yahoo Finance real-time price
             _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100",
-                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA")
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
+                                "KXWTI", "KXGOLD")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,

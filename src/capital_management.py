@@ -14,6 +14,8 @@ CLV (Closing Line Value) Tracking:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -469,7 +471,7 @@ class CapitalManager:
             self.logger.error("clv_log_entry_error", error=str(e))
 
     def _update_clv_closing(self, market_id: str, closing_price: float) -> None:
-        """Update CLV record with closing price."""
+        """Update CLV record with closing price (atomic write)."""
         if not self.clv_enabled:
             return
 
@@ -501,10 +503,21 @@ class CapitalManager:
                     record["resolved"] = True
                     break
 
-            # Rewrite file
-            with open(self.clv_file, "w") as f:
-                for record in records:
-                    f.write(json.dumps(record) + "\n")
+            # Atomic write: temp file + rename (safe against crash)
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.clv_file.parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(tmp_fd, "w") as f:
+                    for record in records:
+                        f.write(json.dumps(record) + "\n")
+                os.replace(tmp_path, str(self.clv_file))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
         except Exception as e:
             self.logger.error("clv_update_error", market_id=market_id, error=str(e))
@@ -542,9 +555,21 @@ class CapitalManager:
                         record["clv"] = entry_price - closing_price
                     break
 
-            with open(self.clv_file, "w") as f:
-                for record in records:
-                    f.write(json.dumps(record) + "\n")
+            # Atomic write: temp file + rename (safe against crash)
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.clv_file.parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(tmp_fd, "w") as f:
+                    for record in records:
+                        f.write(json.dumps(record) + "\n")
+                os.replace(tmp_path, str(self.clv_file))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
             self.logger.info(
                 "clv_resolution_logged",

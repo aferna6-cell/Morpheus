@@ -211,6 +211,9 @@ class PositionMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
         self.logger.info("position_monitor_stopped")
 
     async def liquidate_all(self) -> int:
