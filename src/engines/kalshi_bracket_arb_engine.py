@@ -210,7 +210,7 @@ class KalshiBracketArbEngine(BaseEngine):
             if not bracket_set.is_complete:
                 self.logger.debug(
                     "bracket_arb_incomplete_set",
-                    event=event_key,
+                    event_key=event_key,
                     n_brackets=len(markets),
                     missing_asks=[m.ticker for m in markets if m.yes_ask <= 0],
                 )
@@ -224,7 +224,7 @@ class KalshiBracketArbEngine(BaseEngine):
                 opportunities.append(bracket_set)
                 self.logger.info(
                     "bracket_arb_opportunity",
-                    event=event_key,
+                    event_key=event_key,
                     n_brackets=bracket_set.n_brackets,
                     sum_asks=round(bracket_set.sum_yes_asks, 4),
                     margin_pct=round(bracket_set.margin_pct, 2),
@@ -298,7 +298,7 @@ class KalshiBracketArbEngine(BaseEngine):
 
         self.logger.info(
             "bracket_arb_signals_emitted",
-            event=bracket_set.event_key,
+            event_key=bracket_set.event_key,
             n_signals=bracket_set.n_brackets,
             total_cost=round(bracket_set.sum_yes_asks, 3),
             margin_pct=round(bracket_set.margin_pct, 2),
