@@ -1083,6 +1083,8 @@ _forecast_change_events: List[Dict] = []  # recent change events
 
 def _norm_cdf(x: float, mu: float, sigma: float) -> float:
     """Normal CDF using math.erfc (no scipy needed)."""
+    if sigma <= 0:
+        return 1.0 if x >= mu else 0.0
     z = (x - mu) / sigma
     return 0.5 * math.erfc(-z / math.sqrt(2))
 
@@ -1916,8 +1918,8 @@ _INDEX_CONFIG: Dict[str, Dict[str, Any]] = {
     "KXINX": {"yahoo": "^GSPC", "name": "S&P 500", "daily_vol": 0.010, "trading_hours": 6.5},
     "KXNASDAQ100U": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
     "KXNASDAQ100": {"yahoo": "^NDX", "name": "NASDAQ 100", "daily_vol": 0.013, "trading_hours": 6.5},
-    "KXBTCD": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
-    "KXBTC": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.025, "trading_hours": 24.0},
+    "KXBTCD": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.04, "trading_hours": 24.0},
+    "KXBTC": {"yahoo": "BTC-USD", "name": "Bitcoin", "daily_vol": 0.04, "trading_hours": 24.0},
     # ETH — Ethereum (same pattern as BTC)
     "KXETHD": {"yahoo": "ETH-USD", "name": "Ethereum", "daily_vol": 0.040, "trading_hours": 24.0},
     "KXETH": {"yahoo": "ETH-USD", "name": "Ethereum", "daily_vol": 0.040, "trading_hours": 24.0},
@@ -2249,8 +2251,10 @@ async def compute_stock_index_probability(
 
     # z-score for confidence
     z_score = abs(current_price - threshold) / sigma_remaining if sigma_remaining > 0 else 0
-    if z_score < 0.3:
-        # Very close to threshold — too uncertain, let LLM handle
+    # Crypto needs higher z-gate due to higher volatility and model uncertainty
+    is_crypto = config.get("trading_hours", 6.5) >= 24.0
+    min_z = 0.5 if is_crypto else 0.3
+    if z_score < min_z:
         logger.info(
             "stock_index_ambiguous",
             market_id=market_id,
@@ -2258,6 +2262,7 @@ async def compute_stock_index_probability(
             threshold=threshold,
             z_score=round(z_score, 2),
             hours_left=round(hours_left, 2),
+            min_z=min_z,
         )
         return None
 

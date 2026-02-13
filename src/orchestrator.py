@@ -323,7 +323,7 @@ class Orchestrator:
                 event_prefix.startswith(p)
                 for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
             )
-            max_event = 2 if is_weather_event else self._max_per_event
+            max_event = 3 if is_weather_event else self._max_per_event
             if event_count >= max_event:
                 self.logger.info(
                     "dispatch_event_dedup_skip",

@@ -97,6 +97,7 @@ class FillEvent:
     is_partial: bool = False
     entry_edge: float = 0.0
     close_time: Optional[datetime] = None  # market close time
+    signal_source: str = ""  # "noaa_direct", "llm", "yahoo_direct"
 
 
 class FillManager:
@@ -314,6 +315,7 @@ class FillManager:
                     strategy=resting.strategy,
                     entry_edge=resting.entry_edge,
                     close_time=resting.close_time,
+                    signal_source=resting.signal_source,
                 )
 
                 self._daily_orders_filled += 1

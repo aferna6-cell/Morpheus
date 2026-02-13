@@ -38,6 +38,8 @@ _JUNK_TICKER_PREFIXES = [
     # Crypto price ranges (intraday + bracket) — LLMs have no edge
     # KXBTCD/KXBTC: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
     "KXBTC15M",
+    # XRP — no structured data fast-path, pure noise
+    "KXXRP",
     # KXETHD/KXETH: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
     "KXETH15M",
     "KXDOGE", "KXDOGED", "KXSOLD", "KXSOLE", "KXSOL15M",
@@ -81,10 +83,10 @@ class MarketFilters:
         if not isinstance(mf, dict):
             mf = {}
 
-        self.min_volume = float(mf.get("min_volume_24h", 50000))
-        self.max_spread_pct = float(mf.get("max_spread_pct", 0.05))
-        self.max_resolution_days = int(mf.get("max_resolution_days", 30))
-        self.min_data_sources = int(mf.get("min_data_sources", 3))
+        self.min_volume = float(mf.get("min_volume_24h", 500))
+        self.max_spread_pct = float(mf.get("max_spread_pct", 0.10))
+        self.max_resolution_days = int(mf.get("max_resolution_days", 1))
+        self.min_data_sources = int(mf.get("min_data_sources", 0))
         self.min_price = float(mf.get("min_price", 0.05))
         self.max_price = float(mf.get("max_price", 0.95))
 

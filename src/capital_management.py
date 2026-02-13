@@ -110,7 +110,7 @@ class CapitalManager:
 
         self.clv_enabled = bool(clv_cfg.get("enabled", True))
         self.clv_alert_threshold = float(clv_cfg.get("alert_threshold", -0.01))
-        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", 0.01))
+        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", -0.01))
         self.clv_min_samples = int(clv_cfg.get("min_samples", 10))
         self.per_type_tracking = bool(clv_cfg.get("per_type_tracking", True))
         self.per_type_halt_threshold = float(clv_cfg.get("per_type_halt_threshold", -0.01))

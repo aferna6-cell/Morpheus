@@ -127,7 +127,7 @@ class RiskManager:
         base_max_exp = self.config.strategy.get("max_total_exposure", 10.0)
 
         self.max_position_size = min(base_max_pos * scale_factor, total_balance * 0.15)
-        self.max_total_exposure = base_max_exp * scale_factor
+        self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
 
         # Scale contrarian position limit
         base_c_pos = 4.0  # contrarian default
@@ -218,7 +218,7 @@ class RiskManager:
                 signal_source = getattr(signal, "signal_source", None)
                 is_noaa = signal_source == "noaa_direct"
                 effective_kelly = 0.50 if is_noaa else self.kelly_fraction
-                effective_bankroll_pct = self.max_bankroll_pct if is_noaa else 0.10
+                effective_bankroll_pct = self.max_bankroll_pct
 
                 # Brackets have two edges to defend and higher variance than
                 # thresholds.  Reduce Kelly by 1/2 for bracket markets (B-prefix).

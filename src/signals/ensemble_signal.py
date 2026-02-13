@@ -1151,7 +1151,7 @@ Output JSON: {{"p_yes": <your estimate, float 0.0-1.0>, "reason": "your reasonin
 
             # Only blend when challenger meaningfully disagrees (>15% lower)
             if challenge_p < p_yes * 0.85:
-                blended = 0.75 * p_yes + 0.25 * challenge_p
+                blended = 0.60 * p_yes + 0.40 * challenge_p
             else:
                 blended = p_yes  # Challenger agrees — keep original
 
