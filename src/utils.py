@@ -94,6 +94,12 @@ class BotConfig(BaseModel):
     # 15-minute crypto engine
     crypto_engine: Dict[str, Any] = Field(default_factory=dict)
 
+    # Bracket arbitrage scanner
+    bracket_arb: Dict[str, Any] = Field(default_factory=dict)
+
+    # Economic data release sniping
+    econ_sniping: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,

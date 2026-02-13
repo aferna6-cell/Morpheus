@@ -178,11 +178,8 @@ class KalshiExecutor:
                 else:
                     cross_amount = 2
             elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.65:
-                # High-edge signals: cross 2c
-                if spread_cents > 0:
-                    cross_amount = min(max(1, spread_cents // 2), 2)
-                else:
-                    cross_amount = 2
+                # High-edge LLM signals: cross 1c max (Whelan: makers beat takers)
+                cross_amount = 1
             elif strategy == "market_making" and signal.confidence >= 0.60:
                 # MM: cross 1-2c to improve fill rate
                 if spread_cents > 0:
@@ -190,8 +187,9 @@ class KalshiExecutor:
                 else:
                     cross_amount = 1
             elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.55:
-                # Moderate-edge signals: cross 1c
-                cross_amount = 1
+                # Moderate-edge LLM signals: no crossing (prefer maker orders)
+                # Whelan et al.: makers systematically outperform takers
+                cross_amount = 0
 
             if cross_amount > 0:
                 original_price = price_cents

@@ -581,6 +581,62 @@ class EnsembleSignal(Signal):
                             f"Stock index direct: net edge {net_edge:.3f} < {min_edge:.3f}",
                         )
 
+            # Economic data release sniping: fast-path for CPI/jobs/GDP on release days
+            if mtype == "economic" or any(w in (market.question or "").lower() for w in [
+                "cpi", "inflation", "nonfarm", "payroll", "unemployment", "gdp", "ppi",
+            ]):
+                try:
+                    from ..structured_data import check_economic_release
+                    econ_result = await check_economic_release(
+                        market.question, market.id,
+                    )
+                    if econ_result is not None:
+                        p_yes, ec_confidence, ec_reasoning = econ_result
+                        raw_edge = p_yes - market_price
+                        net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
+                        min_edge = 0.05
+
+                        if net_edge >= min_edge:
+                            if raw_edge > 0:
+                                side = TradingSide.BUY_YES
+                            elif raw_edge < 0:
+                                side = TradingSide.BUY_NO
+                            else:
+                                side = TradingSide.HOLD
+
+                            conviction = "high" if net_edge >= 0.10 else "medium"
+                            reasoning = (
+                                f"{ec_reasoning} | "
+                                f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
+                                f"net_edge={net_edge:+.3f}"
+                            )
+
+                            self.logger.info(
+                                "econ_release_fast_path",
+                                market_id=market.id,
+                                p_yes=round(p_yes, 4),
+                                market_price=market_price,
+                                net_edge=round(net_edge, 4),
+                                side=side.value,
+                            )
+
+                            result = SignalResult(
+                                estimated_prob=p_yes,
+                                confidence=ec_confidence,
+                                edge=raw_edge,
+                                recommended_side=side,
+                                reasoning=reasoning,
+                                signal_name=self.name,
+                                market_price=market_price,
+                                timestamp=datetime.now(timezone.utc).isoformat(),
+                            )
+                            result.net_edge = net_edge  # type: ignore[attr-defined]
+                            result.conviction = conviction  # type: ignore[attr-defined]
+                            result.signal_source = "fred_release"  # type: ignore[attr-defined]
+                            return result
+                except Exception as e:
+                    self.logger.debug("econ_release_check_error", error=str(e))
+
             # Budget check — AFTER fast-paths (NOAA/FRED/Yahoo cost $0, only LLM calls need budget)
             if self.cost_tracker and not self.cost_tracker.check_budget():
                 return self._hold(market, "LLM budget exceeded")

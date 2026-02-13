@@ -715,6 +715,109 @@ _FORECAST_CACHE_TTL = 600.0  # 10 min — catch NOAA forecast updates faster
 _observation_cache: Dict[str, Tuple[float, Dict]] = {}
 _OBSERVATION_CACHE_TTL = 300.0  # 5 min
 
+# Cache for Open-Meteo GFS ensemble data (15 min TTL)
+_ensemble_cache: Dict[str, Tuple[float, Dict]] = {}
+_ENSEMBLE_CACHE_TTL = 900.0  # 15 min
+
+
+async def _fetch_open_meteo_ensemble(
+    lat: float, lon: float, target_date: str,
+) -> Optional[Dict[str, List[float]]]:
+    """Fetch GFS ensemble (31 members) from Open-Meteo.
+
+    Returns dict with:
+      temperature_max: List[float]  — 31 high temp values (°F)
+      temperature_min: List[float]  — 31 low temp values (°F)
+
+    Free API, no key required. Rate limit: ~10K/day.
+    """
+    cache_key = f"{lat:.2f},{lon:.2f}:{target_date}"
+    cached = _ensemble_cache.get(cache_key)
+    if cached:
+        ts, data = cached
+        if time.monotonic() - ts < _ENSEMBLE_CACHE_TTL:
+            return data
+
+    url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "temperature_unit": "fahrenheit",
+        "models": "gfs_seamless",
+        "start_date": target_date,
+        "end_date": target_date,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.debug("open_meteo_http_error", status=resp.status_code)
+                return None
+            data = resp.json()
+
+        # Parse ensemble members from response
+        daily = data.get("daily", {})
+        max_temps = daily.get("temperature_2m_max", [])
+        min_temps = daily.get("temperature_2m_min", [])
+
+        if not max_temps and not min_temps:
+            logger.debug("open_meteo_no_data", response_keys=list(data.keys()))
+            return None
+
+        # Open-Meteo returns one value per member per day
+        # For 31-member GFS ensemble, we get 31 values
+        result = {
+            "temperature_max": [float(t) for t in max_temps if t is not None],
+            "temperature_min": [float(t) for t in min_temps if t is not None],
+        }
+
+        _ensemble_cache[cache_key] = (time.monotonic(), result)
+        logger.info(
+            "open_meteo_ensemble_fetched",
+            lat=lat, lon=lon, date=target_date,
+            n_max=len(result["temperature_max"]),
+            n_min=len(result["temperature_min"]),
+        )
+        return result
+
+    except Exception as e:
+        logger.debug("open_meteo_fetch_error", error=str(e))
+        return None
+
+
+def _ensemble_probability(
+    members: List[float], threshold: float, direction: str,
+    bracket_bounds: Optional[Tuple[float, float]] = None,
+) -> Optional[float]:
+    """Compute probability from ensemble members.
+
+    Args:
+        members: List of ensemble member forecast values.
+        threshold: Temperature threshold.
+        direction: "above", "below", or "bracket".
+        bracket_bounds: (lower, upper) for bracket markets.
+
+    Returns:
+        Probability estimate (0-1) or None if insufficient data.
+    """
+    if not members or len(members) < 5:
+        return None
+
+    n = len(members)
+    if direction == "above":
+        count = sum(1 for m in members if m >= threshold)
+    elif direction == "below":
+        count = sum(1 for m in members if m < threshold)
+    elif direction == "bracket" and bracket_bounds:
+        lo, hi = bracket_bounds
+        count = sum(1 for m in members if lo <= m < hi)
+    else:
+        return None
+
+    return count / n
+
 
 def _parse_city(question: str) -> Optional[str]:
     """Extract city name from market question using longest-match.
@@ -1624,7 +1727,8 @@ async def compute_weather_probability(
     if period_name:
         weather_forecast_changed(city, period_name, forecast_temp)
 
-    # 7. Compute probability
+    # 7. Compute NWS-based probability
+    bracket_bounds = None
     if "bracket" in t_type:
         # Bracket market: "X-Y°F" — t_value is midpoint, need to find bounds
         q = question.lower()
@@ -1633,13 +1737,62 @@ async def compute_weather_probability(
             return None
         lower = float(m.group(1))
         upper = float(m.group(2))
-        p_yes = _norm_cdf(upper, forecast_temp, sigma) - _norm_cdf(lower, forecast_temp, sigma)
+        bracket_bounds = (lower, upper)
+        p_nws = _norm_cdf(upper, forecast_temp, sigma) - _norm_cdf(lower, forecast_temp, sigma)
     elif "below" in t_type:
         # "<X" market: YES means temp is below threshold
-        p_yes = _norm_cdf(t_value, forecast_temp, sigma)
+        p_nws = _norm_cdf(t_value, forecast_temp, sigma)
     else:
         # ">X" market: YES means temp is above threshold
-        p_yes = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
+        p_nws = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
+
+    # 7b. Open-Meteo GFS ensemble blend (31 members, empirical probability)
+    p_ensemble = None
+    if coords:
+        target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
+        ensemble_data = await _fetch_open_meteo_ensemble(coords[0], coords[1], target_str)
+        if ensemble_data:
+            # Select high or low members based on market type
+            if "high" in t_type:
+                members = ensemble_data.get("temperature_max", [])
+            elif "low" in t_type:
+                members = ensemble_data.get("temperature_min", [])
+            else:
+                members = ensemble_data.get("temperature_max", [])
+
+            if members and len(members) >= 5:
+                if "bracket" in t_type and bracket_bounds:
+                    direction = "bracket"
+                elif "below" in t_type:
+                    direction = "below"
+                else:
+                    direction = "above"
+                p_ensemble = _ensemble_probability(
+                    members, t_value, direction,
+                    bracket_bounds=bracket_bounds,
+                )
+
+    # Blend NWS + ensemble: NWS is more accurate for 1-2 day, ensemble
+    # captures tails better. If they disagree by >15%, trust ensemble more.
+    if p_ensemble is not None:
+        disagreement = abs(p_nws - p_ensemble)
+        if disagreement > 0.15:
+            # Large disagreement: ensemble likely captures tail risk better
+            p_yes = 0.4 * p_nws + 0.6 * p_ensemble
+        else:
+            # Agreement: NWS-weighted blend
+            p_yes = 0.6 * p_nws + 0.4 * p_ensemble
+        logger.info(
+            "weather_ensemble_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_ensemble=round(p_ensemble, 4),
+            p_blended=round(p_yes, 4),
+            disagreement=round(disagreement, 4),
+            n_members=len(members) if members else 0,
+        )
+    else:
+        p_yes = p_nws
 
     # Clamp
     p_yes = max(0.001, min(0.999, p_yes))
@@ -2410,6 +2563,220 @@ def _parse_jobless_threshold(question: str, market_id: str = "") -> Optional[flo
         r"(?:above|over|exceed|more than)\s+([\d,]+)",
         r"([\d,]+)\s+(?:or more|or higher)",
     ]
+    for pattern in patterns:
+        m = re.search(pattern, q)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Economic Data Release Sniping
+# ---------------------------------------------------------------------------
+
+# FRED series + typical release schedule (hour in ET, day pattern)
+_ECON_RELEASES = {
+    "cpi": {
+        "series_id": "CPIAUCSL",
+        "label": "CPI Index (SA)",
+        "release_hour_et": 8,   # 8:30 AM ET
+        "release_minute_et": 30,
+        "typical_day_of_month": (10, 14),  # usually 10th-14th
+        "sigma_pct": 0.2,       # typical MoM surprise magnitude
+    },
+    "jobs": {
+        "series_id": "PAYEMS",
+        "label": "Nonfarm Payrolls (thousands)",
+        "release_hour_et": 8,
+        "release_minute_et": 30,
+        "typical_day_of_month": (1, 7),  # first Friday
+        "sigma_pct": 0.5,       # jobs often surprise by 50K+
+    },
+    "unemployment": {
+        "series_id": "UNRATE",
+        "label": "Unemployment Rate (%)",
+        "release_hour_et": 8,
+        "release_minute_et": 30,
+        "typical_day_of_month": (1, 7),
+        "sigma_pct": 0.1,       # typically ±0.1%
+    },
+    "gdp": {
+        "series_id": "A191RL1Q225SBEA",
+        "label": "Real GDP Growth Rate (%)",
+        "release_hour_et": 8,
+        "release_minute_et": 30,
+        "typical_day_of_month": (25, 30),  # end of month
+        "sigma_pct": 0.3,
+    },
+    "ppi": {
+        "series_id": "PPIFIS",
+        "label": "PPI Final Demand",
+        "release_hour_et": 8,
+        "release_minute_et": 30,
+        "typical_day_of_month": (11, 16),
+        "sigma_pct": 0.3,
+    },
+    "jobless_claims": {
+        "series_id": "ICSA",
+        "label": "Initial Jobless Claims",
+        "release_hour_et": 8,
+        "release_minute_et": 30,
+        "typical_day_of_month": (1, 31),  # every Thursday
+        "sigma_pct": 2.0,  # claims can swing 10-20K
+    },
+}
+
+# Cache for last-seen FRED values (to detect new releases)
+_econ_last_seen: Dict[str, Tuple[str, float]] = {}  # series_id → (date, value)
+
+
+async def check_economic_release(
+    question: str, market_id: str = "",
+) -> Optional[Tuple[float, float, str]]:
+    """Check if a relevant economic release just happened.
+
+    Compares latest FRED data against previous value + trend.
+    Returns (p_yes, confidence, reasoning) if a significant release is detected,
+    None otherwise. This is a fast-path that bypasses LLM.
+
+    Only fires near scheduled release times (±2 hours) to avoid false positives.
+    """
+    q = question.lower()
+
+    # Match question to economic indicator
+    matched_release = None
+    if any(w in q for w in ["cpi", "inflation", "consumer price"]):
+        matched_release = "cpi"
+    elif any(w in q for w in ["nonfarm", "payroll", "jobs report", "jobs added"]):
+        matched_release = "jobs"
+    elif any(w in q for w in ["unemployment rate", "jobless rate"]):
+        matched_release = "unemployment"
+    elif "gdp" in q:
+        matched_release = "gdp"
+    elif "ppi" in q:
+        matched_release = "ppi"
+    elif any(w in q for w in ["jobless claims", "initial claims", "weekly claims"]):
+        matched_release = "jobless_claims"
+
+    if not matched_release:
+        return None
+
+    release_info = _ECON_RELEASES[matched_release]
+    series_id = release_info["series_id"]
+
+    # Check if we're near a release window (within 2 hours after scheduled time)
+    now_utc = datetime.now(timezone.utc)
+    # ET is UTC-5 (EST) or UTC-4 (EDT). Use UTC-5 as conservative estimate.
+    now_et_hour = (now_utc.hour - 5) % 24
+    release_hour = release_info["release_hour_et"]
+    hours_since_release = now_et_hour - release_hour
+    if hours_since_release < 0:
+        hours_since_release += 24
+
+    # Only check within 2 hours after scheduled release time
+    if hours_since_release > 2:
+        return None
+
+    # Fetch latest FRED data
+    observations = await _fetch_fred_series(series_id, limit=3)
+    if len(observations) < 2:
+        return None
+
+    try:
+        latest_val = float(observations[0]["value"])
+        latest_date = observations[0]["date"]
+        prev_val = float(observations[1]["value"])
+    except (ValueError, TypeError, KeyError):
+        return None
+
+    # Check if this is a NEW release (not already seen)
+    last_seen = _econ_last_seen.get(series_id)
+    if last_seen and last_seen[0] == latest_date:
+        return None  # Already processed this release
+
+    _econ_last_seen[series_id] = (latest_date, latest_val)
+
+    # Compute surprise magnitude
+    if prev_val == 0:
+        return None
+    change_pct = ((latest_val - prev_val) / abs(prev_val)) * 100
+    sigma = release_info["sigma_pct"]
+    z_score = abs(change_pct) / sigma if sigma > 0 else 0
+
+    # Only signal on significant surprises (> 1 sigma)
+    if z_score < 1.0:
+        logger.info(
+            "econ_release_insignificant",
+            indicator=matched_release,
+            latest=latest_val,
+            previous=prev_val,
+            change_pct=round(change_pct, 3),
+            z_score=round(z_score, 2),
+        )
+        return None
+
+    # Parse threshold from question to compute probability
+    threshold = _parse_econ_threshold(question, matched_release)
+    if threshold is None:
+        logger.info(
+            "econ_release_no_threshold",
+            indicator=matched_release,
+            latest=latest_val,
+            msg="Could not parse threshold from question",
+        )
+        return None
+
+    # Compute probability: is the actual value above or below the threshold?
+    if latest_val >= threshold:
+        p_yes = min(0.95, 0.70 + z_score * 0.05)  # data already above → likely YES
+    else:
+        p_yes = max(0.05, 0.30 - z_score * 0.05)  # data below → likely NO
+
+    confidence = min(0.90, 0.60 + z_score * 0.10)
+
+    reasoning = (
+        f"Econ release snipe ({matched_release}): {release_info['label']} = {latest_val} "
+        f"(prev: {prev_val}, change: {change_pct:+.2f}%, z={z_score:.1f}σ). "
+        f"Threshold: {threshold}, p_yes={p_yes:.3f}"
+    )
+
+    logger.info(
+        "econ_release_signal",
+        indicator=matched_release,
+        latest=latest_val,
+        previous=prev_val,
+        change_pct=round(change_pct, 3),
+        z_score=round(z_score, 2),
+        threshold=threshold,
+        p_yes=round(p_yes, 4),
+        confidence=round(confidence, 3),
+    )
+
+    return (p_yes, confidence, reasoning)
+
+
+def _parse_econ_threshold(question: str, indicator: str) -> Optional[float]:
+    """Parse the threshold value from an economic market question.
+
+    Examples:
+      "Will CPI increase by more than 0.3% MoM?" → 0.3
+      "Will unemployment rate be above 4.0%?" → 4.0
+      "Will nonfarm payrolls exceed 200,000?" → 200000
+    """
+    q = question.lower()
+
+    # Try common patterns
+    patterns = [
+        r"(?:above|over|exceed|more than|at least|higher than)\s+([\d,.]+)",
+        r"([\d,.]+)\s*%",
+        r"(?:below|under|less than|lower than)\s+([\d,.]+)",
+        r"([\d,]+)\s+(?:or more|or higher|or greater)",
+    ]
+
     for pattern in patterns:
         m = re.search(pattern, q)
         if m:

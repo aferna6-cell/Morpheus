@@ -255,21 +255,40 @@ class MarketFilters:
         bid: float,
         ask: float,
     ) -> FilterResult:
-        """Skip markets with extreme prices where LLM has no edge."""
+        """Skip markets with extreme prices where LLM has no edge.
+
+        Weather/index markets with structured data fast-paths use the wider
+        5-95% range (NOAA/Yahoo signals justify entry at extreme prices).
+        All other markets use the tighter 10-90% range per Whelan et al. (2025)
+        favorite-longshot bias evidence.
+        """
         if bid <= 0 or ask <= 0:
             return FilterResult(passed=True, reason="ok", market_id=market_id)
 
         mid = (bid + ask) / 2
-        if mid < self.min_price:
+
+        # Weather and index markets have hard-data fast-paths that justify
+        # extreme-price entries. Use wider 5-95% range for these.
+        _FASTPATH_PREFIXES = (
+            "KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND",
+            "KXINXU", "KXINX-", "KXNASDAQ100",
+        )
+        has_fastpath = any(
+            market_id.upper().startswith(p) for p in _FASTPATH_PREFIXES
+        )
+        price_floor = 0.05 if has_fastpath else self.min_price
+        price_ceil = 0.95 if has_fastpath else self.max_price
+
+        if mid < price_floor:
             return FilterResult(
                 passed=False,
-                reason=f"Price {mid:.0%} below {self.min_price:.0%} min (too certain NO)",
+                reason=f"Price {mid:.0%} below {price_floor:.0%} min (too certain NO)",
                 market_id=market_id,
             )
-        if mid > self.max_price:
+        if mid > price_ceil:
             return FilterResult(
                 passed=False,
-                reason=f"Price {mid:.0%} above {self.max_price:.0%} max (too certain YES)",
+                reason=f"Price {mid:.0%} above {price_ceil:.0%} max (too certain YES)",
                 market_id=market_id,
             )
         return FilterResult(passed=True, reason="ok", market_id=market_id)

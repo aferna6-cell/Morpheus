@@ -1,20 +1,27 @@
-"""Kalshi market-making engine.
+"""Kalshi market-making engine with Avellaneda-Stoikov dynamic spreads.
 
 Exploits zero maker fees on Kalshi by posting two-sided limit orders.
 Every filled spread is pure profit. The engine:
 
 1. Selects high-volume, wide-spread markets suitable for MM
-2. Posts bid/ask on both YES and NO sides (effectively a spread)
-3. Manages inventory to avoid one-sided exposure
+2. Computes optimal bid/ask using Avellaneda-Stoikov reservation price
+3. Manages inventory to avoid one-sided exposure via inventory-skewed quotes
 4. Pulls/widens quotes on adverse conditions (volume spikes, one-sided fills)
+
+The A-S framework provides mathematically optimal quoting:
+- Reservation price: r = mid - q * gamma * sigma^2 * (T - t)
+- Optimal spread: delta = gamma * sigma^2 * (T-t) + (2/gamma) * log(1 + gamma/kappa)
+- Quote placement: bid = r - delta/2, ask = r + delta/2
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import structlog
 
@@ -53,6 +60,7 @@ class MMMarketState:
     last_quote_time: Optional[datetime] = None
     consecutive_one_sided: int = 0  # adverse selection counter
     consecutive_ob_errors: int = 0  # orderbook fetch failures
+    recent_mids: Deque[float] = field(default_factory=lambda: deque(maxlen=20))  # for sigma estimation
 
 
 class KalshiMMEngine(BaseEngine):
@@ -90,6 +98,15 @@ class KalshiMMEngine(BaseEngine):
         self._scan_interval_seconds = float(mm_cfg.get("scan_interval_seconds", 300.0))
         self._min_price_cents = int(mm_cfg.get("min_price_cents", 15))
         self._max_price_cents = int(mm_cfg.get("max_price_cents", 85))
+
+        # Avellaneda-Stoikov parameters
+        as_cfg = mm_cfg.get("avellaneda_stoikov", {})
+        if not isinstance(as_cfg, dict):
+            as_cfg = {}
+        self._gamma = float(as_cfg.get("gamma", 0.3))          # risk aversion
+        self._default_sigma = float(as_cfg.get("default_sigma", 0.15))  # volatility fallback
+        self._as_min_spread = int(as_cfg.get("min_spread_cents", 2))
+        self._as_max_spread = int(as_cfg.get("max_spread_cents", 15))
 
         # State
         self._markets: Dict[str, MMMarketState] = {}
@@ -281,8 +298,74 @@ class KalshiMMEngine(BaseEngine):
                 inventory={t: s.inventory for t, s in self._markets.items()},
             )
 
+    def _estimate_sigma(self, state: MMMarketState) -> float:
+        """Estimate market volatility from recent midpoint observations.
+
+        Uses standard deviation of recent mids. Falls back to default if
+        insufficient data.
+        """
+        if len(state.recent_mids) < 3:
+            return self._default_sigma
+
+        mids = list(state.recent_mids)
+        mean = sum(mids) / len(mids)
+        variance = sum((m - mean) ** 2 for m in mids) / len(mids)
+        sigma = math.sqrt(variance) if variance > 0 else self._default_sigma
+        # Clamp to reasonable range
+        return max(0.02, min(0.40, sigma))
+
+    def _compute_as_quotes(
+        self, mid_cents: float, state: MMMarketState, sigma: float,
+    ) -> tuple[int, int]:
+        """Compute Avellaneda-Stoikov optimal bid/ask.
+
+        Reservation price:  r = mid - q * gamma * sigma^2 * (T - t)
+        Optimal spread:     delta = gamma * sigma^2 * (T-t) + (2/gamma) * log(1 + gamma/kappa)
+
+        Returns: (yes_bid_cents, yes_ask_cents)
+        """
+        gamma = self._gamma
+        q = state.inventory
+
+        # Time remaining (in hours, normalized to 0-1 range for 24h markets)
+        if state.close_time:
+            hours_left = max(0.1, (state.close_time - datetime.now(timezone.utc)).total_seconds() / 3600)
+            t_remaining = min(hours_left / 24.0, 1.0)  # normalize to [0, 1]
+        else:
+            t_remaining = 0.5  # default: assume 12h left
+
+        # Estimate order arrival rate (kappa) from volume
+        # Higher volume = faster fills = can quote tighter
+        kappa = max(0.5, state.volume / 5000.0)
+
+        # Reservation price: skewed by inventory
+        mid_frac = mid_cents / 100.0
+        r = mid_frac - q * gamma * (sigma ** 2) * t_remaining
+        r = max(0.02, min(0.98, r))
+
+        # Optimal spread
+        vol_term = gamma * (sigma ** 2) * t_remaining
+        arrival_term = (2.0 / gamma) * math.log(1.0 + gamma / kappa) if kappa > 0 else 0.04
+        delta = vol_term + arrival_term
+
+        # Convert to cents
+        half_spread = max(self._as_min_spread / 2.0, delta * 100.0 / 2.0)
+        half_spread = min(self._as_max_spread / 2.0, half_spread)
+
+        r_cents = r * 100.0
+        bid = int(r_cents - half_spread)
+        ask = int(math.ceil(r_cents + half_spread))
+
+        # Clamp
+        bid = max(1, min(98, bid))
+        ask = max(2, min(99, ask))
+        if bid >= ask:
+            bid = max(1, ask - self._as_min_spread)
+
+        return bid, ask
+
     async def _generate_quotes(self, state: MMMarketState) -> None:
-        """Generate bid/ask signals for a market."""
+        """Generate Avellaneda-Stoikov optimal bid/ask signals for a market."""
         # Get fresh orderbook
         try:
             ob = await self.kalshi_client.get_orderbook(state.ticker)
@@ -303,8 +386,6 @@ class KalshiMMEngine(BaseEngine):
         yes_bids = ob.get("yes", [])
         no_bids = ob.get("no", [])
 
-        # yes_bids are sorted by price descending (best bid first)
-        # no_bids are sorted similarly
         best_yes_bid = yes_bids[0][0] if yes_bids else 0
         best_no_bid = no_bids[0][0] if no_bids else 0
 
@@ -320,56 +401,46 @@ class KalshiMMEngine(BaseEngine):
 
         mid_cents = (best_yes_bid + best_yes_ask) / 2.0
 
-        # Calculate our quotes: inside the spread by 1 cent
-        our_yes_bid = best_yes_bid + 1
-        our_yes_ask = best_yes_ask - 1
+        # Track mid for sigma estimation
+        state.recent_mids.append(mid_cents / 100.0)
+        state.last_yes_mid = mid_cents / 100.0
 
-        # Inventory skew: if long YES, lower bid / raise ask to reduce exposure
-        if abs(state.inventory) > 0:
-            skew = min(
-                self._inventory_skew_cents,
-                abs(state.inventory) * 1,  # 1 cent per contract of inventory
-            )
-            if state.inventory > 0:
-                # Long YES — want to sell YES, make selling easier
-                our_yes_bid -= skew  # less eager to buy more YES
-                our_yes_ask -= skew  # more eager to sell YES
-            else:
-                # Long NO — want to sell NO (buy YES to flatten)
-                our_yes_bid += skew  # more eager to buy YES
-                our_yes_ask += skew  # less eager to sell YES
+        # Estimate volatility
+        sigma = self._estimate_sigma(state)
 
-        # Ensure bid < ask and within bounds
-        our_yes_bid = max(1, min(98, int(our_yes_bid)))
-        our_yes_ask = max(2, min(99, int(our_yes_ask)))
+        # Compute A-S optimal quotes
+        our_yes_bid, our_yes_ask = self._compute_as_quotes(mid_cents, state, sigma)
+
+        # Ensure our quotes are inside (or at) the market spread
+        our_yes_bid = max(our_yes_bid, best_yes_bid)
+        our_yes_ask = min(our_yes_ask, best_yes_ask)
+
         if our_yes_bid >= our_yes_ask:
-            return  # Can't quote
+            return  # Can't quote profitably
 
         # Check inventory limits
         if abs(state.inventory) >= self._max_inventory:
             # Only quote on the reducing side
             if state.inventory > 0:
-                # Only sell YES (ask side)
                 self._emit_mm_signal(state, "buy_no", 100 - our_yes_ask, state.ticker)
             else:
-                # Only buy YES (bid side)
                 self._emit_mm_signal(state, "buy_yes", our_yes_bid, state.ticker)
             return
 
         # Emit both sides
-        # Buy YES at our bid
         self._emit_mm_signal(state, "buy_yes", our_yes_bid, state.ticker)
-        # Sell YES = Buy NO at (100 - our_ask)
         self._emit_mm_signal(state, "buy_no", 100 - our_yes_ask, state.ticker)
 
         state.last_quote_time = datetime.now(timezone.utc)
         self.logger.debug(
-            "mm_quotes_generated",
+            "mm_as_quotes_generated",
             ticker=state.ticker,
             yes_bid=our_yes_bid,
             yes_ask=our_yes_ask,
             spread=our_yes_ask - our_yes_bid,
             inventory=state.inventory,
+            sigma=round(sigma, 4),
+            market_spread=spread_cents,
         )
 
     def _emit_mm_signal(

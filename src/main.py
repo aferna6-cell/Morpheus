@@ -247,6 +247,17 @@ async def run(
                     engines.append(crypto_engine)
                     logger.info("kalshi_crypto_engine_initialized")
 
+            # Bracket arbitrage engine (risk-free bracket set mispricings)
+            arb_cfg = getattr(config, "bracket_arb", None) or {}
+            if isinstance(arb_cfg, dict) and arb_cfg.get("enabled", False):
+                from .engines.kalshi_bracket_arb_engine import KalshiBracketArbEngine
+                bracket_arb_engine = KalshiBracketArbEngine(
+                    config=config,
+                    kalshi_client=kalshi_read,
+                )
+                engines.append(bracket_arb_engine)
+                logger.info("kalshi_bracket_arb_engine_initialized")
+
             # Wire resume callback: when a halted account resumes, trigger engine rescans
             _engines_for_rescan = list(engines)
             def _on_account_resume():

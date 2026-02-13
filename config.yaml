@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto", "kalshi_bracket_arb"]
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -18,8 +18,8 @@ strategy:
 # Market filters — loosened for volume
 market_filters:
   min_volume_24h: 1000              # raised (was 500) — only liquid markets
-  min_price: 0.05
-  max_price: 0.95
+  min_price: 0.10
+  max_price: 0.90
   min_liquidity: 500                # raised (was 200) — better fill rates
   min_liquidity_aggressive: 500
   max_spread_pct: 0.10              # relaxed — 8c at 90c mid = 8.4%, need headroom
@@ -201,6 +201,11 @@ market_making:
   scan_interval_seconds: 300        # rescan markets every 5 min
   min_price_cents: 15               # only MM in 15-85 range
   max_price_cents: 85
+  avellaneda_stoikov:
+    gamma: 0.3                        # risk aversion (0.1 aggressive, 0.5 conservative)
+    default_sigma: 0.15               # volatility fallback when no trade history
+    min_spread_cents: 2               # never quote tighter than 2c
+    max_spread_cents: 15              # never quote wider than 15c
 
 # 15-minute crypto engine — directional momentum on KXBTC15M
 crypto_engine:
@@ -221,6 +226,15 @@ crypto_engine:
   ws_url: "wss://ws-feed.exchange.coinbase.com"  # Coinbase (US-friendly)
   ticker_prefix: "KXBTC15M"
 
+# Bracket arbitrage scanner — risk-free profit from mispriced bracket sets
+bracket_arb:
+  enabled: true
+  scan_interval_seconds: 300       # scan every 5 minutes
+  min_margin_pct: 3.0              # sum must be < 97c (covers fees + slippage)
+  max_active_sets: 2               # max 2 arb sets at once (capital constraint)
+  max_days_to_close: 3             # brackets closing within 3 days
+  min_brackets: 3                  # need at least 3 brackets to form a set
+
 # CLV tracking
 clv_tracking:
   enabled: true
@@ -240,6 +254,13 @@ alerts:
   alert_on_error: true
   daily_summary: true
   daily_summary_hour: 23            # 11 PM UTC
+
+# Economic data release sniping (CPI/jobs/GDP fast-path on release days)
+econ_sniping:
+  enabled: true
+  min_edge: 0.05                   # 5% minimum edge for econ signals
+  min_z_score: 1.0                 # only signal on 1+ sigma surprises
+  release_window_hours: 2          # check within 2 hours after scheduled release
 
 # Compatibility
 bregman_arb: {}
