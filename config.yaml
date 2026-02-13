@@ -4,10 +4,10 @@
 strategy:
   enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
-  kelly_fraction: 0.33              # third-Kelly (was quarter)
-  max_position_pct: 0.05            # 5% of bankroll cap
-  max_position_size: 3.0            # $3 max (scaled for ~$6.56 bankroll)
-  max_total_exposure: 10.0          # $10 max exposure
+  kelly_fraction: 0.50              # half-Kelly (was third)
+  max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
+  max_position_size: 8.0            # $8 max (was $3)
+  max_total_exposure: 25.0          # $25 max exposure (was $10)
   min_confidence: 0.3
   min_conviction: "low"             # allow all positive-edge trades (was "medium")
   high_conviction_multiplier: 1.3
@@ -100,8 +100,8 @@ news:
 
 # Risk — tuned for $100/account
 risk:
-  max_loss_per_trade: 2.0           # $2 max loss per trade
-  max_daily_loss: 3.0               # $3 daily loss limit
+  max_loss_per_trade: 4.0           # $4 max loss per trade (was $2)
+  max_daily_loss: 6.0               # $6 daily loss limit (was $3)
   stop_loss_pct: 0.35               # 35% stop loss (was 25%)
   take_profit_pct: 0.60             # 60% take profit — let winners run in binary markets
   max_position_hold_hours: 24       # same-day (was 168)
@@ -109,7 +109,7 @@ risk:
   cooldown_minutes: 15              # shorter cooldown
   prevent_retrade: true
   use_quarter_kelly: false          # using third-Kelly now
-  max_bankroll_pct: 0.15            # 15% per trade (5% of $6.56 = $0.33, too small)
+  max_bankroll_pct: 0.20            # 20% per trade (was 15%)
   weather_repricing_enabled: true
   weather_exit_threshold: -0.05     # exit when edge drops to -5%
   weather_exit_threshold_high_conf: -0.03  # tighter exit for high-confidence NOAA signals
