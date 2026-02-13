@@ -97,6 +97,9 @@ class BotConfig(BaseModel):
     # Bracket arbitrage scanner
     bracket_arb: Dict[str, Any] = Field(default_factory=dict)
 
+    # Theta decay engine (time-decay seller)
+    theta_engine: Dict[str, Any] = Field(default_factory=dict)
+
     # Economic data release sniping
     econ_sniping: Dict[str, Any] = Field(default_factory=dict)
 

@@ -936,15 +936,44 @@ class EnsembleSignal(Signal):
             else:
                 side = TradingSide.HOLD
 
-            # buy_yes needs higher edge — LLM systematically overestimates YES
-            # Wave 16: buy_yes was 3W/11L (21% WR), -$17.97
-            if side == TradingSide.BUY_YES and net_edge < 0.10:
-                result = self._hold(
-                    market,
-                    f"buy_yes edge {net_edge:.3f} below 10% minimum (YES bias filter)",
-                )
-                self._cache.put(ck, result)
-                return result
+            # Direction-dependent edge gating (Whelan 300K + Becker 72.1M trades):
+            # - YES side is systematically overpriced (optimism tax)
+            # - Makers buying NO earn +1.25% vs +0.77% for YES
+            # - Longshot YES (<30c) lose 60%+ of investment
+            #
+            # Wave 16 base: buy_yes needs 10% min edge
+            # Wave 20: add longshot premium + NO-side discount
+            if side == TradingSide.BUY_YES:
+                yes_min_edge = 0.10  # base YES edge gate
+                # Longshot premium: cheap YES contracts are the biggest
+                # money pit in prediction markets (Whelan: lose 60%+)
+                # Check deep longshots first (order matters!)
+                if market_price < 0.20:
+                    yes_min_edge = 0.20  # 20% for deep longshots
+                elif market_price < 0.30:
+                    yes_min_edge = 0.15  # 15% for longshots
+                if net_edge < yes_min_edge:
+                    result = self._hold(
+                        market,
+                        f"buy_yes edge {net_edge:.3f} below {yes_min_edge:.0%} "
+                        f"(YES bias + longshot filter, mkt={market_price:.2f})",
+                    )
+                    self._cache.put(ck, result)
+                    return result
+            elif side == TradingSide.BUY_NO:
+                # NO-side discount: buying NO is structurally advantaged
+                # (Becker 72.1M trades: makers buying NO earn +1.25% excess return)
+                # Discount scales with YES price — high-price YES (>70c) = cheap NO
+                no_min_edge = min_edge
+                if market_price > 0.70:
+                    no_min_edge = max(0.03, min_edge - 0.02)  # 2% easier entry
+                if net_edge < no_min_edge:
+                    result = self._hold(
+                        market,
+                        f"buy_no edge {net_edge:.3f} below {no_min_edge:.3f} (NO-side gate)",
+                    )
+                    self._cache.put(ck, result)
+                    return result
 
             # Payout ratio filter — don't buy $0.95 contracts to win $0.05
             if side != TradingSide.HOLD:

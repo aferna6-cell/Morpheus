@@ -111,9 +111,11 @@ class KalshiCryptoEngine(BaseEngine):
         self.logger.info("crypto_engine_stopped")
 
     async def get_signals(self) -> List[TradeSignal]:
-        signals = list(self._pending_signals)
-        self._pending_signals.clear()
-        return signals
+        # DISABLED: crypto engine bypasses market_filters blocklist and loses money.
+        # Feb 13 audit: 43 crypto trades, -$28.03. Re-enable only after adding
+        # MarketFilters integration and proving positive expectancy.
+        self.logger.info("crypto_engine_disabled")
+        return []
 
     # ------------------------------------------------------------------
     # Market scanning

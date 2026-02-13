@@ -12,6 +12,7 @@ Sources:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -797,6 +798,87 @@ async def _fetch_open_meteo_ensemble(
 
     except Exception as e:
         logger.debug("open_meteo_fetch_error", error=str(e))
+        return None
+
+
+# Cache for ECMWF IFS ensemble data (15 min TTL)
+_ecmwf_cache: Dict[str, Tuple[float, Dict]] = {}
+_ECMWF_CACHE_TTL = 900.0  # 15 min
+
+
+async def _fetch_ecmwf_ensemble(
+    lat: float, lon: float, target_date: str,
+) -> Optional[Dict[str, List[float]]]:
+    """Fetch ECMWF IFS ensemble from Open-Meteo (51 members).
+
+    Returns dict with:
+      temperature_max: List[float]  — ECMWF ensemble high temps (°F)
+      temperature_min: List[float]  — ECMWF ensemble low temps (°F)
+
+    ECMWF IFS: 51 members (1 control + 50 perturbed).
+    Free API, no key required. Same endpoint as GFS ensemble.
+    """
+    cache_key = f"ecmwf:{lat:.2f},{lon:.2f}:{target_date}"
+    cached = _ecmwf_cache.get(cache_key)
+    if cached:
+        ts, data = cached
+        if time.monotonic() - ts < _ECMWF_CACHE_TTL:
+            return data
+
+    url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "temperature_unit": "fahrenheit",
+        "models": "ecmwf_ifs",
+        "start_date": target_date,
+        "end_date": target_date,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.debug("ecmwf_http_error", status=resp.status_code)
+                return None
+            data = resp.json()
+
+        # Parse ECMWF ensemble members from response.
+        # Keys like: temperature_2m_max_ecmwf_ifs (control),
+        #            temperature_2m_max_member01_ecmwf_ifs, etc.
+        daily = data.get("daily", {})
+
+        max_temps: list = []
+        min_temps: list = []
+        for key, vals in daily.items():
+            if not isinstance(vals, list):
+                continue
+            if "temperature_2m_max" in key:
+                max_temps.extend(v for v in vals if v is not None)
+            elif "temperature_2m_min" in key:
+                min_temps.extend(v for v in vals if v is not None)
+
+        if not max_temps and not min_temps:
+            logger.debug("ecmwf_no_data", response_keys=list(daily.keys())[:10])
+            return None
+
+        result = {
+            "temperature_max": [float(t) for t in max_temps],
+            "temperature_min": [float(t) for t in min_temps],
+        }
+
+        _ecmwf_cache[cache_key] = (time.monotonic(), result)
+        logger.info(
+            "ecmwf_ensemble_fetched",
+            lat=lat, lon=lon, date=target_date,
+            n_max=len(result["temperature_max"]),
+            n_min=len(result["temperature_min"]),
+        )
+        return result
+
+    except Exception as e:
+        logger.debug("ecmwf_fetch_error", error=str(e))
         return None
 
 
@@ -1827,29 +1909,55 @@ async def compute_weather_probability(
         # ">X" market: YES means temp is above threshold
         p_nws = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
 
-    # 7b. Multi-model ensemble blend (GFS+GEM+ICON ~92 members, empirical probability)
-    p_ensemble = None
+    # 7b. Multi-model ensemble blend (GFS+GEM+ICON ~92 + ECMWF IFS 51 members)
+    p_gfs = None  # GFS+GEM+ICON combined probability
+    p_ecmwf = None  # ECMWF IFS probability
+    gfs_members: List[float] = []
+    ecmwf_members: List[float] = []
+
     if coords:
         target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
-        ensemble_data = await _fetch_open_meteo_ensemble(coords[0], coords[1], target_str)
-        if ensemble_data:
-            # Select high or low members based on market type
-            if "high" in t_type:
-                members = ensemble_data.get("temperature_max", [])
-            elif "low" in t_type:
-                members = ensemble_data.get("temperature_min", [])
-            else:
-                members = ensemble_data.get("temperature_max", [])
 
-            if members and len(members) >= 5:
-                if "bracket" in t_type and bracket_bounds:
-                    direction = "bracket"
-                elif "below" in t_type:
-                    direction = "below"
-                else:
-                    direction = "above"
-                p_ensemble = _ensemble_probability(
-                    members, t_value, direction,
+        # Fetch GFS+GEM+ICON and ECMWF IFS in parallel
+        gfs_task = _fetch_open_meteo_ensemble(coords[0], coords[1], target_str)
+        ecmwf_task = _fetch_ecmwf_ensemble(coords[0], coords[1], target_str)
+        ensemble_data, ecmwf_data = await asyncio.gather(gfs_task, ecmwf_task)
+
+        # Determine direction for probability computation
+        if "bracket" in t_type and bracket_bounds:
+            direction = "bracket"
+        elif "below" in t_type:
+            direction = "below"
+        else:
+            direction = "above"
+
+        # Parse GFS+GEM+ICON ensemble
+        if ensemble_data:
+            if "high" in t_type:
+                gfs_members = ensemble_data.get("temperature_max", [])
+            elif "low" in t_type:
+                gfs_members = ensemble_data.get("temperature_min", [])
+            else:
+                gfs_members = ensemble_data.get("temperature_max", [])
+
+            if gfs_members and len(gfs_members) >= 5:
+                p_gfs = _ensemble_probability(
+                    gfs_members, t_value, direction,
+                    bracket_bounds=bracket_bounds,
+                )
+
+        # Parse ECMWF IFS ensemble
+        if ecmwf_data:
+            if "high" in t_type:
+                ecmwf_members = ecmwf_data.get("temperature_max", [])
+            elif "low" in t_type:
+                ecmwf_members = ecmwf_data.get("temperature_min", [])
+            else:
+                ecmwf_members = ecmwf_data.get("temperature_max", [])
+
+            if ecmwf_members and len(ecmwf_members) >= 5:
+                p_ecmwf = _ensemble_probability(
+                    ecmwf_members, t_value, direction,
                     bracket_bounds=bracket_bounds,
                 )
 
@@ -1868,49 +1976,163 @@ async def compute_weather_probability(
 
             if hrrr_temp is not None:
                 # HRRR is deterministic — use normal CDF with city sigma
-                if "below" in t_type:
+                if "bracket" in t_type and bracket_bounds:
+                    lo, hi = bracket_bounds
+                    p_hrrr = _norm_cdf(hi, hrrr_temp, sigma) - _norm_cdf(lo, hrrr_temp, sigma)
+                elif "below" in t_type:
                     p_hrrr = _norm_cdf(t_value, hrrr_temp, sigma)
                 else:
                     p_hrrr = 1.0 - _norm_cdf(t_value, hrrr_temp, sigma)
 
-    # Blend NWS + ensemble + HRRR:
-    # NWS is calibrated point forecast, ensemble captures tails,
+    # Blend NWS + GFS ensemble + ECMWF IFS + HRRR:
+    # NWS is calibrated point forecast, GFS+GEM+ICON captures ensemble spread,
+    # ECMWF IFS is the gold-standard global model (51 members),
     # HRRR adds high-resolution spatial detail for same-day.
-    if p_ensemble is not None and p_hrrr is not None:
-        disagreement = abs(p_nws - p_ensemble)
-        if disagreement > 0.15:
-            # Large NWS/ensemble disagreement: weight ensemble more, HRRR breaks ties
-            p_yes = 0.30 * p_nws + 0.50 * p_ensemble + 0.20 * p_hrrr
+    #
+    # Agreement check: compare mean forecast temps across sources.
+    # Within 2°F → sources agree (trust NWS calibration).
+    # >2°F disagreement → trust model ensembles over NWS.
+
+    # Compute mean ensemble temperatures for agreement check
+    gfs_mean = sum(gfs_members) / len(gfs_members) if gfs_members else None
+    ecmwf_mean = sum(ecmwf_members) / len(ecmwf_members) if ecmwf_members else None
+
+    # Determine temperature-based agreement between sources
+    _AGREE_THRESHOLD = 2.0  # °F
+    all_agree = False
+    nws_ecmwf_agree_gfs_disagrees = False
+
+    if gfs_mean is not None and ecmwf_mean is not None:
+        nws_gfs_diff = abs(forecast_temp - gfs_mean)
+        nws_ecmwf_diff = abs(forecast_temp - ecmwf_mean)
+        gfs_ecmwf_diff = abs(gfs_mean - ecmwf_mean)
+
+        all_agree = (
+            nws_gfs_diff <= _AGREE_THRESHOLD
+            and nws_ecmwf_diff <= _AGREE_THRESHOLD
+            and gfs_ecmwf_diff <= _AGREE_THRESHOLD
+        )
+        # NWS + ECMWF agree but GFS is the outlier
+        nws_ecmwf_agree_gfs_disagrees = (
+            nws_ecmwf_diff <= _AGREE_THRESHOLD
+            and gfs_ecmwf_diff > _AGREE_THRESHOLD
+        )
+
+    if p_gfs is not None and p_ecmwf is not None and p_hrrr is not None:
+        # Full 4-source blend: NWS + GFS + ECMWF + HRRR
+        if nws_ecmwf_agree_gfs_disagrees:
+            # NWS + ECMWF agree, GFS outlier → boost NWS+ECMWF, downweight GFS
+            p_yes = 0.35 * p_nws + 0.10 * p_gfs + 0.40 * p_ecmwf + 0.15 * p_hrrr
+        elif all_agree:
+            # All sources agree within 2°F: trust NWS calibration
+            p_yes = 0.35 * p_nws + 0.25 * p_gfs + 0.25 * p_ecmwf + 0.15 * p_hrrr
         else:
-            # Agreement: NWS-weighted blend with HRRR confirming
-            p_yes = 0.40 * p_nws + 0.35 * p_ensemble + 0.25 * p_hrrr
+            # Disagreement >2°F: trust model ensembles over NWS
+            p_yes = 0.25 * p_nws + 0.30 * p_gfs + 0.30 * p_ecmwf + 0.15 * p_hrrr
         logger.info(
-            "weather_multi_model_blend",
+            "weather_full_blend",
             city=city,
             p_nws=round(p_nws, 4),
-            p_ensemble=round(p_ensemble, 4),
+            p_gfs=round(p_gfs, 4),
+            p_ecmwf=round(p_ecmwf, 4),
+            p_hrrr=round(p_hrrr, 4),
+            p_blended=round(p_yes, 4),
+            all_agree=all_agree,
+            nws_ecmwf_agree=nws_ecmwf_agree_gfs_disagrees,
+            n_gfs=len(gfs_members),
+            n_ecmwf=len(ecmwf_members),
+        )
+    elif p_gfs is not None and p_ecmwf is not None:
+        # GFS + ECMWF available, no HRRR
+        if nws_ecmwf_agree_gfs_disagrees:
+            # NWS + ECMWF agree, GFS outlier → boost agreeing pair
+            p_yes = 0.40 * p_nws + 0.10 * p_gfs + 0.50 * p_ecmwf
+        elif all_agree:
+            # All agree within 2°F: 0.4 NWS / 0.3 GFS / 0.3 ECMWF
+            p_yes = 0.40 * p_nws + 0.30 * p_gfs + 0.30 * p_ecmwf
+        else:
+            # Disagreement >2°F: 0.3 NWS / 0.35 GFS / 0.35 ECMWF
+            p_yes = 0.30 * p_nws + 0.35 * p_gfs + 0.35 * p_ecmwf
+        logger.info(
+            "weather_triple_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_gfs=round(p_gfs, 4),
+            p_ecmwf=round(p_ecmwf, 4),
+            p_blended=round(p_yes, 4),
+            all_agree=all_agree,
+            nws_ecmwf_agree=nws_ecmwf_agree_gfs_disagrees,
+            n_gfs=len(gfs_members),
+            n_ecmwf=len(ecmwf_members),
+        )
+    elif p_gfs is not None and p_hrrr is not None:
+        # GFS + HRRR available, no ECMWF (fallback to old blend)
+        disagreement = abs(p_nws - p_gfs)
+        if disagreement > 0.15:
+            p_yes = 0.30 * p_nws + 0.50 * p_gfs + 0.20 * p_hrrr
+        else:
+            p_yes = 0.40 * p_nws + 0.35 * p_gfs + 0.25 * p_hrrr
+        logger.info(
+            "weather_gfs_hrrr_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_gfs=round(p_gfs, 4),
             p_hrrr=round(p_hrrr, 4),
             p_blended=round(p_yes, 4),
             disagreement=round(disagreement, 4),
-            n_members=len(members) if members else 0,
+            n_gfs=len(gfs_members),
         )
-    elif p_ensemble is not None:
-        disagreement = abs(p_nws - p_ensemble)
+    elif p_ecmwf is not None and p_hrrr is not None:
+        # ECMWF + HRRR available, no GFS
+        disagreement = abs(p_nws - p_ecmwf)
         if disagreement > 0.15:
-            p_yes = 0.4 * p_nws + 0.6 * p_ensemble
+            p_yes = 0.30 * p_nws + 0.50 * p_ecmwf + 0.20 * p_hrrr
         else:
-            p_yes = 0.6 * p_nws + 0.4 * p_ensemble
+            p_yes = 0.40 * p_nws + 0.35 * p_ecmwf + 0.25 * p_hrrr
         logger.info(
-            "weather_ensemble_blend",
+            "weather_ecmwf_hrrr_blend",
             city=city,
             p_nws=round(p_nws, 4),
-            p_ensemble=round(p_ensemble, 4),
+            p_ecmwf=round(p_ecmwf, 4),
+            p_hrrr=round(p_hrrr, 4),
             p_blended=round(p_yes, 4),
             disagreement=round(disagreement, 4),
-            n_members=len(members) if members else 0,
+            n_ecmwf=len(ecmwf_members),
+        )
+    elif p_gfs is not None:
+        # GFS only (no ECMWF, no HRRR)
+        disagreement = abs(p_nws - p_gfs)
+        if disagreement > 0.15:
+            p_yes = 0.4 * p_nws + 0.6 * p_gfs
+        else:
+            p_yes = 0.6 * p_nws + 0.4 * p_gfs
+        logger.info(
+            "weather_gfs_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_gfs=round(p_gfs, 4),
+            p_blended=round(p_yes, 4),
+            disagreement=round(disagreement, 4),
+            n_gfs=len(gfs_members),
+        )
+    elif p_ecmwf is not None:
+        # ECMWF only (no GFS, no HRRR)
+        disagreement = abs(p_nws - p_ecmwf)
+        if disagreement > 0.15:
+            p_yes = 0.4 * p_nws + 0.6 * p_ecmwf
+        else:
+            p_yes = 0.6 * p_nws + 0.4 * p_ecmwf
+        logger.info(
+            "weather_ecmwf_blend",
+            city=city,
+            p_nws=round(p_nws, 4),
+            p_ecmwf=round(p_ecmwf, 4),
+            p_blended=round(p_yes, 4),
+            disagreement=round(disagreement, 4),
+            n_ecmwf=len(ecmwf_members),
         )
     elif p_hrrr is not None:
-        # HRRR only (ensemble failed) — blend with NWS
+        # HRRR only (both ensembles failed) — blend with NWS
         p_yes = 0.55 * p_nws + 0.45 * p_hrrr
         logger.info(
             "weather_hrrr_blend",
@@ -2538,7 +2760,7 @@ async def compute_stock_index_probability(
     z_score = abs(current_price - threshold) / sigma_remaining if sigma_remaining > 0 else 0
     # Crypto needs higher z-gate due to higher volatility and model uncertainty
     is_crypto = config.get("trading_hours", 6.5) >= 24.0
-    min_z = 0.5 if is_crypto else 0.3
+    min_z = 0.5  # Uniform z-gate: 0.3 was too permissive, took marginal index trades
     if z_score < min_z:
         logger.info(
             "stock_index_ambiguous",

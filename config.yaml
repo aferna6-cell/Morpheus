@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto", "kalshi_bracket_arb"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto", "kalshi_bracket_arb", "kalshi_theta"]
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -239,11 +239,11 @@ bracket_arb:
 clv_tracking:
   enabled: true
   check_interval_minutes: 60
-  alert_threshold: -0.01
-  halt_threshold: -0.01
-  min_samples: 10
+  alert_threshold: -0.02
+  halt_threshold: -0.03
+  min_samples: 30
   per_type_tracking: true
-  per_type_halt_threshold: -0.01
+  per_type_halt_threshold: -0.03
 
 # Alerts — Telegram
 alerts:
@@ -254,6 +254,22 @@ alerts:
   alert_on_error: true
   daily_summary: true
   daily_summary_hour: 23            # 11 PM UTC
+
+# Theta decay engine — time-decay seller near market close
+theta_engine:
+  enabled: true
+  scan_interval_seconds: 300       # scan every 5 minutes
+  max_hours_to_close: 2.0          # only markets closing within 2 hours
+  min_hours_to_close: 0.05         # ~3 min floor (avoid settled markets)
+  fav_min_price: 0.80              # favorite lower bound
+  fav_max_price: 0.92              # favorite upper bound
+  fav_min_edge: 0.03               # 3% minimum edge for favorites
+  long_min_price: 0.05             # longshot lower bound
+  long_max_price: 0.15             # longshot upper bound
+  long_min_edge: 0.05              # 5% minimum edge for longshots
+  max_per_trade_usd: 3.0           # conservative $3 max per trade
+  max_theta_positions: 5           # max 5 simultaneous theta positions
+  min_volume: 200                  # lower volume bar near close
 
 # Economic data release sniping (CPI/jobs/GDP fast-path on release days)
 econ_sniping:

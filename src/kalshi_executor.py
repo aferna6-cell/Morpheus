@@ -165,30 +165,39 @@ class KalshiExecutor:
             if yes_ask is not None and no_ask is not None:
                 spread_cents = max(0, round((yes_ask + no_ask - 1.0) * 100))
 
-            if is_index and signal.confidence >= 0.60:
-                # Index signals: cross up to 3c
+            # Maker-priority execution strategy (Whelan+Becker research):
+            # Makers earn +1.25% excess return vs takers. Default to maker
+            # orders. Only cross spread under strict conditions.
+            # Time-to-close from market metadata (hours)
+            ttc_hours = meta.get("time_to_close_hours", 24.0)
+
+            if is_index and signal.confidence >= 0.70 and ttc_hours < 4.0:
+                # Index fast-path signals with high urgency: cross up to 3c
                 if spread_cents > 0:
                     cross_amount = min(max(1, spread_cents // 2), 3)
                 else:
                     cross_amount = 2
-            elif is_contrarian and abs(net_edge_pre) >= 0.10:
-                # Contrarian signals with 10%+ edge: cross up to 4c
-                # (10%+ edge easily absorbs 4c crossing cost)
-                if spread_cents > 0:
-                    cross_amount = min(max(1, spread_cents // 2), 4)
-                else:
-                    cross_amount = 2
-            elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.65:
-                # High-edge LLM signals: cross 1c max (Whelan: makers beat takers)
+            elif is_index and signal.confidence >= 0.60:
+                # Index signals without urgency: cross 1c max (maker-priority)
                 cross_amount = 1
-            elif strategy == "market_making" and signal.confidence >= 0.60:
-                # MM: cross 1-2c to improve fill rate
+            elif is_contrarian and abs(net_edge_pre) >= 0.10:
+                # Contrarian signals with 10%+ edge: cross up to 2c (was 4c)
+                # Reduced: maker orders capture more edge long-term
                 if spread_cents > 0:
                     cross_amount = min(max(1, spread_cents // 2), 2)
                 else:
                     cross_amount = 1
-            elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.55:
-                # Moderate-edge LLM signals: no crossing (prefer maker orders)
+            elif strategy == "market_making" and signal.confidence >= 0.60:
+                # MM: cross 1-2c to improve fill rate (MM needs to cross)
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 2)
+                else:
+                    cross_amount = 1
+            elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.70 and ttc_hours < 4.0:
+                # High-edge + high-confidence + urgent: cross 1c (strict gate)
+                cross_amount = 1
+            else:
+                # Default: maker order (no crossing)
                 # Whelan et al.: makers systematically outperform takers
                 cross_amount = 0
 

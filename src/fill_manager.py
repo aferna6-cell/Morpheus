@@ -427,10 +427,10 @@ class FillManager:
                         ticker=resting.ticker, limit=50,
                     )
                     return any(f["order_id"] == order_id for f in fills)
-                except Exception:
-                    # If fills API also fails, assume filled (safer than dropping)
-                    return True
-        return True  # No matching client — assume filled to be safe
+                except Exception as e:
+                    self.logger.warning("fill_verify_api_failure", error=str(e))
+                    return False  # Don't create phantom fills; will retry next cycle
+        return False  # No matching client
 
     @property
     def pending_count(self) -> int:

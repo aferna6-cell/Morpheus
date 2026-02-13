@@ -367,6 +367,8 @@ class Orchestrator:
                             entry_probability=entry_prob,
                             side=side,
                             resolution_time=resolution_time,
+                            signal_source=signal.metadata.get("signal_source", "unknown"),
+                            engine=signal.engine,
                         )
 
                     # Send alert for successful trades
@@ -607,12 +609,15 @@ class Orchestrator:
                 sig_result.net_edge = net_edge  # type: ignore[attr-defined]
                 sig_result.signal_source = signal.metadata.get("signal_source")  # type: ignore[attr-defined]
 
+                # Pass time_to_close_hours for maker-priority execution
+                ttc_hours = getattr(market_data, "time_to_close_hours", None) or 24.0
                 sig_result.metadata = {  # type: ignore[attr-defined]
                     "kalshi_yes_ask": signal.metadata.get("kalshi_yes_ask"),
                     "kalshi_no_ask": signal.metadata.get("kalshi_no_ask"),
                     "strategy": signal.metadata.get("strategy", "standard"),
                     "signal_source": signal.metadata.get("signal_source"),
                     "_force_size_usd": signal.metadata.get("_force_size_usd"),
+                    "time_to_close_hours": ttc_hours,
                 }
 
                 # Each account sizes independently based on its own balance

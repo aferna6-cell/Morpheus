@@ -438,13 +438,23 @@ class PositionMonitor:
             return None
 
         p_yes, confidence, reasoning = result
-        entry_price = tracked.entry_price_cents / 100.0
 
-        # Compute current edge for our held side
+        # Use current market price for repricing edge (not entry price)
+        # If NOAA says p_yes=0.80 but market moved to 0.88, real edge is -0.08
+        yes_price = None
+        try:
+            yes_price = await self._get_current_yes_price(pos.ticker)
+        except Exception:
+            pass
+        if yes_price is None:
+            # Fall back to entry price if market price unavailable
+            yes_price = tracked.entry_price_cents / 100.0
+
+        # Compute current edge for our held side vs market price
         if tracked.side == "yes":
-            current_edge = p_yes - entry_price
+            current_edge = p_yes - yes_price
         else:
-            current_edge = (1.0 - p_yes) - entry_price
+            current_edge = (1.0 - p_yes) - (1.0 - yes_price)
 
         # Exit thresholds from config
         exit_threshold = float(self.config.risk.get("weather_exit_threshold", -0.05))
@@ -671,10 +681,9 @@ class PositionMonitor:
         if result:
             # Calculate P&L from actual sell price
             entry_cost = tracked.entry_price_cents * tracked.count / 100.0
-            if tracked.side == "yes":
-                exit_proceeds = sell_price * tracked.count / 100.0
-            else:
-                exit_proceeds = (100 - sell_price) * tracked.count / 100.0
+            # sell_price is in the side's own price units (YES cents or NO cents)
+            # Proceeds = price * quantity regardless of side
+            exit_proceeds = sell_price * tracked.count / 100.0
             pnl = exit_proceeds - entry_cost
 
             self._tracked.pop(key, None)

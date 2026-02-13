@@ -112,8 +112,8 @@ class CapitalManager:
 
         self.clv_enabled = bool(clv_cfg.get("enabled", True))
         self.clv_alert_threshold = float(clv_cfg.get("alert_threshold", -0.01))
-        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", -0.01))
-        self.clv_min_samples = int(clv_cfg.get("min_samples", 10))
+        self.clv_halt_threshold = float(clv_cfg.get("halt_threshold", -0.03))
+        self.clv_min_samples = int(clv_cfg.get("min_samples", 30))
         self.per_type_tracking = bool(clv_cfg.get("per_type_tracking", True))
         self.per_type_halt_threshold = float(clv_cfg.get("per_type_halt_threshold", -0.01))
         self._disabled_market_types: set = set()  # market types with poor CLV
@@ -222,6 +222,8 @@ class CapitalManager:
         side: str,
         resolution_time: Optional[datetime] = None,
         market_type: str = "unknown",
+        signal_source: str = "unknown",
+        engine: str = "unknown",
     ) -> None:
         """Add a new position to track."""
         self._positions[market_id] = OpenPosition(
@@ -236,7 +238,7 @@ class CapitalManager:
             side=side,
         )
 
-        # Log CLV entry with market type for per-type tracking
+        # Log CLV entry with market type, signal_source, engine for per-dimension tracking
         self._log_clv_entry(
             market_id=market_id,
             ticker=ticker,
@@ -245,6 +247,8 @@ class CapitalManager:
             entry_market_price=entry_price,
             direction=side,
             market_type=market_type,
+            signal_source=signal_source,
+            engine=engine,
         )
 
         self._save_state()
@@ -387,7 +391,11 @@ class CapitalManager:
         return market_type not in self._disabled_market_types
 
     def check_per_type_clv(self) -> Dict[str, Dict[str, Any]]:
-        """Check CLV per market type and disable types with poor performance."""
+        """Check CLV per market type, signal source, and engine.
+
+        Disables market types with poor performance. Also logs per-source
+        and per-engine CLV for strategy optimization (Wave 20).
+        """
         if not self.clv_enabled or not self.per_type_tracking:
             return {}
 
@@ -401,20 +409,29 @@ class CapitalManager:
         except Exception:
             return {}
 
-        # Group by market type
+        # Group by market type, signal_source, and engine
         from collections import defaultdict
         by_type: Dict[str, list] = defaultdict(list)
+        by_source: Dict[str, list] = defaultdict(list)
+        by_engine: Dict[str, list] = defaultdict(list)
         for r in records:
             if r.get("clv") is not None:
                 mtype = r.get("market_type", "unknown")
-                by_type[mtype].append(r["clv"])
+                source = r.get("signal_source", "unknown")
+                engine = r.get("engine", "unknown")
+                clv_val = r["clv"]
+                by_type[mtype].append(clv_val)
+                by_source[source].append(clv_val)
+                by_engine[engine].append(clv_val)
 
         results = {}
+
+        # Per-market-type CLV (with auto-disable)
         for mtype, clv_values in by_type.items():
             if len(clv_values) < 5:  # Need minimum samples per type
                 continue
             avg = sum(clv_values) / len(clv_values)
-            results[mtype] = {
+            results[f"type:{mtype}"] = {
                 "avg_clv": round(avg, 4),
                 "count": len(clv_values),
                 "disabled": avg < self.per_type_halt_threshold,
@@ -433,6 +450,35 @@ class CapitalManager:
                 self._disabled_market_types.discard(mtype)
                 self.logger.info("clv_type_re_enabled", market_type=mtype, avg_clv=avg)
 
+        # Per-signal-source CLV (informational — for strategy tuning)
+        for source, clv_values in by_source.items():
+            if len(clv_values) < 3:
+                continue
+            avg = sum(clv_values) / len(clv_values)
+            win_count = sum(1 for c in clv_values if c > 0)
+            results[f"source:{source}"] = {
+                "avg_clv": round(avg, 4),
+                "count": len(clv_values),
+                "win_rate": round(win_count / len(clv_values), 3),
+            }
+
+        # Per-engine CLV (informational)
+        for engine, clv_values in by_engine.items():
+            if len(clv_values) < 3:
+                continue
+            avg = sum(clv_values) / len(clv_values)
+            win_count = sum(1 for c in clv_values if c > 0)
+            results[f"engine:{engine}"] = {
+                "avg_clv": round(avg, 4),
+                "count": len(clv_values),
+                "win_rate": round(win_count / len(clv_values), 3),
+            }
+
+        # Log summary
+        if results:
+            self.logger.info("clv_per_dimension_summary", dimensions=len(results),
+                             breakdown={k: v for k, v in results.items() if v.get("count", 0) >= 5})
+
         return results
 
     def _log_clv_entry(
@@ -444,8 +490,14 @@ class CapitalManager:
         entry_market_price: float,
         direction: str,
         market_type: str = "unknown",
+        signal_source: str = "unknown",
+        engine: str = "unknown",
     ) -> None:
-        """Log a CLV entry when a trade is placed."""
+        """Log a CLV entry when a trade is placed.
+
+        Tracks per-market-type, per-signal-source, and per-engine for
+        granular CLV analysis (Wave 20: research-backed CLV tracking).
+        """
         if not self.clv_enabled:
             return
 
@@ -458,6 +510,8 @@ class CapitalManager:
             "entry_market_price": entry_market_price,
             "direction": direction,
             "market_type": market_type,
+            "signal_source": signal_source,
+            "engine": engine,
             "closing_probability": None,
             "clv": None,
             "resolved": False,
