@@ -131,26 +131,20 @@ class KalshiCryptoEngine(BaseEngine):
             await asyncio.sleep(self._scan_interval)
 
     async def _scan_markets(self) -> None:
-        """Find active KXBTC15M markets."""
+        """Find active KXBTC15M markets via targeted series_ticker query."""
         try:
-            # Fetch markets closing within 1 day (15-min markets are always near-term)
-            all_markets = await self.kalshi_client.fetch_markets_by_close_date(
-                max_days=1,
-                min_volume=0,  # 15M markets may have varying volume
+            # Direct fetch: only KXBTC15M markets (1 API call, no pagination)
+            all_markets = await self.kalshi_client.fetch_markets_by_series(
+                self._ticker_prefix,
             )
         except Exception as e:
             self.logger.error("crypto_fetch_error", error=str(e))
             return
 
         now = datetime.now(timezone.utc)
-        now_ts = now.timestamp()
         active_tickers = set()
 
         for m in all_markets:
-            # Only KXBTC15M markets
-            if not m.ticker.upper().startswith(self._ticker_prefix):
-                continue
-
             # Must be active/open and have a close time
             if m.status not in ("open", "active") or not m.close_time:
                 continue

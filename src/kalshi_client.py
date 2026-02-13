@@ -472,3 +472,31 @@ class KalshiClient:
         except httpx.HTTPStatusError as exc:
             self.logger.warning("kalshi_market_not_found", ticker=ticker, status=exc.response.status_code)
             return None
+
+    async def fetch_markets_by_series(
+        self, series_ticker: str, status: str = "open",
+    ) -> List[KalshiMarket]:
+        """Fetch markets belonging to a series (e.g., KXBTC15M).
+
+        Uses a single API call with series_ticker filter — much cheaper than
+        paginating through all markets.
+        """
+        try:
+            data = await self._get(
+                "/markets",
+                params={
+                    "series_ticker": series_ticker,
+                    "status": status,
+                    "limit": 50,
+                },
+            )
+        except Exception as e:
+            self.logger.warning("fetch_markets_by_series_error", series=series_ticker, error=str(e))
+            return []
+
+        markets = []
+        for raw in data.get("markets", []):
+            parsed = self._parse_market(raw)
+            if parsed:
+                markets.append(parsed)
+        return markets
