@@ -130,14 +130,15 @@ class RiskManager:
         self.max_total_exposure = min(base_max_exp * scale_factor, total_balance * 0.80)
 
         # Scale contrarian position limit
-        base_c_pos = 4.0  # contrarian default
+        contrarian_cfg = getattr(self.config, "contrarian", None) or {}
+        base_c_pos = float(contrarian_cfg.get("max_position_size", 4.0)) if isinstance(contrarian_cfg, dict) else 4.0
         self._contrarian_max_position = min(base_c_pos * scale_factor, total_balance * 0.15)
 
         # Scale loss limits
         base_max_loss_trade = self.config.risk.get("max_loss_per_trade", 2.0)
         base_max_daily_loss = self.config.risk.get("max_daily_loss", 3.0)
         self.max_loss_per_trade = min(base_max_loss_trade * scale_factor, total_balance * 0.10)
-        self.max_daily_loss = min(base_max_daily_loss * scale_factor, total_balance * 0.20)
+        self.max_daily_loss = min(base_max_daily_loss * scale_factor, total_balance * 0.10)
 
         self.logger.info(
             "risk_limits_scaled",

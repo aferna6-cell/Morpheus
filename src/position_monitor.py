@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -21,6 +21,7 @@ import httpx
 from .alerts import send_alert
 from .kalshi_trading_client import KalshiTradingClient, KalshiPosition
 from .risk import RiskManager
+from .trade_logger import get_trade_logger
 from .utils import BotConfig
 
 _WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
@@ -103,25 +104,54 @@ class PositionMonitor:
             else "https://api.elections.kalshi.com/trade-api/v2"
         )
 
+        # Shared httpx client for market API calls (connection pooling)
+        self._http_client: Optional[httpx.AsyncClient] = None
+
     def _load_known_closed(self) -> Set[str]:
-        """Load known-closed market keys from disk."""
+        """Load known-closed market keys from disk, cleaning stale entries (48h TTL)."""
         try:
             if self._closed_markets_file.exists():
                 data = json.loads(self._closed_markets_file.read_text())
-                return set(data)
+                if isinstance(data, dict):
+                    # New format: {key: timestamp_iso}
+                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+                    fresh = {k for k, ts in data.items() if ts > cutoff}
+                    if len(fresh) < len(data):
+                        self.logger.info("known_closed_cleanup", removed=len(data) - len(fresh), kept=len(fresh))
+                    return fresh
+                # Legacy format: [key, key, ...]
+                return set(data) if isinstance(data, list) else set()
         except Exception:
             pass
         return set()
 
     def _save_known_closed(self) -> None:
-        """Persist known-closed market keys to disk."""
+        """Persist known-closed market keys with timestamps."""
         try:
             self._state_path.mkdir(parents=True, exist_ok=True)
-            self._closed_markets_file.write_text(
-                json.dumps(sorted(self._known_closed), indent=2)
-            )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            existing = {}
+            if self._closed_markets_file.exists():
+                try:
+                    raw = json.loads(self._closed_markets_file.read_text())
+                    if isinstance(raw, dict):
+                        existing = raw
+                except Exception:
+                    pass
+            merged = {k: existing.get(k, now_iso) for k in self._known_closed}
+            self._closed_markets_file.write_text(json.dumps(merged, indent=2))
         except Exception as e:
             self.logger.debug("save_closed_markets_error", error=str(e))
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Get shared httpx client (connection pooling)."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                base_url=self._kalshi_base_url,
+                timeout=10.0,
+                headers={"Accept": "application/json"},
+            )
+        return self._http_client
 
     def on_resume(self, callback) -> None:
         """Register a callback to fire when a halted account resumes trading."""
@@ -302,23 +332,19 @@ class PositionMonitor:
                 return is_closed
 
         try:
-            async with httpx.AsyncClient(
-                base_url=self._kalshi_base_url,
-                timeout=10.0,
-                headers={"Accept": "application/json"},
-            ) as client:
-                r = await client.get(f"/markets/{ticker}")
-                if r.status_code == 200:
-                    data = r.json()
-                    market_data = data.get("market", data)
-                    status = (market_data.get("status") or "").lower()
-                    is_closed = status in ("closed", "settled", "finalized")
-                    self._market_status_cache[ticker] = (now, is_closed)
-                    return is_closed
-                elif r.status_code == 404:
-                    # Market doesn't exist anymore — treat as closed
-                    self._market_status_cache[ticker] = (now, True)
-                    return True
+            http = await self._get_http_client()
+            r = await http.get(f"/markets/{ticker}")
+            if r.status_code == 200:
+                data = r.json()
+                market_data = data.get("market", data)
+                status = (market_data.get("status") or "").lower()
+                is_closed = status in ("closed", "settled", "finalized")
+                self._market_status_cache[ticker] = (now, is_closed)
+                return is_closed
+            elif r.status_code == 404:
+                # Market doesn't exist anymore — treat as closed
+                self._market_status_cache[ticker] = (now, True)
+                return True
         except Exception as e:
             self.logger.debug("market_status_check_error", ticker=ticker, error=str(e))
 
@@ -329,25 +355,23 @@ class PositionMonitor:
         import time as _time
         now = _time.monotonic()
         cached = self._price_cache.get(ticker)
-        if cached and now - cached[0] < self._price_cache_ttl:
+        is_weather = _is_weather_ticker(ticker)
+        ttl = 30.0 if is_weather else self._price_cache_ttl
+        if cached and now - cached[0] < ttl:
             return cached[1]
         try:
-            async with httpx.AsyncClient(
-                base_url=self._kalshi_base_url,
-                timeout=10.0,
-                headers={"Accept": "application/json"},
-            ) as client:
-                r = await client.get(f"/markets/{ticker}")
-                if r.status_code == 200:
-                    data = r.json()
-                    m = data.get("market", data)
-                    yb = (m.get("yes_bid") or 0) / 100.0
-                    ya = (m.get("yes_ask") or 0) / 100.0
-                    lp = (m.get("last_price") or 0) / 100.0
-                    price = (yb + ya) / 2.0 if yb > 0 and ya > 0 else lp if lp > 0 else None
-                    if price:
-                        self._price_cache[ticker] = (now, price)
-                    return price
+            http = await self._get_http_client()
+            r = await http.get(f"/markets/{ticker}")
+            if r.status_code == 200:
+                data = r.json()
+                m = data.get("market", data)
+                yb = (m.get("yes_bid") or 0) / 100.0
+                ya = (m.get("yes_ask") or 0) / 100.0
+                lp = (m.get("last_price") or 0) / 100.0
+                price = (yb + ya) / 2.0 if yb > 0 and ya > 0 else lp if lp > 0 else None
+                if price:
+                    self._price_cache[ticker] = (now, price)
+                return price
         except Exception as e:
             self.logger.debug("price_fetch_error", ticker=ticker, error=str(e))
         return None
@@ -358,19 +382,15 @@ class PositionMonitor:
             return self._market_question_cache[ticker]
 
         try:
-            async with httpx.AsyncClient(
-                base_url=self._kalshi_base_url,
-                timeout=10.0,
-                headers={"Accept": "application/json"},
-            ) as client:
-                r = await client.get(f"/markets/{ticker}")
-                if r.status_code == 200:
-                    data = r.json()
-                    market = data.get("market", data)
-                    title = market.get("title") or market.get("question") or ""
-                    if title:
-                        self._market_question_cache[ticker] = title
-                        return title
+            http = await self._get_http_client()
+            r = await http.get(f"/markets/{ticker}")
+            if r.status_code == 200:
+                data = r.json()
+                market = data.get("market", data)
+                title = market.get("title") or market.get("question") or ""
+                if title:
+                    self._market_question_cache[ticker] = title
+                    return title
         except Exception as e:
             self.logger.debug("market_question_fetch_error", ticker=ticker, error=str(e))
 
@@ -674,6 +694,16 @@ class PositionMonitor:
                 pnl=pnl,
                 reason=reason,
                 account=client.label,
+            )
+            get_trade_logger().log_position_closed(
+                platform="kalshi",
+                ticker=pos.ticker,
+                side=side,
+                count=count,
+                entry_price_cents=tracked.entry_price_cents,
+                exit_price_cents=sell_price,
+                pnl_usd=pnl,
+                account_label=client.label,
             )
         else:
             # Order returned None/falsy — record as failed attempt

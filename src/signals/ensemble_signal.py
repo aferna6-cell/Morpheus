@@ -1390,7 +1390,7 @@ Rules:
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
 
                     if net_edge < 0.03:  # Min edge gate (same as weather thresholds)
-                        return None
+                        return self._hold(market, "Contrarian jobless: edge below 3% minimum")
 
                     if raw_edge > 0:
                         side = TradingSide.BUY_YES
