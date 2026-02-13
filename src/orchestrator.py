@@ -44,13 +44,14 @@ _URGENCY_BONUS: Dict[str, float] = {
 }
 
 _ENGINE_PRIORITY: Dict[str, float] = {
-    "kalshi_contrarian": 0.6,  # contrarian gets highest priority
+    "kalshi_crypto": 0.7,     # crypto gets highest priority (time-sensitive 15-min windows)
+    "kalshi_contrarian": 0.6,  # contrarian gets high priority
     "kalshi_llm": 0.5,
     "kalshi_mm": 0.4,
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian", "kalshi_crypto"}
 
 
 def _extract_event_prefix(ticker: str) -> str:
@@ -455,6 +456,10 @@ class Orchestrator:
             # MM boost: spread capture with zero fees deserves priority
             if s.metadata.get("strategy") == "mm":
                 score += 0.20
+
+            # Crypto boost: time-sensitive 15-min windows need fast execution
+            if s.metadata.get("strategy") == "crypto":
+                score += 0.25
 
             return score
 

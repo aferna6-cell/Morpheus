@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto"]
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -12,7 +12,7 @@ strategy:
   min_conviction: "low"             # allow all positive-edge trades (was "medium")
   high_conviction_multiplier: 1.3
   min_payout_ratio: 0.12
-  fee_pct: 0.00                     # maker orders = free
+  fee_pct: 0.004                    # ~0.4% avg maker fee (0.0175 * P * (1-P))
   slippage_pct: 0.005
 
 # Market filters — loosened for volume
@@ -201,6 +201,25 @@ market_making:
   scan_interval_seconds: 300        # rescan markets every 5 min
   min_price_cents: 15               # only MM in 15-85 range
   max_price_cents: 85
+
+# 15-minute crypto engine — directional momentum on KXBTC15M
+crypto_engine:
+  enabled: true
+  scan_interval_seconds: 60         # rescan for new windows every 60s
+  signal_interval_seconds: 15       # check momentum every 15s
+  momentum_threshold_pct: 0.15      # 0.15% move triggers momentum signal
+  reversion_threshold_pct: 0.50     # 0.50% move triggers mean reversion
+  min_elapsed_minutes: 3            # don't signal in first 3 min
+  momentum_window_minutes: 7        # momentum signals valid minutes 3-7
+  reversion_window_minutes: 13      # reversion signals valid minutes 8-13
+  max_position_usd: 5.0             # $5 max per trade (start conservative)
+  kelly_fraction_momentum: 0.67     # 2/3 Kelly for momentum
+  kelly_fraction_reversion: 0.50    # 1/2 Kelly for reversion
+  min_confidence: 0.45              # minimum confidence to trade
+  cooldown_per_window_seconds: 120  # only 1 signal per window per 2 min
+  maker_fee_coefficient: 0.0175     # Kalshi maker fee formula coefficient
+  binance_ws_url: "wss://stream.binance.com:9443/ws/btcusdt@trade"
+  ticker_prefix: "KXBTC15M"
 
 # CLV tracking
 clv_tracking:

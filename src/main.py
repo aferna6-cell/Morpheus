@@ -224,6 +224,29 @@ async def run(
 
                 logger.info("kalshi_mm_engine_initialized")
 
+            # 15-minute crypto engine (Binance real-time + directional momentum)
+            crypto_cfg = getattr(config, "crypto_engine", None) or {}
+            if isinstance(crypto_cfg, dict) and crypto_cfg.get("enabled", False):
+                if "kalshi_crypto" in enabled:
+                    from .feeds.binance_ws import BinancePriceFeed
+                    from .engines.kalshi_crypto_engine import KalshiCryptoEngine
+
+                    binance_feed = BinancePriceFeed(
+                        ws_url=crypto_cfg.get(
+                            "binance_ws_url",
+                            "wss://stream.binance.com:9443/ws/btcusdt@trade",
+                        ),
+                    )
+                    await binance_feed.start()
+
+                    crypto_engine = KalshiCryptoEngine(
+                        config=config,
+                        kalshi_client=kalshi_read,
+                        price_feed=binance_feed,
+                    )
+                    engines.append(crypto_engine)
+                    logger.info("kalshi_crypto_engine_initialized")
+
             # Wire resume callback: when a halted account resumes, trigger engine rescans
             _engines_for_rescan = list(engines)
             def _on_account_resume():

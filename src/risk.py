@@ -332,12 +332,12 @@ class RiskManager:
         if position_size.risk_level == RiskLevel.CRITICAL:
             return False
 
-        # MM signals have spread-edge (not directional), contrarian already passed
-        # their own min_edge filter in the engine. Skip generic min_edge for both.
+        # MM/contrarian/crypto signals already pass their own edge filters in the
+        # engine. Skip generic min_edge check for these strategies.
         meta = getattr(signal, "metadata", None) or {}
         strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
 
-        if strategy not in ("mm", "contrarian"):
+        if strategy not in ("mm", "contrarian", "crypto"):
             # Edge check using net_edge (already accounts for fees/slippage)
             net_edge = getattr(signal, "net_edge", None)
             if net_edge is not None:
