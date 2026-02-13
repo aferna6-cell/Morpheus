@@ -675,6 +675,18 @@ class PositionMonitor:
         else:
             # Order returned None/falsy — record as failed attempt
             self._exit_retries[key] = (retry_count + 1, _time.monotonic())
+            # If client is halted (insufficient balance), skip permanently
+            if client.is_halted:
+                self._exit_retries[key] = (self._max_exit_retries, _time.monotonic())
+                self._known_closed.add(key)
+                self._save_known_closed()
+                self.logger.warning(
+                    "exit_skipped_account_halted",
+                    ticker=pos.ticker,
+                    account=client.label,
+                    msg="Account halted (insufficient balance) — skipping exit, will settle naturally",
+                )
+                return
             self.logger.warning(
                 "exit_order_no_result",
                 ticker=pos.ticker,
