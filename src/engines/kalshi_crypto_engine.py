@@ -151,8 +151,8 @@ class KalshiCryptoEngine(BaseEngine):
             if not m.ticker.upper().startswith(self._ticker_prefix):
                 continue
 
-            # Must be open and have a close time
-            if m.status != "open" or not m.close_time:
+            # Must be active/open and have a close time
+            if m.status not in ("open", "active") or not m.close_time:
                 continue
 
             # Must close within 20 minutes (current or next window)
@@ -303,11 +303,21 @@ class KalshiCryptoEngine(BaseEngine):
             if confidence < self._min_confidence:
                 continue
 
+            # Fetch fresh orderbook for this market
+            try:
+                fresh = await self.kalshi_client.fetch_market(ticker)
+                if fresh is not None:
+                    window.yes_bid = fresh.yes_bid
+                    window.yes_ask = fresh.yes_ask
+            except Exception:
+                pass  # Use cached bid/ask
+
             # Compute edge: our implied probability vs market price
             # Market midpoint
             mid = (window.yes_bid + window.yes_ask) / 2
-            if mid <= 0 or mid >= 1:
-                mid = 0.50
+            if mid <= 0.02 or mid >= 0.98:
+                # Orderbook not developed yet — skip
+                continue
 
             # Our estimated probability
             if side == "buy_yes":
