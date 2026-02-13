@@ -314,6 +314,11 @@ async def check_resolutions(
                     if extra_key in pred:
                         resolution_record[extra_key] = pred[extra_key]
 
+                # Skip ghost resolutions — no fills means no real trade
+                if total_count == 0 and pnl_usd == 0:
+                    logger.debug("skip_ghost_resolution", market_id=market_id)
+                    continue
+
                 append_jsonl(state_path / "resolutions.jsonl", resolution_record)
                 newly_resolved += 1
 

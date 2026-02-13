@@ -35,13 +35,13 @@ _JUNK_TICKER_PREFIXES = [
     "KXNBAMENTION", "KXNCAAB", "KXNFLMENTION", "KXFOXNEWSMENTION",
     "KXMLBMENTION", "KXNHLMENTION", "KXMLSMENTION",
     "KXCONGRESSMENTION",  # Congress mention — unpredictable speech, no edge
-    # Crypto price ranges (intraday + bracket) — LLMs have no edge
-    # KXBTCD/KXBTC: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
-    "KXBTC15M",
+    # Crypto price ranges — RE-BLOCKED: yahoo fast-path loses money on hourly crypto
+    # Feb 13 audit: BTC 20W/20L -$25.40, 4% daily vol = noise on hourly markets
+    "KXBTC", "KXBTCD", "KXBTC15M",
     # XRP — no structured data fast-path, pure noise
     "KXXRP",
-    # KXETHD/KXETH: NOW UNBLOCKED (Yahoo Finance real-time price fast-path added)
-    "KXETH15M",
+    # ETH — same problem as BTC, re-blocked
+    "KXETH", "KXETHD", "KXETH15M",
     "KXDOGE", "KXDOGED", "KXSOLD", "KXSOLE", "KXSOL15M",
     "KXBNBD", "KXLTCD", "KXADAD", "KXDOTD", "KXAVAXD", "KXLINKD",
     "KXMATD", "KXUNIDD", "KXSHIB", "KXXRPD",

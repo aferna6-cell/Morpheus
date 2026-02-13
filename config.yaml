@@ -17,11 +17,11 @@ strategy:
 
 # Market filters — loosened for volume
 market_filters:
-  min_volume_24h: 500               # lowered — small positions don't need deep liquidity
+  min_volume_24h: 1000              # raised (was 500) — only liquid markets
   min_price: 0.05
   max_price: 0.95
-  min_liquidity: 200                # lowered
-  min_liquidity_aggressive: 200
+  min_liquidity: 500                # raised (was 200) — better fill rates
+  min_liquidity_aggressive: 500
   max_spread_pct: 0.10              # relaxed — 8c at 90c mid = 8.4%, need headroom
   min_data_sources: 0               # no data source requirement
   exclude_closing_within_hours: 0   # trade right up to close
@@ -132,7 +132,7 @@ logging:
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 10         # more signals per cycle (was 5)
+  max_signals_per_cycle: 5          # reduced (was 10) — fewer positions, better capital use
   multi_engine_boost: 1.5
   cycle_interval_seconds: 60
   liquidate_on_startup: false       # Only use for one-time manual cleanup

@@ -521,9 +521,8 @@ class EnsembleSignal(Signal):
                         )
 
             # Stock index fast-path: Yahoo Finance real-time price + normal CDF
-            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
-                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
-                                "KXETHD", "KXETH")
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100",
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,
@@ -754,7 +753,7 @@ class EnsembleSignal(Signal):
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.15  # base YES dampening (0.10→0.15 Wave 14: YES 14% WR)
+            yes_dampen = 0.25  # base YES dampening (0.15→0.25 Wave 16: YES 21% WR, -$17.97)
             if type_cal.yes_boost > 0:
                 # type_cal.yes_boost > 0 means distrust YES more
                 yes_dampen += type_cal.yes_boost
@@ -879,6 +878,16 @@ class EnsembleSignal(Signal):
                 side = TradingSide.BUY_NO
             else:
                 side = TradingSide.HOLD
+
+            # buy_yes needs higher edge — LLM systematically overestimates YES
+            # Wave 16: buy_yes was 3W/11L (21% WR), -$17.97
+            if side == TradingSide.BUY_YES and net_edge < 0.10:
+                result = self._hold(
+                    market,
+                    f"buy_yes edge {net_edge:.3f} below 10% minimum (YES bias filter)",
+                )
+                self._cache.put(ck, result)
+                return result
 
             # Payout ratio filter — don't buy $0.95 contracts to win $0.05
             if side != TradingSide.HOLD:
@@ -1335,7 +1344,7 @@ Rules:
 
                     # Min-edge gate for contrarian weather
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.03 if is_weather_threshold else 0.20
+                    min_edge = 0.03 if is_weather_threshold else 0.25
                     if net_edge < min_edge:
                         return self._hold(market, f"Contrarian weather: net edge {net_edge:.3f} < {min_edge:.3f}")
 
@@ -1418,9 +1427,8 @@ Rules:
                     return sig
 
             # Stock index fast-path for contrarian: Yahoo Finance real-time price
-            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100", "KXBTCD", "KXBTC",
-                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
-                                "KXETHD", "KXETH")
+            _INDEX_PREFIXES = ("KXINXU", "KXINX-", "KXNASDAQ100",
+                                "KXSPY", "KXQQQ", "KXIWM", "KXDIA")
             if any(market.id.upper().startswith(p) for p in _INDEX_PREFIXES):
                 idx_result = await compute_stock_index_probability(
                     market.question, market.id,

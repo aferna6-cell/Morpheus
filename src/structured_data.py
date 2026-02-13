@@ -1694,10 +1694,9 @@ async def compute_weather_probability(
                 msg=f"Forecast within {floor:.0f}°F of bracket edge",
             )
             return None
-        # Z-score gate: day-0 hourly uses 1.5 sigma (lets more NOAA signals
-        # through instead of deferring to LLM which has no weather edge);
-        # longer-lead keeps 2.0 sigma.
-        z_gate = 1.5 if used_hourly else 2.0
+        # Z-score gate: uniform 2.0 sigma (was 1.5 hourly — let marginal brackets
+        # through). Wave 16: weather brackets 1W/7L, -$4.83.
+        z_gate = 2.0
         if z_from_edge < z_gate:
             logger.info(
                 "weather_bracket_too_close",
