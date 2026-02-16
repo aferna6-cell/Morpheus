@@ -413,7 +413,7 @@ class RiskManager:
         meta = getattr(signal, "metadata", None) or {}
         strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
 
-        if strategy not in ("mm", "contrarian", "crypto", "bracket_arb", "bonding", "longshot"):
+        if strategy not in ("mm", "contrarian", "crypto", "bracket_arb", "bonding", "longshot_sell"):
             # Edge check using net_edge (already accounts for fees/slippage)
             net_edge = getattr(signal, "net_edge", None)
             if net_edge is not None:

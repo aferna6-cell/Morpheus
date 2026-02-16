@@ -6,6 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.utils import load_config
 from src.kalshi_trading_client import KalshiTradingClient
 
@@ -13,17 +16,20 @@ from src.kalshi_trading_client import KalshiTradingClient
 async def main():
     config = load_config()
     accounts = [
-        ("kalshi_key.pem", "primary"),
-        ("kalshi_key_2.pem", "secondary"),
+        (None, None, "primary"),  # uses default env vars
+        (os.getenv("KALSHI_API_KEY_ID_2"), os.getenv("KALSHI_PRIVATE_KEY_PATH_2"), "secondary"),
     ]
     grand_total_exp = 0.0
     grand_total_cash = 0.0
 
-    for pk, label in accounts:
-        client = KalshiTradingClient(
-            config=config, private_key_path=pk, label=f"kalshi_{label}"
-        )
+    for key_id, pk, label in accounts:
+        kwargs = {"config": config, "label": f"kalshi_{label}"}
+        if key_id and pk:
+            kwargs["api_key_id"] = key_id
+            kwargs["private_key_path"] = pk
+        client = KalshiTradingClient(**kwargs)
         try:
+            await client.initialize()
             bal = await client.get_balance()
         except Exception as e:
             bal = 0.0
