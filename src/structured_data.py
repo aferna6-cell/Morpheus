@@ -714,6 +714,9 @@ _gridpoint_cache: Dict[str, str] = {}
 _forecast_cache: Dict[str, Tuple[float, Dict]] = {}
 _FORECAST_CACHE_TTL = 600.0  # 10 min — catch NOAA forecast updates faster
 
+# Cache for NWS forecast updateTime (ISO string) — keyed by forecast_url
+_forecast_update_times: Dict[str, str] = {}
+
 # Cache for METAR observations (5 min TTL — observations update hourly but we want freshness)
 _observation_cache: Dict[str, Tuple[float, Dict]] = {}
 _OBSERVATION_CACHE_TTL = 300.0  # 5 min
@@ -949,6 +952,81 @@ async def _fetch_open_meteo_hrrr(
 
     except Exception as e:
         logger.debug("hrrr_fetch_error", error=str(e))
+        return None
+
+
+# Cache for GraphCast (AIGFS) forecasts (15 min TTL)
+_graphcast_cache: Dict[str, Tuple[float, Dict]] = {}
+_GRAPHCAST_CACHE_TTL = 900.0  # 15 min
+
+
+async def _fetch_graphcast_forecast(
+    lat: float, lon: float, target_date: str,
+) -> Optional[Dict[str, float]]:
+    """Fetch AIGFS (GraphCast) forecast from Open-Meteo.
+
+    GraphCast is Google DeepMind's ML weather model, available via Open-Meteo
+    as gfs_graphcast025 (0.25° resolution). Free REST API, no auth needed.
+
+    Returns {"temperature_max": float, "temperature_min": float} computed
+    from hourly temps for the target date, or None on failure.
+
+    GraphCast adds 18-24h skill extension beyond traditional NWP models,
+    making it a valuable 5th source for weather probability blending.
+    """
+    cache_key = f"graphcast:{lat:.2f},{lon:.2f}:{target_date}"
+    cached = _graphcast_cache.get(cache_key)
+    if cached:
+        ts, data = cached
+        if time.monotonic() - ts < _GRAPHCAST_CACHE_TTL:
+            return data
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "inch",
+        "models": "gfs_graphcast025",
+        "start_date": target_date,
+        "end_date": target_date,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.debug("graphcast_http_error", status=resp.status_code)
+                return None
+            data = resp.json()
+
+        hourly = data.get("hourly", {})
+        temps = hourly.get("temperature_2m", [])
+        temps = [float(t) for t in temps if t is not None]
+
+        if len(temps) < 12:
+            logger.debug("graphcast_insufficient_data", n_hours=len(temps))
+            return None
+
+        result = {
+            "temperature_max": max(temps),
+            "temperature_min": min(temps),
+        }
+
+        _graphcast_cache[cache_key] = (time.monotonic(), result)
+        logger.info(
+            "graphcast_fetched",
+            lat=lat, lon=lon, date=target_date,
+            t_max=round(result["temperature_max"], 1),
+            t_min=round(result["temperature_min"], 1),
+            n_hours=len(temps),
+        )
+        return result
+
+    except Exception as e:
+        logger.debug("graphcast_fetch_error", error=str(e))
         return None
 
 
@@ -1270,6 +1348,10 @@ async def _get_nws_forecast(forecast_url: str) -> Optional[Dict]:
             if resp.status_code == 200:
                 data = resp.json()
                 _forecast_cache[forecast_url] = (now, data)
+                # Track forecast updateTime for staleness check
+                update_time = data.get("properties", {}).get("updateTime")
+                if update_time:
+                    _forecast_update_times[forecast_url] = update_time
                 return data
     except Exception as e:
         logger.debug("nws_forecast_error", error=str(e), url=forecast_url)
@@ -1307,6 +1389,10 @@ async def _get_nws_hourly_forecast(forecast_url: str) -> Optional[List[Dict]]:
                 periods = data.get("properties", {}).get("periods", [])
                 if periods:
                     _hourly_forecast_cache[hourly_url] = (now, periods)
+                    # Track forecast updateTime for staleness check
+                    update_time = data.get("properties", {}).get("updateTime")
+                    if update_time:
+                        _forecast_update_times[forecast_url] = update_time
                     return periods
     except Exception as e:
         logger.debug("nws_hourly_forecast_error", error=str(e), url=hourly_url)
@@ -1510,6 +1596,26 @@ _previous_forecasts: Dict[str, float] = {}  # "city:period" -> temp
 _forecast_change_events: List[Dict] = []  # recent change events
 
 
+def _get_forecast_age_hours(forecast_url: str) -> Optional[float]:
+    """Compute age of NWS forecast in hours from cached updateTime.
+
+    Returns hours since last forecast update, or None if not available.
+    Parses the ISO 8601 updateTime string from the NWS API response.
+    """
+    update_time_str = _forecast_update_times.get(forecast_url)
+    if not update_time_str:
+        return None
+    try:
+        # NWS uses ISO format like "2025-02-15T14:30:00+00:00"
+        # Handle both +00:00 and Z suffixes
+        ut = update_time_str.replace("Z", "+00:00")
+        update_dt = datetime.fromisoformat(ut)
+        age = datetime.now(timezone.utc) - update_dt
+        return max(0.0, age.total_seconds() / 3600.0)
+    except (ValueError, TypeError):
+        return None
+
+
 def _norm_cdf(x: float, mu: float, sigma: float) -> float:
     """Normal CDF using math.erfc (no scipy needed)."""
     if sigma <= 0:
@@ -1576,11 +1682,15 @@ def get_recent_forecast_changes(since_seconds: float = 600.0) -> List[Dict]:
 async def compute_weather_probability(
     question: str, market_id: str = "", close_time: Optional[datetime] = None,
 ) -> Optional[Tuple[float, float, str]]:
-    """Compute weather probability directly from NWS forecast.
+    """Compute weather probability from 5-source blend.
+
+    Sources: NWS (point), GFS+GEM+ICON (ensemble), ECMWF IFS (ensemble),
+    HRRR (hi-res deterministic), GraphCast/AIGFS (ML deterministic).
 
     Returns (p_yes, confidence, reasoning) or None if can't compute.
-    Only returns a result when NWS data is unambiguous (|forecast - threshold| / sigma > 1.5).
+    Only returns a result when forecast data is unambiguous (|forecast - threshold| / sigma > 1.0).
     For ambiguous cases, returns None so the LLM handles it.
+    Applies 20% confidence penalty if NWS forecast is >6h stale.
     """
     # 1. Parse city
     city = _parse_city(question)
@@ -2099,14 +2209,18 @@ async def compute_weather_probability(
     p_ecmwf = None  # ECMWF IFS probability
     gfs_members: List[float] = []
     ecmwf_members: List[float] = []
+    graphcast_data = None  # GraphCast (AIGFS) forecast data
 
     if coords:
         target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
 
-        # Fetch GFS+GEM+ICON and ECMWF IFS in parallel
+        # Fetch GFS+GEM+ICON, ECMWF IFS, and GraphCast in parallel
         gfs_task = _fetch_open_meteo_ensemble(coords[0], coords[1], target_str)
         ecmwf_task = _fetch_ecmwf_ensemble(coords[0], coords[1], target_str)
-        ensemble_data, ecmwf_data = await asyncio.gather(gfs_task, ecmwf_task)
+        graphcast_task = _fetch_graphcast_forecast(coords[0], coords[1], target_str)
+        ensemble_data, ecmwf_data, graphcast_data = await asyncio.gather(
+            gfs_task, ecmwf_task, graphcast_task,
+        )
 
         # Determine direction for probability computation
         if "bracket" in t_type and bracket_bounds:
@@ -2169,10 +2283,35 @@ async def compute_weather_probability(
                 else:
                     p_hrrr = 1.0 - _norm_cdf(t_value, hrrr_temp, sigma)
 
-    # Blend NWS + GFS ensemble + ECMWF IFS + HRRR:
+    # 7d. GraphCast (AIGFS) deterministic forecast — ML-based, 0.25° resolution
+    p_graphcast = None
+    graphcast_temp = None
+    if coords and graphcast_data:
+        if "high" in t_type:
+            graphcast_temp = graphcast_data.get("temperature_max")
+        elif "low" in t_type:
+            graphcast_temp = graphcast_data.get("temperature_min")
+        else:
+            graphcast_temp = graphcast_data.get("temperature_max")
+
+        if graphcast_temp is not None:
+            # GraphCast is deterministic — use normal CDF with city sigma
+            if "bracket" in t_type and bracket_bounds:
+                lo, hi = bracket_bounds
+                p_graphcast = (
+                    _norm_cdf(hi, graphcast_temp, sigma)
+                    - _norm_cdf(lo, graphcast_temp, sigma)
+                )
+            elif "below" in t_type:
+                p_graphcast = _norm_cdf(t_value, graphcast_temp, sigma)
+            else:
+                p_graphcast = 1.0 - _norm_cdf(t_value, graphcast_temp, sigma)
+
+    # Blend NWS + GFS ensemble + ECMWF IFS + HRRR (+ GraphCast post-blend):
     # NWS is calibrated point forecast, GFS+GEM+ICON captures ensemble spread,
     # ECMWF IFS is the gold-standard global model (51 members),
-    # HRRR adds high-resolution spatial detail for same-day.
+    # HRRR adds high-resolution spatial detail for same-day,
+    # GraphCast (AIGFS) is applied as a 10% post-blend refinement (5th source).
     #
     # HRRR time-weighting: HRRR 3km outperforms global models for 0-18h forecasts.
     # Boost HRRR weight when close to market close time.
@@ -2225,7 +2364,7 @@ async def compute_weather_probability(
         )
 
     if p_gfs is not None and p_ecmwf is not None and p_hrrr is not None:
-        # Full 4-source blend: NWS + GFS + ECMWF + HRRR
+        # Full 4-source core blend: NWS + GFS + ECMWF + HRRR (GraphCast applied post-blend)
         # Time-weighted: HRRR gets boosted for near-close markets
         if _hrrr_tier == "near":
             # <6h: HRRR 50%, others split remaining 50%
@@ -2396,12 +2535,42 @@ async def compute_weather_probability(
             hrrr_tier=_hrrr_tier,
         )
     else:
-        p_yes = p_nws
+        # NWS only — no ensemble or HRRR data
+        if p_graphcast is not None:
+            # GraphCast available: 60% NWS + 40% GraphCast
+            p_yes = 0.60 * p_nws + 0.40 * p_graphcast
+            logger.info(
+                "weather_nws_graphcast_blend",
+                city=city,
+                p_nws=round(p_nws, 4),
+                p_graphcast=round(p_graphcast, 4),
+                p_blended=round(p_yes, 4),
+                graphcast_temp=round(graphcast_temp, 1) if graphcast_temp else None,
+            )
+        else:
+            p_yes = p_nws
+
+    # GraphCast post-blend refinement — when other sources already contributed,
+    # GraphCast adds a 10% weight as a 5th independent model signal.
+    # Skipped if GraphCast was already used in the NWS-only path above.
+    if p_graphcast is not None and (
+        p_gfs is not None or p_ecmwf is not None or p_hrrr is not None
+    ):
+        p_yes_pre_gc = p_yes
+        p_yes = 0.90 * p_yes + 0.10 * p_graphcast
+        logger.info(
+            "graphcast_post_blend",
+            city=city,
+            p_pre=round(p_yes_pre_gc, 4),
+            p_graphcast=round(p_graphcast, 4),
+            p_adjusted=round(p_yes, 4),
+            graphcast_temp=round(graphcast_temp, 1) if graphcast_temp else None,
+        )
 
     # Clamp
     p_yes = max(0.02, min(0.98, p_yes))
 
-    # 7d. NBM validation layer — compare against NWS gridpoints quantitative data
+    # 7e. NBM validation layer — compare against NWS gridpoints quantitative data
     # If our multi-model blend disagrees with NBM by >15%, adjust toward NBM.
     if coords:
         target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
@@ -2484,11 +2653,25 @@ async def compute_weather_probability(
 
     confidence = min(0.95, 0.5 + z_score * 0.15) if "bracket" not in t_type else min(0.90, 0.4 + abs(0.5 - p_yes) * 1.5)
 
+    # Forecast staleness check: if NWS forecast is >6h old, reduce confidence
+    forecast_age_hours = _get_forecast_age_hours(forecast_url)
+    if forecast_age_hours is not None and forecast_age_hours > 6.0:
+        confidence *= 0.80
+        logger.info(
+            "stale_forecast_penalty",
+            city=city,
+            age_hours=round(forecast_age_hours, 1),
+            confidence_after=round(confidence, 3),
+        )
+
     source = "hourly" if used_hourly else "12h"
+    gc_note = ""
+    if p_graphcast is not None and graphcast_temp is not None:
+        gc_note = f", GraphCast={graphcast_temp:.0f}°F (p={p_graphcast:.3f})"
     reasoning = (
         f"NOAA direct ({source}): NWS forecast={forecast_temp:.0f}°F, "
         f"threshold={t_value:.1f}°F, sigma={sigma:.1f}°F, "
-        f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d)"
+        f"p_yes={p_yes:.3f} (city={city}, lead={lead_days}d){gc_note}"
     )
 
     logger.info(
@@ -2501,6 +2684,8 @@ async def compute_weather_probability(
         p_yes=round(p_yes, 4),
         confidence=round(confidence, 3),
         lead_days=lead_days,
+        graphcast_temp=round(graphcast_temp, 1) if graphcast_temp else None,
+        p_graphcast=round(p_graphcast, 4) if p_graphcast is not None else None,
     )
 
     return (p_yes, confidence, reasoning)

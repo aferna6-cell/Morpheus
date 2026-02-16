@@ -161,6 +161,33 @@ def compute_model_weights(state_dir: str | Path = "state") -> Dict[str, float]:
     return weights
 
 
+def trimmed_mean(
+    model_predictions: Dict[str, float],
+    trim_fraction: float = 0.2,
+) -> float:
+    """Trimmed mean: remove extreme predictions, average the rest.
+
+    With 5 models and trim_fraction=0.2, trims 1 from each end (the highest
+    and lowest predictions), then averages the middle 3. This is robust to
+    a single badly-calibrated model pulling the ensemble off.
+
+    Falls back to simple average when <=2 models (can't trim).
+    """
+    if len(model_predictions) <= 2:
+        return sum(model_predictions.values()) / len(model_predictions)
+
+    values = sorted(model_predictions.values())
+    n = len(values)
+    trim_count = max(1, int(n * trim_fraction))
+    trimmed = values[trim_count:n - trim_count]
+
+    if not trimmed:
+        # Over-trimmed (shouldn't happen with trim_fraction=0.2)
+        trimmed = values
+
+    return sum(trimmed) / len(trimmed)
+
+
 def weighted_average(
     model_predictions: Dict[str, float],
     weights: Dict[str, float],

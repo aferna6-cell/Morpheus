@@ -29,6 +29,10 @@ MODEL_COSTS: Dict[str, Dict[str, float]] = {
     "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
     "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+    # Cheap ensemble models (Wave 23)
+    "mistral-small-latest": {"input": 0.10, "output": 0.30},
+    "deepseek-chat": {"input": 0.27, "output": 1.10},
+    "gemini-2.5-flash-preview-05-20": {"input": 0.15, "output": 0.60},
 }
 
 DEFAULT_COST = {"input": 5.00, "output": 15.00}  # fallback for unknown models

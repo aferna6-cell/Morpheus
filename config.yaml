@@ -72,6 +72,13 @@ sports_filters:
 llm:
   model: "gpt-4o"
   ensemble_anthropic_model: "claude-sonnet-4-20250514"
+  ensemble_mode: "full"             # Wave 23: 5-model trimmed mean ensemble
+  ensemble_models:
+    - {provider: "openai", model: "gpt-4o", enabled: true}
+    - {provider: "anthropic", model: "claude-sonnet-4-20250514", enabled: true}
+    - {provider: "mistral", model: "mistral-small-latest", enabled: true}
+    - {provider: "deepseek", model: "deepseek-chat", enabled: true}
+    - {provider: "gemini", model: "gemini-2.5-flash-preview-05-20", enabled: true}
   temperature: 0.1
   max_tokens: 1000
   timeout_seconds: 30
@@ -279,6 +286,48 @@ econ_sniping:
   min_edge: 0.05                   # 5% minimum edge for econ signals
   min_z_score: 1.0                 # only signal on 1+ sigma surprises
   release_window_hours: 2          # check within 2 hours after scheduled release
+
+# Wave 23: per-type calibration knobs (previously hardcoded)
+calibration:
+  default_platt_alpha: 0.68        # Platt scaling alpha (0.68 fitted to our data)
+  weather_platt_alpha: 0.83        # less compression for data-backed weather
+  weather_extreme_platt_alpha: 0.95 # near-passthrough for extreme data (FAR ABOVE/BELOW)
+  weather_strong_platt_alpha: 0.90  # mild compression for strong data (well above/below)
+  index_platt_alpha: 0.85          # index markets: 9W/0L, trust signals more
+  index_shrink: 0.08               # less shrinkage for proven index signals
+  weather_shrink: 0.12             # moderate shrinkage for weather
+  default_shrink: 0.15             # default calibration shrinkage
+  edge_cap: 0.30                   # edges >0.30 are unreliable (0% WR in data)
+  per_type:
+    index:
+      platt_alpha: 0.85
+      extra_shrink: -0.05          # LESS shrinkage (index 9W/0L)
+      kelly_boost: 1.0             # no penalty (already using index_kelly_fraction)
+    weather:
+      platt_alpha: 0.83
+      extra_shrink: 0.0
+      kelly_boost: 1.0
+    politics:
+      platt_alpha: 0.68
+      extra_shrink: 0.05           # more shrinkage (LLM overconfident on politics)
+      kelly_boost: 0.8
+    economics:
+      platt_alpha: 0.75
+      extra_shrink: 0.0
+      kelly_boost: 1.0
+
+# Wave 23: high-probability bonding scanner
+bonding:
+  enabled: true
+  scan_interval_seconds: 600
+  min_price_cents: 90              # minimum YES price to consider
+  max_price_cents: 98              # don't buy 99c (1c profit = below fees)
+  max_hours_to_settle: 72          # within 3 days
+  min_volume: 2000                 # reasonable liquidity
+  max_position_usd: 10.0           # $10 max per bond
+  max_total_bonds: 5               # max 5 simultaneous bonds
+  min_profit_pct: 0.02             # 2% minimum profit (covers fees)
+  verify_with_data: true           # use NOAA/Yahoo to verify near-certainty
 
 # Compatibility
 bregman_arb: {}

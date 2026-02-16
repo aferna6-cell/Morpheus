@@ -140,6 +140,7 @@ async def run(
                 config=config,
                 trading_clients=trading_clients,
                 state_dir=state_dir,
+                kalshi_client=kalshi_read,  # Wave 23: drift guard price checks
             )
 
             # Wire fill events to position tracking
@@ -269,6 +270,17 @@ async def run(
                     )
                     engines.append(theta_engine)
                     logger.info("kalshi_theta_engine_initialized")
+
+            # Bonding engine (near-certain outcome harvesting, bond-like returns)
+            bonding_cfg = getattr(config, "bonding", None) or {}
+            if isinstance(bonding_cfg, dict) and bonding_cfg.get("enabled", False):
+                from .engines.kalshi_bonding_engine import KalshiBondingEngine
+                bonding_engine = KalshiBondingEngine(
+                    config=config,
+                    kalshi_client=kalshi_read,
+                )
+                engines.append(bonding_engine)
+                logger.info("kalshi_bonding_engine_initialized")
 
             # Wire resume callback: when a halted account resumes, trigger engine rescans
             _engines_for_rescan = list(engines)

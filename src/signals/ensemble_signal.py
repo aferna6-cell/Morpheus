@@ -15,6 +15,7 @@ Key differences from llm_signal.py:
 
 import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -36,7 +37,7 @@ from pathlib import Path
 
 from ..cost_tracker import CostTracker
 from ..markets import Market
-from ..model_tracker import compute_model_weights, log_model_predictions, weighted_average
+from ..model_tracker import compute_model_weights, log_model_predictions, trimmed_mean, weighted_average
 from ..news import NewsAggregator
 from ..structured_data import get_structured_anchor, compute_weather_probability, compute_jobless_claims_probability, compute_stock_index_probability, get_recent_forecast_changes
 from ..utils import BotConfig, RateLimiter
@@ -113,13 +114,41 @@ _MIN_EDGE_BY_TYPE.setdefault("economics", 0.05)
 
 
 # ---------------------------------------------------------------------------
+# Log-odds utilities — Wave 23: edge calculation in log-odds space
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+
+def prob_to_logodds(p: float) -> float:
+    """Convert probability to log-odds. Clamps to avoid ±inf."""
+    p = max(0.001, min(0.999, p))
+    return _math.log(p / (1.0 - p))
+
+
+def logodds_to_prob(lo: float) -> float:
+    """Convert log-odds back to probability."""
+    return 1.0 / (1.0 + _math.exp(-lo))
+
+
+def edge_in_logodds(p_model: float, p_market: float) -> float:
+    """Compute edge in log-odds space.
+
+    In log-odds space, a fixed spread naturally has larger impact at extreme
+    probabilities. A 0.2 logodds edge at p=0.50 is ~5c, but at p=0.95 is ~1.8c.
+    This better captures informational advantage at extremes.
+    """
+    return prob_to_logodds(p_model) - prob_to_logodds(p_market)
+
+
+# ---------------------------------------------------------------------------
 # Calibration — symmetric shrinkage + asymmetric YES dampening
 # ---------------------------------------------------------------------------
 
 def calibrate_probability(
     p: float,
     *,
-    shrink_strength: float = 0.10,
+    shrink_strength: float = 0.15,
     platt_alpha: float = 0.68,
     floor: float = 0.05,
     ceiling: float = 0.95,
@@ -263,16 +292,18 @@ class EnsembleSignal(Signal):
         self.max_tokens = llm_config.get("max_tokens", 1000)
         self.timeout = llm_config.get("timeout_seconds", 30)
 
-        # Ensemble mode: "both", "openai_only", "anthropic_only"
-        # Data shows Claude Sonnet Brier=0.30 (worse than random) while
-        # GPT-4o Brier=0.13. Default to openai_only to save costs + accuracy.
+        # Ensemble mode: "both", "openai_only", "anthropic_only", "full"
+        # "full" = Wave 23 five-model trimmed mean ensemble
         self.ensemble_mode = llm_config.get("ensemble_mode", "openai_only")
+
+        # Ensemble model config (for "full" mode)
+        self.ensemble_models = llm_config.get("ensemble_models", [])
 
         # Screening config
         self.screening_enabled = llm_config.get("screening_enabled", True)
         self.screening_model = llm_config.get("screening_model", "gpt-4o-mini")
 
-        # Clients
+        # Clients — core (always initialized)
         self.openai_client = AsyncOpenAI(timeout=self.timeout)
         self._anthropic_client = None
         if _HAS_ANTHROPIC:
@@ -280,6 +311,45 @@ class EnsembleSignal(Signal):
                 self._anthropic_client = AsyncAnthropic(timeout=self.timeout)
             except Exception:
                 self.logger.warning("anthropic_client_init_failed")
+
+        # Clients — cheap ensemble models (Wave 23)
+        # Only initialized if API key exists in environment
+        self._mistral_client: Optional[AsyncOpenAI] = None
+        self._deepseek_client: Optional[AsyncOpenAI] = None
+        self._gemini_client: Optional[AsyncOpenAI] = None
+
+        if os.environ.get("MISTRAL_API_KEY"):
+            try:
+                self._mistral_client = AsyncOpenAI(
+                    api_key=os.environ["MISTRAL_API_KEY"],
+                    base_url="https://api.mistral.ai/v1",
+                    timeout=self.timeout,
+                )
+                self.logger.info("mistral_client_initialized")
+            except Exception:
+                self.logger.warning("mistral_client_init_failed")
+
+        if os.environ.get("DEEPSEEK_API_KEY"):
+            try:
+                self._deepseek_client = AsyncOpenAI(
+                    api_key=os.environ["DEEPSEEK_API_KEY"],
+                    base_url="https://api.deepseek.com",
+                    timeout=self.timeout,
+                )
+                self.logger.info("deepseek_client_initialized")
+            except Exception:
+                self.logger.warning("deepseek_client_init_failed")
+
+        if os.environ.get("GEMINI_API_KEY"):
+            try:
+                self._gemini_client = AsyncOpenAI(
+                    api_key=os.environ["GEMINI_API_KEY"],
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                    timeout=self.timeout,
+                )
+                self.logger.info("gemini_client_initialized")
+            except Exception:
+                self.logger.warning("gemini_client_init_failed")
 
         # News aggregator
         self.news_aggregator = NewsAggregator(config)
@@ -307,10 +377,19 @@ class EnsembleSignal(Signal):
         cache_enabled = llm_config.get("cache_enabled", True)
         self._cache = _ResultCache(ttl_seconds=cache_ttl, enabled=cache_enabled)
 
-        # Calibration
+        # Calibration — Wave 23: read from config.calibration (was hardcoded)
+        cal_config = getattr(config, "calibration", None) or {}
         self.calibration_shrink = float(
-            llm_config.get("calibration_shrink_strength", 0.25)
+            cal_config.get("default_shrink", llm_config.get("calibration_shrink_strength", 0.15))
         )
+        self._platt_alpha_default = float(cal_config.get("default_platt_alpha", 0.68))
+        self._platt_alpha_weather = float(cal_config.get("weather_platt_alpha", 0.83))
+        self._platt_alpha_weather_extreme = float(cal_config.get("weather_extreme_platt_alpha", 0.95))
+        self._platt_alpha_weather_strong = float(cal_config.get("weather_strong_platt_alpha", 0.90))
+        self._platt_alpha_index = float(cal_config.get("index_platt_alpha", 0.85))
+        self._index_shrink = float(cal_config.get("index_shrink", 0.08))
+        self._edge_cap = float(cal_config.get("edge_cap", 0.30))
+        self._per_type_cal = cal_config.get("per_type", {})
 
         # Model weights (loaded periodically from resolved predictions)
         self._model_weights: Dict[str, float] = {}
@@ -389,11 +468,11 @@ class EnsembleSignal(Signal):
                     # Compute edge directly (no calibration needed — this is hard data)
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
+                    net_edge = min(net_edge, self._edge_cap)  # Cap from config (default 0.30)
                     # Threshold markets (T-prefix) need less edge — one boundary,
                     # higher win rate. Brackets (B-prefix) need more — two edges.
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.08 if is_weather_threshold else 0.30  # Wave 22: bracket 25%→30% (still losing)
+                    min_edge = 0.08 if is_weather_threshold else 0.18  # Wave 23: bracket 30%→18% (was filtering all opportunities)
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -475,7 +554,7 @@ class EnsembleSignal(Signal):
                     p_yes, jc_confidence, jc_reasoning = claims_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
+                    net_edge = min(net_edge, self._edge_cap)  # Cap from config (default 0.30)
                     min_edge = 0.08
 
                     if net_edge >= min_edge:
@@ -536,7 +615,7 @@ class EnsembleSignal(Signal):
                     p_yes, idx_confidence, idx_reasoning = idx_result
                     raw_edge = p_yes - market_price
                     net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-                    net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
+                    net_edge = min(net_edge, self._edge_cap)  # Cap from config (default 0.30)
                     is_index_bracket = "-B" in market.id and "-T" not in market.id
                     min_edge = 0.20 if is_index_bracket else 0.05
 
@@ -704,8 +783,56 @@ class EnsembleSignal(Signal):
             # Call models based on ensemble_mode
             openai_result = None
             anthropic_result = None
+            mistral_result = None
+            deepseek_result = None
+            gemini_result = None
 
-            if self.ensemble_mode == "both":
+            if self.ensemble_mode == "full":
+                # Wave 23: 5-model trimmed mean ensemble
+                # Launch all available model calls in parallel
+                tasks = {}
+                tasks["openai"] = self._call_openai(system, prompt)
+                if self._anthropic_client:
+                    tasks["anthropic"] = self._call_anthropic(system, prompt)
+                if self._mistral_client:
+                    tasks["mistral"] = self._call_mistral(system, prompt)
+                if self._deepseek_client:
+                    tasks["deepseek"] = self._call_deepseek(system, prompt)
+                if self._gemini_client:
+                    tasks["gemini"] = self._call_gemini(system, prompt)
+
+                task_names = list(tasks.keys())
+                task_coros = list(tasks.values())
+                results = await asyncio.gather(*task_coros, return_exceptions=True)
+
+                for name, result in zip(task_names, results):
+                    if isinstance(result, Exception):
+                        self.logger.warning(
+                            f"{name}_call_failed",
+                            error=str(result),
+                        )
+                        continue
+                    if name == "openai":
+                        openai_result = result
+                    elif name == "anthropic":
+                        anthropic_result = result
+                    elif name == "mistral":
+                        mistral_result = result
+                    elif name == "deepseek":
+                        deepseek_result = result
+                    elif name == "gemini":
+                        gemini_result = result
+
+                self.logger.info(
+                    "full_ensemble_calls_complete",
+                    market_id=market.id,
+                    launched=len(tasks),
+                    succeeded=sum(
+                        1 for r in results if not isinstance(r, Exception) and r is not None
+                    ),
+                )
+
+            elif self.ensemble_mode == "both":
                 openai_task = self._call_openai(system, prompt)
                 anthropic_task = self._call_anthropic(system, prompt)
                 results = await asyncio.gather(
@@ -729,7 +856,7 @@ class EnsembleSignal(Signal):
                 except Exception as e:
                     self.logger.warning("openai_call_failed", error=str(e))
 
-            # Extract probabilities
+            # Extract probabilities from all model results
             p_values = []
             model_details = {}      # for logging: {openai_p_yes: 0.35, ...}
             model_predictions = {}  # for weighting: {model_name: p_yes}
@@ -748,8 +875,29 @@ class EnsembleSignal(Signal):
                 model_details["anthropic_p_yes"] = p_anthropic
                 model_predictions[self.anthropic_model] = p_anthropic
 
+            if mistral_result and _validate_llm_response(mistral_result) is None:
+                p_mistral = float(mistral_result["p_yes"])
+                p_mistral = max(0.001, min(0.999, p_mistral))
+                p_values.append(p_mistral)
+                model_details["mistral_p_yes"] = p_mistral
+                model_predictions["mistral-small-latest"] = p_mistral
+
+            if deepseek_result and _validate_llm_response(deepseek_result) is None:
+                p_deepseek = float(deepseek_result["p_yes"])
+                p_deepseek = max(0.001, min(0.999, p_deepseek))
+                p_values.append(p_deepseek)
+                model_details["deepseek_p_yes"] = p_deepseek
+                model_predictions["deepseek-chat"] = p_deepseek
+
+            if gemini_result and _validate_llm_response(gemini_result) is None:
+                p_gemini = float(gemini_result["p_yes"])
+                p_gemini = max(0.001, min(0.999, p_gemini))
+                p_values.append(p_gemini)
+                model_details["gemini_p_yes"] = p_gemini
+                model_predictions["gemini-2.5-flash-preview-05-20"] = p_gemini
+
             if not p_values:
-                return self._hold(market, "Both LLM calls failed")
+                return self._hold(market, "All LLM calls failed")
 
             # Refresh model weights periodically
             if time.monotonic() - self._weights_loaded_at > self._weights_refresh_interval:
@@ -759,43 +907,50 @@ class EnsembleSignal(Signal):
                 except Exception:
                     pass  # weights loading is best-effort
 
-            # Weighted average (falls back to simple average if no weights)
-            p_yes_raw = weighted_average(model_predictions, self._model_weights)
-
-            # Model disagreement gate: if models diverge wildly, increase
-            # shrinkage rather than dropping the signal entirely. One model
-            # may be well-calibrated while the other is wrong.
+            # Aggregation: trimmed mean for full mode (3+ models), weighted avg otherwise
             _high_divergence = False
-            if len(p_values) == 2:
-                divergence = abs(p_values[0] - p_values[1])
-                if divergence > 0.35:
-                    if self._model_weights and len(self._model_weights) >= 2:
-                        # Use weighted average (already computed as p_yes_raw)
-                        # but increase shrinkage to compensate for uncertainty
-                        _high_divergence = True
-                        self.logger.info(
-                            "ensemble_high_divergence_weighted",
-                            market_id=market.id,
-                            divergence=round(divergence, 3),
-                            openai=round(p_values[0], 3),
-                            anthropic=round(p_values[1], 3),
-                        )
-                    else:
-                        # No weights available — fall back to dropping
-                        self.logger.warning(
-                            "ensemble_model_disagreement",
-                            market_id=market.id,
-                            divergence=round(divergence, 3),
-                            openai=round(p_values[0], 3),
-                            anthropic=round(p_values[1], 3),
-                        )
-                        return self._hold(
-                            market,
-                            f"Model disagreement too high ({divergence:.0%})",
-                        )
+            if self.ensemble_mode == "full" and len(p_values) >= 3:
+                # Wave 23: trimmed mean — removes highest and lowest, averages middle
+                p_yes_raw = trimmed_mean(model_predictions)
+                # Use range (max - min) as divergence measure for 3+ models
+                model_range = max(p_values) - min(p_values)
+                if model_range > 0.35:
+                    _high_divergence = True
+                    self.logger.info(
+                        "full_ensemble_high_spread",
+                        market_id=market.id,
+                        model_range=round(model_range, 3),
+                        predictions={k: round(v, 3) for k, v in model_predictions.items()},
+                    )
+            else:
+                # Legacy modes or fallback (1-2 models in full mode)
+                p_yes_raw = weighted_average(model_predictions, self._model_weights)
 
-            # Wave 23: single-model penalty — no cross-validation available.
-            # When only one LLM responds, reduce confidence and shrink toward 0.5.
+                # Model disagreement gate (only for exactly 2 models)
+                if len(p_values) == 2:
+                    divergence = abs(p_values[0] - p_values[1])
+                    if divergence > 0.35:
+                        if self._model_weights and len(self._model_weights) >= 2:
+                            _high_divergence = True
+                            self.logger.info(
+                                "ensemble_high_divergence_weighted",
+                                market_id=market.id,
+                                divergence=round(divergence, 3),
+                            )
+                        else:
+                            self.logger.warning(
+                                "ensemble_model_disagreement",
+                                market_id=market.id,
+                                divergence=round(divergence, 3),
+                            )
+                            return self._hold(
+                                market,
+                                f"Model disagreement too high ({divergence:.0%})",
+                            )
+
+            # Single-model penalty — no cross-validation available.
+            # When only one LLM responds (in any mode), reduce confidence and
+            # shrink toward 0.5. In full mode this means 4 of 5 models failed.
             _single_model = False
             if len(p_values) == 1:
                 _single_model = True
@@ -822,30 +977,36 @@ class EnsembleSignal(Signal):
                 except Exception:
                     pass  # logging is best-effort
 
-            # Per-type calibration: apply type-specific shrinkage + Platt scaling
+            # Wave 23: per-type calibration from config (was hardcoded)
             type_cal = _MARKET_TYPE_CALIBRATION_LLM.get(
                 mtype, MarketTypeCalibration()
             )
-            total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
+            # Check config-driven per-type overrides
+            per_type_cfg = self._per_type_cal.get(mtype, {})
+            cfg_extra_shrink = float(per_type_cfg.get("extra_shrink", type_cal.extra_shrink))
+            total_shrink = min(0.40, self.calibration_shrink + cfg_extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
 
-            # Wave 23: Platt alpha replaces linear YES dampening.
-            # Default alpha=0.68 (maps 80%→72%, 60%→57%, 90%→82%).
-            # Lower alpha = more compression (less trust in extremes).
-            # Higher alpha (toward 1.0) = less compression (more trust).
-            platt_alpha = 0.68  # default
+            # Wave 23: Platt alpha from config with per-type overrides
+            platt_alpha = float(per_type_cfg.get("platt_alpha", self._platt_alpha_default))
+
+            # Index markets: use dedicated config (9W/0L, trust more)
+            if mtype == "index" or any(market.id.upper().startswith(p)
+                                        for p in ("KXINXU", "KXINX-", "KXSPY", "KXQQQ", "KXIWM", "KXDIA")):
+                platt_alpha = self._platt_alpha_index
+                total_shrink = min(total_shrink, self._index_shrink)
 
             # Weather with structured data: trust data-anchored signals more
             if mtype == "weather" and isinstance(structured_context, str) and structured_context:
-                platt_alpha = 0.83  # less compression for data-backed weather
+                platt_alpha = self._platt_alpha_weather
 
             # Reduce calibration when structured data shows extreme confidence.
             # Hard FRED/NOAA data should override generic LLM overconfidence adjustments.
             if isinstance(structured_context, str):
                 if "FAR ABOVE" in structured_context or "FAR BELOW" in structured_context:
                     total_shrink *= 0.15
-                    platt_alpha = 0.95  # near-passthrough for extreme data
+                    platt_alpha = self._platt_alpha_weather_extreme
                     self.logger.info(
                         "calibration_reduced_extreme_data",
                         market_id=market.id,
@@ -854,7 +1015,7 @@ class EnsembleSignal(Signal):
                     )
                 elif "well above" in structured_context or "well below" in structured_context:
                     total_shrink *= 0.50
-                    platt_alpha = 0.90  # mild compression for strong data
+                    platt_alpha = self._platt_alpha_weather_strong
                     self.logger.info(
                         "calibration_reduced_strong_data",
                         market_id=market.id,
@@ -938,16 +1099,20 @@ class EnsembleSignal(Signal):
             # Compute edge
             raw_edge = p_yes - market_price
             net_edge = abs(raw_edge) - self.fee_pct - self.slippage_pct
-            net_edge = min(net_edge, 0.30)  # Cap: edges >0.30 are unreliable (0% WR in data)
+            net_edge = min(net_edge, self._edge_cap)  # Cap from config (default 0.30)
 
-            # Category min edge + price-tiered adjustment
-            # Extreme prices (>85% or <15%) need higher edge to be meaningful
+            # Wave 23: log-odds edge for better extreme-price behavior.
+            # A fixed log-odds threshold naturally requires larger linear edge
+            # at extreme prices (where information advantage matters more).
+            logodds_edge = abs(edge_in_logodds(p_yes, market_price))
+
+            # Category min edge — use log-odds threshold that maps to ~5% at p=0.50
+            # logodds(0.55) - logodds(0.50) ≈ 0.20, so 0.20 logodds ≈ 5% at midrange
+            min_logodds_edge = 0.20  # ~5% at p=0.50, ~2% at p=0.90, ~8% at p=0.15
             min_edge = _MIN_EDGE_BY_TYPE.get(mtype, 0.03)
-            if mtype == "normal":
-                if market_price > 0.85 or market_price < 0.15:
-                    min_edge = 0.08  # 8% for extreme prices
-                elif market_price > 0.75 or market_price < 0.25:
-                    min_edge = 0.05  # 5% for moderate extremes
+            # Use the MORE restrictive of linear and log-odds thresholds
+            logodds_min_linear = abs(logodds_to_prob(prob_to_logodds(market_price) + min_logodds_edge) - market_price)
+            min_edge = max(min_edge, logodds_min_linear)
             if net_edge < min_edge:
                 result = self._hold(
                     market,
@@ -1018,8 +1183,16 @@ class EnsembleSignal(Signal):
             confidence_map = {"low": 0.9, "medium": 0.75, "high": 0.55}
             confidence = confidence_map.get(uncertainty, 0.75)
 
-            # Boost confidence when both models agree closely
-            if len(p_values) == 2:
+            # Boost/penalize confidence based on model agreement
+            if len(p_values) >= 3:
+                # Full ensemble: use standard deviation as agreement measure
+                import statistics
+                model_std = statistics.stdev(p_values)
+                if model_std < 0.03:
+                    confidence = min(1.0, confidence + 0.10)  # tight agreement
+                elif model_std > 0.12:
+                    confidence = max(0.3, confidence - 0.15)  # wide disagreement
+            elif len(p_values) == 2:
                 divergence = abs(p_values[0] - p_values[1])
                 if divergence < 0.05:
                     confidence = min(1.0, confidence + 0.10)
@@ -1058,6 +1231,9 @@ class EnsembleSignal(Signal):
             result.conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"  # type: ignore[attr-defined]
             result.signal_source = "llm"  # type: ignore[attr-defined]
 
+            # Wave 23: log-odds edge for MM spread management
+            result.logodds_edge = logodds_edge  # type: ignore[attr-defined]
+
             self.logger.info(
                 "ensemble_signal",
                 market_id=market.id,
@@ -1065,6 +1241,7 @@ class EnsembleSignal(Signal):
                 market_price=market_price,
                 raw_edge=raw_edge,
                 net_edge=net_edge,
+                logodds_edge=round(logodds_edge, 3),
                 side=side.value,
                 confidence=confidence,
                 models_used=len(p_values),
@@ -1213,6 +1390,121 @@ class EnsembleSignal(Signal):
 
         except Exception as e:
             self.logger.warning("anthropic_call_error", error=str(e))
+            return None
+
+    # ------------------------------------------------------------------
+    # Cheap ensemble model calls (Wave 23)
+    # ------------------------------------------------------------------
+
+    async def _call_mistral(self, system: str, prompt: str) -> Optional[Dict[str, Any]]:
+        """Call Mistral Small via OpenAI-compatible API."""
+        if not self._mistral_client:
+            return None
+        try:
+            await self.rate_limiter.acquire()
+            response = await self._mistral_client.chat.completions.create(
+                model="mistral-small-latest",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    "mistral-small-latest",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return None
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(content)
+                return json.loads(extracted) if extracted else None
+
+        except Exception as e:
+            self.logger.warning("mistral_call_error", error=str(e))
+            return None
+
+    async def _call_deepseek(self, system: str, prompt: str) -> Optional[Dict[str, Any]]:
+        """Call DeepSeek-V3 via OpenAI-compatible API."""
+        if not self._deepseek_client:
+            return None
+        try:
+            await self.rate_limiter.acquire()
+            response = await self._deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    "deepseek-chat",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return None
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(content)
+                return json.loads(extracted) if extracted else None
+
+        except Exception as e:
+            self.logger.warning("deepseek_call_error", error=str(e))
+            return None
+
+    async def _call_gemini(self, system: str, prompt: str) -> Optional[Dict[str, Any]]:
+        """Call Gemini 2.5 Flash via OpenAI-compatible API."""
+        if not self._gemini_client:
+            return None
+        try:
+            await self.rate_limiter.acquire()
+            response = await self._gemini_client.chat.completions.create(
+                model="gemini-2.5-flash-preview-05-20",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    "gemini-2.5-flash-preview-05-20",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return None
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(content)
+                return json.loads(extracted) if extracted else None
+
+        except Exception as e:
+            self.logger.warning("gemini_call_error", error=str(e))
             return None
 
     # ------------------------------------------------------------------
@@ -1545,7 +1837,7 @@ Rules:
 
                     # Min-edge gate for contrarian weather
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.03 if is_weather_threshold else 0.30  # Wave 22: bracket 25%→30%
+                    min_edge = 0.03 if is_weather_threshold else 0.18  # Wave 23: bracket 30%→18%
                     if net_edge < min_edge:
                         return self._hold(market, f"Contrarian weather: net edge {net_edge:.3f} < {min_edge:.3f}")
 

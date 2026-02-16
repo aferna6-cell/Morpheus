@@ -103,6 +103,12 @@ class BotConfig(BaseModel):
     # Economic data release sniping
     econ_sniping: Dict[str, Any] = Field(default_factory=dict)
 
+    # Wave 23: calibration knobs (Platt alphas, shrink, per-type)
+    calibration: Dict[str, Any] = Field(default_factory=dict)
+
+    # Bonding engine (near-certain outcome harvesting)
+    bonding: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,

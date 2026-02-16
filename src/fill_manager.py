@@ -108,13 +108,16 @@ class FillManager:
         config: BotConfig,
         trading_clients: List[KalshiTradingClient],
         state_dir: str = "state",
+        kalshi_client: Any = None,
     ):
         self.config = config
         self.trading_clients = trading_clients
+        self.kalshi_client = kalshi_client  # read-only client for price checks
         self.logger = structlog.get_logger()
 
         self.poll_interval = 30.0  # seconds
         self.stale_timeout = 600.0  # 10 minutes
+        self.drift_threshold_cents = 3  # Wave 23: cancel if mid moves >3c
 
         self._resting: Dict[str, RestingOrder] = {}  # order_id -> RestingOrder
         self._on_fill_callbacks: List[Callable] = []
@@ -233,6 +236,33 @@ class FillManager:
             total_cancelled=self.total_cancelled,
         )
 
+    def _adaptive_poll_interval(self) -> float:
+        """Wave 23: scale polling interval based on soonest-closing resting order.
+
+        <2h to close: 10s (fast markets need fast detection)
+        2-12h: 30s (standard)
+        >12h: 60s (slow markets, save API calls)
+        No orders: default 30s
+        """
+        if not self._resting:
+            return self.poll_interval
+
+        now = datetime.now(timezone.utc)
+        min_hours = float("inf")
+        for order in self._resting.values():
+            if order.is_done or order.close_time is None:
+                continue
+            hours_left = (order.close_time - now).total_seconds() / 3600
+            if hours_left < min_hours:
+                min_hours = hours_left
+
+        if min_hours < 2.0:
+            return 10.0
+        elif min_hours < 12.0:
+            return 30.0
+        else:
+            return 60.0
+
     async def _poll_loop(self) -> None:
         while True:
             try:
@@ -241,7 +271,7 @@ class FillManager:
                 raise
             except Exception as e:
                 self.logger.error("fill_manager_error", error=str(e))
-            await asyncio.sleep(self.poll_interval)
+            await asyncio.sleep(self._adaptive_poll_interval())
 
     async def _check_orders(self) -> None:
         """Check status of all tracked resting orders."""
@@ -361,6 +391,35 @@ class FillManager:
                 )
 
             else:
+                # Wave 23: drift guard — cancel if market mid moved >3c from our order
+                if self.kalshi_client is not None and not resting.is_done:
+                    try:
+                        km = await self.kalshi_client.fetch_market(resting.ticker)
+                        if km is not None:
+                            current_mid_cents = int(km.yes_price * 100)
+                            drift = abs(current_mid_cents - resting.price_cents)
+                            if drift > self.drift_threshold_cents:
+                                for client in self.trading_clients:
+                                    if client.label == resting.account_label:
+                                        cancelled = await client.cancel_order(order_id)
+                                        if cancelled:
+                                            resting.is_done = True
+                                            done_ids.append(order_id)
+                                            self.total_cancelled += 1
+                                            self.logger.info(
+                                                "drift_guard_cancelled",
+                                                order_id=order_id,
+                                                ticker=resting.ticker,
+                                                order_price=resting.price_cents,
+                                                current_mid=current_mid_cents,
+                                                drift=drift,
+                                            )
+                                        break
+                                if resting.is_done:
+                                    continue
+                    except Exception as e:
+                        self.logger.debug("drift_check_error", error=str(e))
+
                 # Still resting — check if stale
                 # Weather orders get shorter timeout (5 min) — weather markets
                 # move fast and capital should be freed for better opportunities.

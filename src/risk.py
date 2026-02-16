@@ -245,13 +245,24 @@ class RiskManager:
                 if "-B" in _mid:
                     effective_kelly *= 0.50
 
-                # Simultaneous-bet Kelly adjustment (Meister arXiv, Thorp):
-                # Wave 23: 1/sqrt(n) for correlated bets. With 4 positions Kelly
-                # halves, with 9 it's 1/3. Previous 1/(1+0.1*n) barely reduced
-                # (10 positions → still 50% of solo Kelly).
+                # Wave 23: correlation-aware Kelly adjustment.
+                # Group positions by event prefix — positions in the same event
+                # (e.g., KXHIGH-NYC tickers) are correlated, but positions in
+                # different events (weather NYC vs index SPY) are nearly uncorrelated.
+                # Apply sqrt(n) only within the correlated group for this market.
                 n_open = len(current_positions)
                 if n_open > 1:
-                    effective_kelly /= n_open ** 0.5
+                    this_prefix = self.extract_event_prefix(_mid)
+                    n_correlated = sum(
+                        1 for t in current_positions
+                        if self.extract_event_prefix(t) == this_prefix
+                    )
+                    # Correlated positions: full sqrt(n) penalty
+                    # Uncorrelated positions: mild 10% penalty per position
+                    n_uncorrelated = n_open - n_correlated
+                    corr_factor = max(1.0, n_correlated) ** 0.5
+                    uncorr_factor = 1.0 + 0.10 * n_uncorrelated
+                    effective_kelly /= corr_factor * uncorr_factor
 
                 # Wave 22: consecutive loss breaker reduces Kelly
                 loss_breaker_mult = self.get_kelly_multiplier()
