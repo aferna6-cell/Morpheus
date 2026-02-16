@@ -92,6 +92,10 @@ class KalshiTradingClient:
         self._trading_halted = False
         self._halt_reason: Optional[str] = None
 
+        # Closed-market cache: ticker -> (monotonic_time, status)
+        # Prevents repeated API calls to markets known to be closed
+        self._closed_market_cache: Dict[str, tuple[float, str]] = {}
+
     # ------------------------------------------------------------------
     # Trading halt management
     # ------------------------------------------------------------------
@@ -279,6 +283,15 @@ class KalshiTradingClient:
                 ticker=ticker,
             )
 
+        # Pre-check: skip markets known to be closed (cached, no API call)
+        import time as _time
+        cached = self._closed_market_cache.get(ticker)
+        if cached:
+            ts, status = cached
+            if _time.monotonic() - ts < 120 and status in ("closed", "settled", "finalized"):
+                self.logger.debug("skip_closed_market", label=self.label, ticker=ticker, status=status)
+                return None
+
         self.logger.info(
             "kalshi_place_order",
             label=self.label,
@@ -338,6 +351,7 @@ class KalshiTradingClient:
             # Re-raise market_closed — callers need to handle this differently
             # (position will be settled by Kalshi, no retry needed)
             if "market_closed" in error_str:
+                self._closed_market_cache[ticker] = (_time.monotonic(), "closed")
                 raise
 
             # Detect insufficient balance and halt trading

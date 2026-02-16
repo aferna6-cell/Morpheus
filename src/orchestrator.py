@@ -253,16 +253,22 @@ class Orchestrator:
         #    Also count held positions per event prefix for correlation limiting
         held_tickers: set = set()
         held_event_counts: Dict[str, int] = {}
+        position_fetch_ok = False
         for executor in self.kalshi_executors:
             try:
                 positions = await executor.trading_client.get_positions()
+                position_fetch_ok = True
                 for pos in positions:
                     if pos.count != 0:
                         held_tickers.add(pos.ticker)
                         ep = _extract_event_prefix(pos.ticker)
                         held_event_counts[ep] = held_event_counts.get(ep, 0) + 1
-            except Exception:
-                pass  # If we can't check, skip guard rather than block trading
+            except Exception as e:
+                self.logger.warning("position_fetch_failed", executor=executor.label, error=str(e))
+
+        if not position_fetch_ok:
+            self.logger.error("all_position_fetches_failed_skip_cycle")
+            return
 
         # Prune stale _dispatched entries for markets no longer held.
         # Without this, the set grows forever and prevents re-entry on
@@ -635,7 +641,8 @@ class Orchestrator:
                     for p in positions:
                         exposure[p.ticker] = p.market_exposure
                 except Exception:
-                    pass
+                    self.logger.warning("exposure_fetch_failed_skip_signal", label=label, market_id=signal.market_id)
+                    continue  # Skip this signal — don't size with empty exposure
 
                 # Correlation guard: block if too much exposure on same event
                 if not self.risk_manager.check_event_correlation(signal.market_id, exposure):

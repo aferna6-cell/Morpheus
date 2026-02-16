@@ -416,8 +416,17 @@ class KalshiMMEngine(BaseEngine):
         our_yes_bid = max(our_yes_bid, best_yes_bid)
         our_yes_ask = min(our_yes_ask, best_yes_ask)
 
-        if our_yes_bid >= our_yes_ask:
-            return  # Can't quote profitably
+        if our_yes_ask - our_yes_bid < self._min_spread_cents:
+            # Spread collapsed below minimum after constraining to market
+            # (common on 1-2c spread markets where bid and ask converge)
+            self.logger.debug(
+                "mm_spread_collapsed",
+                ticker=state.ticker,
+                bid=our_yes_bid,
+                ask=our_yes_ask,
+                min_spread=self._min_spread_cents,
+            )
+            return
 
         # Check inventory limits
         if abs(state.inventory) >= self._max_inventory:

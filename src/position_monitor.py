@@ -77,6 +77,11 @@ class PositionMonitor:
         self._exit_retries: Dict[str, tuple[int, float]] = {}
         self._max_exit_retries = 3
 
+        # Pending exit orders: key -> (order_id, monotonic_time, sell_price_cents)
+        # We don't treat a place_order() response as a confirmed fill — we wait
+        # for the position to disappear from get_positions() before booking PnL.
+        self._pending_exits: Dict[str, tuple[str, float, int]] = {}
+
         # Persistent set of known-closed markets (survives restarts)
         self._state_path = Path(state_dir)
         self._closed_markets_file = self._state_path / "closed_markets.json"
@@ -309,6 +314,8 @@ class PositionMonitor:
         for client in self.trading_clients:
             try:
                 positions = await client.get_positions()
+                # Check pending exit orders before individual position checks
+                await self._check_pending_exits(client, positions)
                 for pos in positions:
                     if pos.count == 0:
                         continue
@@ -496,6 +503,115 @@ class PositionMonitor:
 
         return None
 
+    async def _check_pending_exits(
+        self,
+        client: KalshiTradingClient,
+        positions: List[KalshiPosition],
+    ) -> None:
+        """Confirm pending exit fills by checking if positions disappeared."""
+        import time as _time
+        now = _time.monotonic()
+
+        active_tickers = {pos.ticker for pos in positions if pos.count != 0}
+
+        # Find pending exits belonging to this client
+        prefix = f"{client.label}:"
+        client_pending = {
+            k: v for k, v in self._pending_exits.items()
+            if k.startswith(prefix)
+        }
+        if not client_pending:
+            return
+
+        # Fetch open orders once (only if needed for non-timed-out checks)
+        open_order_ids: Optional[set] = None
+        has_young_pending = any(
+            k.split(":", 1)[1] in active_tickers and now - v[1] < 600
+            for k, v in client_pending.items()
+        )
+        if has_young_pending:
+            try:
+                open_orders = await client.get_open_orders()
+                open_order_ids = {o.order_id for o in open_orders}
+            except Exception:
+                pass  # Can't check orders — leave pending, will timeout at 10min
+
+        keys_to_remove: List[str] = []
+        for key, (order_id, placed_time, sell_price_cents) in client_pending.items():
+            ticker = key.split(":", 1)[1]
+
+            if ticker not in active_tickers:
+                # Position gone — exit filled! Book PnL.
+                tracked = self._tracked.get(key)
+                if tracked:
+                    entry_cost = tracked.entry_price_cents * tracked.count / 100.0
+                    exit_proceeds = sell_price_cents * tracked.count / 100.0
+                    pnl = exit_proceeds - entry_cost
+
+                    self.risk_manager.update_daily_pnl(pnl)
+
+                    side = tracked.side
+                    count = tracked.count
+                    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                    emoji = "PROFIT" if pnl >= 0 else "LOSS"
+                    await send_alert(
+                        f"{emoji}: {ticker} {side} x{count} "
+                        f"| P&L: {pnl_str} | Exit confirmed [{client.label}]",
+                        self.config,
+                    )
+
+                    self.logger.info(
+                        "position_exited",
+                        ticker=ticker,
+                        pnl=pnl,
+                        reason="exit_order_filled",
+                        account=client.label,
+                    )
+                    get_trade_logger().log_position_closed(
+                        platform="kalshi",
+                        ticker=ticker,
+                        side=side,
+                        count=count,
+                        entry_price_cents=tracked.entry_price_cents,
+                        exit_price_cents=sell_price_cents,
+                        pnl_usd=pnl,
+                        account_label=client.label,
+                    )
+
+                self._tracked.pop(key, None)
+                keys_to_remove.append(key)
+                continue
+
+            # Position still exists
+            age_seconds = now - placed_time
+            if age_seconds > 600:
+                # 10-minute timeout — cancel stale exit order and retry next cycle
+                if order_id:
+                    await client.cancel_order(order_id)
+                self.logger.info(
+                    "pending_exit_timeout",
+                    ticker=ticker,
+                    account=client.label,
+                    age_seconds=int(age_seconds),
+                )
+                keys_to_remove.append(key)
+                continue
+
+            # Order < 10 min — check if still resting
+            if open_order_ids is not None and order_id and order_id not in open_order_ids:
+                # Order gone but position still exists — cancelled externally
+                # or partially filled. Remove from pending; will re-evaluate next cycle.
+                self.logger.info(
+                    "pending_exit_order_gone",
+                    ticker=ticker,
+                    account=client.label,
+                    order_id=order_id,
+                )
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            self._pending_exits.pop(key, None)
+
     async def _check_position(
         self,
         client: KalshiTradingClient,
@@ -506,6 +622,11 @@ class PositionMonitor:
 
         # Skip markets we already know are closed (persisted across restarts)
         if key in self._known_closed:
+            return
+
+        # Skip positions with a pending exit order (wait for fill confirmation)
+        if key in self._pending_exits:
+            self.logger.debug("skip_pending_exit", ticker=pos.ticker, account=client.label)
             return
 
         tracked = self._tracked.get(key)
@@ -679,43 +800,28 @@ class PositionMonitor:
             return
 
         if result:
-            # Calculate P&L from actual sell price
-            entry_cost = tracked.entry_price_cents * tracked.count / 100.0
-            # sell_price is in the side's own price units (YES cents or NO cents)
-            # Proceeds = price * quantity regardless of side
-            exit_proceeds = sell_price * tracked.count / 100.0
-            pnl = exit_proceeds - entry_cost
+            # Extract order_id from result
+            order_id = ""
+            if isinstance(result, dict):
+                inner = result.get("order", result)
+                if isinstance(inner, dict):
+                    order_id = inner.get("order_id", "")
 
-            self._tracked.pop(key, None)
-            self._exit_retries.pop(key, None)  # Clear retry tracker on success
-
-            # Update daily P&L
-            self.risk_manager.update_daily_pnl(pnl)
-
-            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-            emoji = "PROFIT" if pnl >= 0 else "LOSS"
-            await send_alert(
-                f"{emoji}: {pos.ticker} {side} x{count} "
-                f"| P&L: {pnl_str} | Reason: {reason} [{client.label}]",
-                self.config,
-            )
+            # Don't pop from _tracked or log position_exited yet.
+            # The order may sit unfilled — wait for the position to disappear
+            # from get_positions() in _check_pending_exits() before booking PnL.
+            self._pending_exits[key] = (order_id, _time.monotonic(), sell_price)
+            self._exit_retries.pop(key, None)
 
             self.logger.info(
-                "position_exited",
-                ticker=pos.ticker,
-                pnl=pnl,
-                reason=reason,
-                account=client.label,
-            )
-            get_trade_logger().log_position_closed(
-                platform="kalshi",
+                "exit_order_placed",
                 ticker=pos.ticker,
                 side=side,
                 count=count,
-                entry_price_cents=tracked.entry_price_cents,
-                exit_price_cents=sell_price,
-                pnl_usd=pnl,
-                account_label=client.label,
+                sell_price=sell_price,
+                reason=reason,
+                account=client.label,
+                order_id=order_id,
             )
         else:
             # Order returned None/falsy — record as failed attempt
