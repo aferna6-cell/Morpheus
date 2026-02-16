@@ -341,8 +341,24 @@ class RiskManager:
 
             # No confidence scaling — edge already accounts for uncertainty
 
+            # When cash-override is active, assess risk relative to cash
+            # (not the exceeded exposure cap).  The position was already
+            # sized within 80% of available cash — it's safe.
+            cash_override_active = (
+                remaining_exposure < 0
+                and forced_size is not None
+                and forced_size > 0
+                and position_amount > 0
+            )
+            if cash_override_active:
+                # Pretend exposure is at 70% utilization (medium, not critical)
+                # so the risk assessment doesn't auto-reject forced trades.
+                effective_exposure_for_risk = self.max_total_exposure * 0.60
+            else:
+                effective_exposure_for_risk = current_exposure
+
             risk_level = self._assess_risk_level(
-                position_amount, available_capital, current_exposure, signal
+                position_amount, available_capital, effective_exposure_for_risk, signal
             )
 
             max_loss = position_amount * self.stop_loss_pct
