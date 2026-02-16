@@ -46,6 +46,7 @@ _URGENCY_BONUS: Dict[str, float] = {
 _ENGINE_PRIORITY: Dict[str, float] = {
     "kalshi_bracket_arb": 0.9,  # Structural arb — near-certain profit
     "kalshi_bonding": 0.8,      # Data-verified — NOAA/FRED backed
+    "kalshi_longshot": 0.75,    # Statistical bias — favorite-longshot
     "kalshi_crypto": 0.7,
     "kalshi_contrarian": 0.6,
     "kalshi_llm": 0.5,
@@ -54,7 +55,7 @@ _ENGINE_PRIORITY: Dict[str, float] = {
 
 # Engines whose signals route to Kalshi executor
 _KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian", "kalshi_crypto",
-                   "kalshi_bracket_arb", "kalshi_bonding"}
+                   "kalshi_bracket_arb", "kalshi_bonding", "kalshi_longshot"}
 
 
 def _extract_event_prefix(ticker: str) -> str:

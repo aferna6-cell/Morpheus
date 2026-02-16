@@ -276,10 +276,12 @@ class RiskManager:
 
             # Minimum position floor: if Kelly says bet $0.20 but edge is real,
             # round up to 1 contract minimum. Don't waste LLM budget on dust trades.
-            # Skip for MM — spread-edge is inherently small (2-4%), not directional.
+            # Skip for MM and bracket_arb — these use _force_size_usd which is
+            # already precisely calculated. Bumping a 6c arb leg to $0.50 buys
+            # 8 contracts instead of 1, draining the entire account.
             side_val = getattr(signal.recommended_side, "value", str(signal.recommended_side))
             entry_cost = market_price if side_val == "buy_yes" else (1.0 - market_price)
-            if strategy != "mm":
+            if strategy not in ("mm", "bracket_arb"):
                 min_actionable = max(entry_cost, 0.50)
                 if 0 < position_amount < min_actionable:
                     if abs(signal.edge) >= self.min_edge:  # match config min_edge

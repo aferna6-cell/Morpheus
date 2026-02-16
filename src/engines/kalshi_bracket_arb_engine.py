@@ -111,6 +111,8 @@ class KalshiBracketArbEngine(BaseEngine):
         self._max_active_sets = int(arb_cfg.get("max_active_sets", 2))
         self._max_days_to_close = int(arb_cfg.get("max_days_to_close", 3))
         self._min_brackets = int(arb_cfg.get("min_brackets", 3))
+        self._max_contracts_per_leg = int(arb_cfg.get("max_contracts_per_leg", 1))
+        self._max_total_arb_usd = float(arb_cfg.get("max_total_arb_usd", 2.0))
 
         self._pending_signals: List[TradeSignal] = []
         self._active_sets: Dict[str, BracketSet] = {}  # event_key → active arb set
@@ -244,17 +246,30 @@ class KalshiBracketArbEngine(BaseEngine):
             best_margin=round(opportunities[0].margin_pct, 2) if opportunities else 0,
         )
 
-        # Emit signals for top opportunities (respecting max_active_sets)
+        # Emit signals for top opportunities (respecting max_active_sets + capital cap)
         active_count = len(self._active_sets)
+        total_arb_cost = 0.0
         for opp in opportunities:
             if active_count >= self._max_active_sets:
                 break
             if opp.event_key in self._active_sets:
                 continue  # Already trading this set
+            # Capital guard: don't deploy more than max_total_arb_usd across all arb sets
+            set_cost = opp.sum_yes_asks * self._max_contracts_per_leg
+            if total_arb_cost + set_cost > self._max_total_arb_usd:
+                self.logger.info(
+                    "bracket_arb_capital_guard",
+                    event_key=opp.event_key,
+                    set_cost=round(set_cost, 3),
+                    total_arb_cost=round(total_arb_cost, 3),
+                    max_total_arb_usd=self._max_total_arb_usd,
+                )
+                continue
 
             self._emit_arb_signals(opp)
             self._active_sets[opp.event_key] = opp
             active_count += 1
+            total_arb_cost += set_cost
 
     def _emit_arb_signals(self, bracket_set: BracketSet) -> None:
         """Emit one TradeSignal per bracket in the arb set."""

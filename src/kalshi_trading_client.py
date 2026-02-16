@@ -172,13 +172,13 @@ class KalshiTradingClient:
         except Exception as e:
             self.logger.debug("kalshi_halt_state_save_error", label=self.label, error=str(e))
 
-    async def check_and_resume(self, min_balance: float = 0.25) -> bool:
+    async def check_and_resume(self, min_balance: float = 0.05) -> bool:
         """Check balance and auto-resume trading if sufficient funds available.
 
         Returns True if trading was resumed, False otherwise.
-        Lowered from $1.00 to $0.25 — even small balances can trade
-        1-2 weather contracts, and staying halted for hours wastes
-        opportunities.
+        Threshold: $0.05 — a single 5c contract is the minimum useful trade.
+        Even small balances should trade rather than sit halted for hours
+        while positions resolve and free up capital.
         """
         if not self._trading_halted:
             return False

@@ -7,8 +7,8 @@ strategy:
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
   max_position_size: 8.0            # $8 max (was $3)
-  index_max_position_size: 15.0     # Wave 22: $15 max for index (9W/0L +$107.67)
-  index_kelly_fraction: 0.50        # Wave 22: half-Kelly for index (vs 0.33 base)
+  index_max_position_size: 20.0     # Wave 27.2: $20 max for index (9W/0L +$107.67, best performer)
+  index_kelly_fraction: 0.60        # Wave 27.2: 60% Kelly for index (was 0.50) — proven 100% WR
   max_total_exposure: 25.0          # $25 max exposure (was $10)
   min_confidence: 0.3
   min_conviction: "low"             # allow all positive-edge trades (was "medium")
@@ -243,6 +243,8 @@ bracket_arb:
   max_active_sets: 3               # Wave 27: 3 (was 2) — more concurrent arbs
   max_days_to_close: 5             # Wave 27: 5 days (was 3) — more brackets in scope
   min_brackets: 3                  # need at least 3 brackets to form a set
+  max_contracts_per_leg: 1         # Wave 27.2: 1 contract per leg (was unbounded — min_actionable bug inflated to 8)
+  max_total_arb_usd: 2.0           # Wave 27.2: cap total arb deployment at $2 (leaves capital for other strategies)
 
 # CLV tracking
 clv_tracking:
@@ -300,7 +302,7 @@ calibration:
   edge_cap: 0.30                   # edges >0.30 are unreliable (0% WR in data)
   per_type:
     index:
-      platt_alpha: 0.85
+      platt_alpha: 0.90            # Wave 27.2: higher alpha = less compression (9W/0L track record)
       extra_shrink: -0.05          # LESS shrinkage (index 9W/0L)
       kelly_boost: 1.0             # no penalty (already using index_kelly_fraction)
     weather:
@@ -328,6 +330,21 @@ bonding:
   max_total_bonds: 5               # max 5 simultaneous bonds
   min_profit_pct: 0.02             # 2% minimum profit (covers fees)
   verify_with_data: true           # use NOAA/Yahoo to verify near-certainty
+
+# Wave 27.2: Longshot seller — exploit favorite-longshot bias
+# Markets priced YES < 12c resolve YES far less than implied (2-4% vs 5-12%)
+# Buying NO captures the systematic overpricing of unlikely outcomes
+longshot_seller:
+  enabled: true
+  scan_interval_seconds: 600       # 10 min scans
+  max_yes_cents: 12                # only sell longshots where YES <= 12c
+  min_yes_cents: 2                 # skip dust (1c = essentially settled)
+  min_volume: 1000                 # need liquidity for fills
+  min_hours_to_close: 4.0          # don't sell near expiry (execution risk)
+  max_days_to_close: 7             # 1-7 day markets
+  max_positions: 5                 # max 5 longshot sells active
+  max_per_trade_usd: 2.0           # conservative $2 per trade
+  min_profit_pct: 0.03             # 3% minimum return per trade
 
 # Compatibility
 bregman_arb: {}

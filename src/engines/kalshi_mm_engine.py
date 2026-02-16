@@ -299,63 +299,94 @@ class KalshiMMEngine(BaseEngine):
                 inventory={t: s.inventory for t, s in self._markets.items()},
             )
 
-    def _estimate_sigma(self, state: MMMarketState) -> float:
-        """Estimate market volatility from recent midpoint observations.
+    @staticmethod
+    def _logit(p: float) -> float:
+        """Log-odds transform: logit(p) = log(p / (1 - p))."""
+        p = max(0.01, min(0.99, p))
+        return math.log(p / (1.0 - p))
 
-        Uses standard deviation of recent mids. Falls back to default if
-        insufficient data.
+    @staticmethod
+    def _expit(x: float) -> float:
+        """Inverse logit (sigmoid): expit(x) = 1 / (1 + exp(-x))."""
+        return 1.0 / (1.0 + math.exp(-max(-10, min(10, x))))
+
+    def _estimate_sigma(self, state: MMMarketState) -> float:
+        """Estimate market volatility in LOG-ODDS space.
+
+        Log-odds volatility naturally scales with probability level:
+        a 1c move at mid=50c is much less informative than at mid=10c.
+        Computing sigma in log-odds space captures this.
         """
         if len(state.recent_mids) < 3:
             return self._default_sigma
 
-        mids = list(state.recent_mids)
-        mean = sum(mids) / len(mids)
-        variance = sum((m - mean) ** 2 for m in mids) / len(mids)
+        # Convert mids to log-odds, then compute std dev
+        log_odds = [self._logit(m) for m in state.recent_mids]
+        mean_lo = sum(log_odds) / len(log_odds)
+        variance = sum((lo - mean_lo) ** 2 for lo in log_odds) / len(log_odds)
         sigma = math.sqrt(variance) if variance > 0 else self._default_sigma
-        # Clamp to reasonable range
-        return max(0.02, min(0.40, sigma))
+        # Clamp to reasonable range (in log-odds space, values are larger)
+        return max(0.05, min(1.5, sigma))
 
     def _compute_as_quotes(
         self, mid_cents: float, state: MMMarketState, sigma: float,
     ) -> tuple[int, int]:
-        """Compute Avellaneda-Stoikov optimal bid/ask.
+        """Compute Avellaneda-Stoikov quotes in LOG-ODDS space.
 
-        Reservation price:  r = mid - q * gamma * sigma^2 * (T - t)
-        Optimal spread:     delta = gamma * sigma^2 * (T-t) + (2/gamma) * log(1 + gamma/kappa)
+        Working in log-odds space gives spreads that scale naturally with
+        probability level.  A 3c spread at mid=50c and mid=10c have very
+        different information content in probability space, but uniform
+        spreads in log-odds correctly account for this.
 
-        Returns: (yes_bid_cents, yes_ask_cents)
+        Algorithm:
+        1. Transform mid to log-odds: l = logit(mid)
+        2. Compute reservation log-odds: l_r = l - q * gamma * sigma^2 * T
+        3. Compute spread in log-odds: delta = gamma * sigma^2 * T + (2/gamma)*log(1+gamma/kappa)
+        4. Transform back: bid = expit(l_r - delta/2), ask = expit(l_r + delta/2)
         """
         gamma = self._gamma
         q = state.inventory
 
-        # Time remaining (in hours, normalized to 0-1 range for 24h markets)
+        # Time remaining (normalized to [0, 1])
         if state.close_time:
             hours_left = max(0.1, (state.close_time - datetime.now(timezone.utc)).total_seconds() / 3600)
-            t_remaining = min(hours_left / 24.0, 1.0)  # normalize to [0, 1]
+            t_remaining = min(hours_left / 24.0, 1.0)
         else:
-            t_remaining = 0.5  # default: assume 12h left
+            t_remaining = 0.5
 
-        # Estimate order arrival rate (kappa) from volume
-        # Higher volume = faster fills = can quote tighter
+        # Order arrival rate from volume
         kappa = max(0.5, state.volume / 5000.0)
 
-        # Reservation price: skewed by inventory
+        # --- Work in log-odds space ---
         mid_frac = mid_cents / 100.0
-        r = mid_frac - q * gamma * (sigma ** 2) * t_remaining
-        r = max(0.02, min(0.98, r))
+        l_mid = self._logit(mid_frac)
 
-        # Optimal spread
+        # Reservation log-odds: skewed by inventory
+        l_r = l_mid - q * gamma * (sigma ** 2) * t_remaining
+
+        # Optimal spread in log-odds
         vol_term = gamma * (sigma ** 2) * t_remaining
-        arrival_term = (2.0 / gamma) * math.log(1.0 + gamma / kappa) if kappa > 0 else 0.04
-        delta = vol_term + arrival_term
+        arrival_term = (2.0 / gamma) * math.log(1.0 + gamma / kappa) if kappa > 0 else 0.2
+        delta_l = vol_term + arrival_term
+
+        # Transform back to probability space
+        bid_frac = self._expit(l_r - delta_l / 2.0)
+        ask_frac = self._expit(l_r + delta_l / 2.0)
 
         # Convert to cents
-        half_spread = max(self._as_min_spread / 2.0, delta * 100.0 / 2.0)
-        half_spread = min(self._as_max_spread / 2.0, half_spread)
+        bid = int(bid_frac * 100.0)
+        ask = int(math.ceil(ask_frac * 100.0))
 
-        r_cents = r * 100.0
-        bid = int(r_cents - half_spread)
-        ask = int(math.ceil(r_cents + half_spread))
+        # Enforce min/max spread
+        spread = ask - bid
+        if spread < self._as_min_spread:
+            mid_c = (bid + ask) / 2.0
+            bid = int(mid_c - self._as_min_spread / 2.0)
+            ask = int(math.ceil(mid_c + self._as_min_spread / 2.0))
+        if spread > self._as_max_spread:
+            mid_c = (bid + ask) / 2.0
+            bid = int(mid_c - self._as_max_spread / 2.0)
+            ask = int(math.ceil(mid_c + self._as_max_spread / 2.0))
 
         # Clamp
         bid = max(1, min(98, bid))

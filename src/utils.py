@@ -109,6 +109,9 @@ class BotConfig(BaseModel):
     # Bonding engine (near-certain outcome harvesting)
     bonding: Dict[str, Any] = Field(default_factory=dict)
 
+    # Longshot seller (favorite-longshot bias exploitation)
+    longshot_seller: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,
