@@ -173,6 +173,16 @@ class RiskManager:
             if isinstance(meta, dict):
                 forced_size = meta.get("_force_size_usd")
 
+            # Debug: log forced_size raw value
+            if forced_size is not None or (isinstance(meta, dict) and meta.get("strategy") in ("mm", "bracket_arb", "bonding")):
+                self.logger.info(
+                    "forced_size_raw",
+                    market_id=getattr(market, "id", "?"),
+                    forced_size=forced_size,
+                    forced_type=type(forced_size).__name__,
+                    strategy=meta.get("strategy") if isinstance(meta, dict) else None,
+                )
+
             # MM signals MUST use forced sizing — fallback if missing/zero
             strategy = meta.get("strategy") if isinstance(meta, dict) else None
             if (forced_size is None or forced_size <= 0) and strategy == "mm":
@@ -338,6 +348,22 @@ class RiskManager:
             parts = [p for p in parts if p]  # remove empty
             if forced_size is not None:
                 parts.insert(0, f"forced=${forced_size:.2f}")
+
+            # Debug: trace what zeroed the amount
+            if position_amount <= 0 and (forced_size is not None and forced_size > 0):
+                self.logger.warning(
+                    "position_sized_forced_zero_debug",
+                    market_id=market.id,
+                    forced_size=forced_size,
+                    available_capital=available_capital,
+                    current_exposure=sum(current_positions.values()),
+                    max_total_exposure=self.max_total_exposure,
+                    remaining_exposure=self.max_total_exposure - sum(current_positions.values()),
+                    effective_max=effective_max,
+                    max_loss_cap=self.max_loss_per_trade / self.stop_loss_pct if self.stop_loss_pct > 0 else 999,
+                    survival_mult=self._survival_multiplier,
+                    n_positions=len(current_positions),
+                )
 
             self.logger.info(
                 "position_sized",
