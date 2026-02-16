@@ -330,7 +330,7 @@ class RiskManager:
             # to trade up to 80% of available cash in that case.
             if position_amount <= 0 and forced_size is not None and forced_size > 0:
                 cash_limit = available_capital * 0.80
-                if cash_limit >= 0.10:  # at least 10c to do anything useful
+                if cash_limit >= 0.05:  # at least 5c (one cheap contract)
                     position_amount = min(forced_size, cash_limit, effective_max)
                     self.logger.info(
                         "exposure_cap_cash_override",
@@ -413,7 +413,7 @@ class RiskManager:
         meta = getattr(signal, "metadata", None) or {}
         strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
 
-        if strategy not in ("mm", "contrarian", "crypto"):
+        if strategy not in ("mm", "contrarian", "crypto", "bracket_arb", "bonding", "longshot"):
             # Edge check using net_edge (already accounts for fees/slippage)
             net_edge = getattr(signal, "net_edge", None)
             if net_edge is not None:
