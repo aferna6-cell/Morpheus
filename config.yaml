@@ -151,7 +151,7 @@ kalshi:
   enabled: true
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   scan_interval_seconds: 600        # 10 min scans (budget-friendly)
-  fee_per_contract: 0.00            # maker = free
+  fee_per_contract: 0.00            # no flat fee — maker fees modeled via strategy.fee_pct (0.0175*P*(1-P))
   min_volume: 1000                  # lowered — match market_filters threshold
   max_position_contracts: 50
   categories:
