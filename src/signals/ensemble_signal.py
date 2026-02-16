@@ -481,6 +481,21 @@ class EnsembleSignal(Signal):
                         else:
                             side = TradingSide.HOLD
 
+                        # Wave 29: Block weather buy_yes entirely.
+                        # Data (Feb 10-16): threshold buy_yes 2W/9L -$6.74,
+                        # bracket buy_yes 3W/7L -$1.56. NOAA overconfident
+                        # on YES side — market prices are more accurate.
+                        # Only weather buy_no is profitable (+$4.62 threshold, breakeven bracket).
+                        if side == TradingSide.BUY_YES:
+                            self.logger.info(
+                                "weather_buy_yes_blocked",
+                                market_id=market.id,
+                                raw_edge=round(raw_edge, 4),
+                                net_edge=round(net_edge, 4),
+                                reason="Wave 29: weather buy_yes -$8.30 loss, blocked",
+                            )
+                            return self._hold(market, "Weather buy_yes blocked (Wave 29: -$8.30 loss)")
+
                         # Payout ratio filter — skip for NOAA thresholds
                         # ("obvious bet" strategy: buy near-certain at 85-95c)
                         if side != TradingSide.HOLD and not is_weather_threshold:
@@ -490,6 +505,15 @@ class EnsembleSignal(Signal):
                                 side = TradingSide.HOLD
 
                         conviction = "high" if net_edge >= 0.10 else "medium" if net_edge >= 0.05 else "low"
+
+                        # Wave 29: Cap bracket buy_no confidence to reduce Kelly sizing.
+                        # Data: bracket buy_no 16W/10L (62% WR) but -$2.15 PnL due to
+                        # payoff asymmetry (avg loss 2.1x avg win). Capping confidence
+                        # reduces position size, limiting damage from oversized losses.
+                        if not is_weather_threshold:
+                            w_confidence = min(w_confidence, 0.55)  # smaller Kelly sizing
+                            conviction = "low"  # prevent high-conviction multiplier
+
                         reasoning = (
                             f"{w_reasoning} | "
                             f"mkt={market_price:.3f} raw_edge={raw_edge:+.3f} "
@@ -505,6 +529,7 @@ class EnsembleSignal(Signal):
                             net_edge=round(net_edge, 4),
                             side=side.value,
                             conviction=conviction,
+                            is_bracket=not is_weather_threshold,
                         )
 
                         result = SignalResult(

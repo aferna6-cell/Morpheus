@@ -176,7 +176,7 @@ survival:
 
 # Contrarian strategy — bet against overconfident crowds
 contrarian:
-  enabled: true
+  enabled: false  # Wave 29: removed from enabled_strategies in Wave 28, disable config
   scan_interval_seconds: 600    # 10 min scans
   min_crowd_confidence: 0.80    # market must be 80%+ one side
   max_crowd_confidence: 0.95    # don't bet against 95%+ (usually right)
@@ -218,7 +218,7 @@ market_making:
 
 # 15-minute crypto engine — directional momentum on KXBTC15M
 crypto_engine:
-  enabled: true
+  enabled: false  # Wave 29: disabled since Wave 22, match config to reality
   scan_interval_seconds: 60         # rescan for new windows every 60s
   signal_interval_seconds: 15       # check momentum every 15s
   momentum_threshold_pct: 0.15      # 0.15% move triggers momentum signal
@@ -268,7 +268,7 @@ alerts:
 
 # Theta decay engine — time-decay seller near market close
 theta_engine:
-  enabled: true
+  enabled: false  # Wave 29: disabled since Wave 22, match config to reality
   scan_interval_seconds: 300       # scan every 5 minutes
   max_hours_to_close: 2.0          # only markets closing within 2 hours
   min_hours_to_close: 0.05         # ~3 min floor (avoid settled markets)
@@ -335,7 +335,7 @@ bonding:
 # Markets priced YES < 12c resolve YES far less than implied (2-4% vs 5-12%)
 # Buying NO captures the systematic overpricing of unlikely outcomes
 longshot_seller:
-  enabled: true
+  enabled: false  # Wave 29: never fills, wasted compute
   scan_interval_seconds: 600       # 10 min scans
   max_yes_cents: 12                # only sell longshots where YES <= 12c
   min_yes_cents: 2                 # skip dust (1c = essentially settled)
