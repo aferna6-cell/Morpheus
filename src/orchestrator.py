@@ -44,14 +44,17 @@ _URGENCY_BONUS: Dict[str, float] = {
 }
 
 _ENGINE_PRIORITY: Dict[str, float] = {
-    "kalshi_crypto": 0.7,     # crypto gets highest priority (time-sensitive 15-min windows)
-    "kalshi_contrarian": 0.6,  # contrarian gets high priority
+    "kalshi_bracket_arb": 0.9,  # Structural arb — near-certain profit
+    "kalshi_bonding": 0.8,      # Data-verified — NOAA/FRED backed
+    "kalshi_crypto": 0.7,
+    "kalshi_contrarian": 0.6,
     "kalshi_llm": 0.5,
     "kalshi_mm": 0.4,
 }
 
 # Engines whose signals route to Kalshi executor
-_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian", "kalshi_crypto"}
+_KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian", "kalshi_crypto",
+                   "kalshi_bracket_arb", "kalshi_bonding"}
 
 
 def _extract_event_prefix(ticker: str) -> str:

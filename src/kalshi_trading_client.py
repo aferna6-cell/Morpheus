@@ -87,10 +87,14 @@ class KalshiTradingClient:
 
         self._client: Optional[Any] = None
         self._initialized = False
-        
+
         # Trading halt state — stops trading on insufficient balance
         self._trading_halted = False
         self._halt_reason: Optional[str] = None
+        self._halt_state_file: Optional[str] = None
+
+        # Load persisted halt state (avoids wasting API call on $0.01 accounts)
+        self._load_halt_state()
 
         # Closed-market cache: ticker -> (monotonic_time, status)
         # Prevents repeated API calls to markets known to be closed
@@ -115,6 +119,7 @@ class KalshiTradingClient:
         if not self._trading_halted:
             self._trading_halted = True
             self._halt_reason = reason
+            self._save_halt_state()
             self.logger.error(
                 "kalshi_trading_halted",
                 label=self.label,
@@ -125,7 +130,47 @@ class KalshiTradingClient:
         """Resume trading after a halt (e.g., after adding funds)."""
         self._trading_halted = False
         self._halt_reason = None
+        self._save_halt_state()
         self.logger.info("kalshi_trading_resumed", label=self.label)
+
+    def _load_halt_state(self) -> None:
+        """Load persisted halt state from disk."""
+        import json
+        from pathlib import Path
+        try:
+            state_dir = Path("state")
+            if not state_dir.exists():
+                return
+            self._halt_state_file = str(state_dir / f"client_halt_{self.label}.json")
+            p = Path(self._halt_state_file)
+            if p.exists():
+                data = json.loads(p.read_text())
+                if data.get("halted"):
+                    self._trading_halted = True
+                    self._halt_reason = data.get("reason")
+                    self.logger.info(
+                        "kalshi_halt_state_loaded",
+                        label=self.label,
+                        reason=self._halt_reason,
+                    )
+        except Exception as e:
+            self.logger.debug("kalshi_halt_state_load_error", label=self.label, error=str(e))
+
+    def _save_halt_state(self) -> None:
+        """Persist halt state to disk."""
+        import json
+        from pathlib import Path
+        try:
+            state_dir = Path("state")
+            state_dir.mkdir(exist_ok=True)
+            if self._halt_state_file is None:
+                self._halt_state_file = str(state_dir / f"client_halt_{self.label}.json")
+            Path(self._halt_state_file).write_text(json.dumps({
+                "halted": self._trading_halted,
+                "reason": self._halt_reason,
+            }))
+        except Exception as e:
+            self.logger.debug("kalshi_halt_state_save_error", label=self.label, error=str(e))
 
     async def check_and_resume(self, min_balance: float = 0.25) -> bool:
         """Check balance and auto-resume trading if sufficient funds available.

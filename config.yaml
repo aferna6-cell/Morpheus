@@ -238,10 +238,10 @@ crypto_engine:
 # Bracket arbitrage scanner — risk-free profit from mispriced bracket sets
 bracket_arb:
   enabled: true
-  scan_interval_seconds: 300       # scan every 5 minutes
-  min_margin_pct: 3.0              # sum must be < 97c (covers fees + slippage)
-  max_active_sets: 2               # max 2 arb sets at once (capital constraint)
-  max_days_to_close: 3             # brackets closing within 3 days
+  scan_interval_seconds: 120       # Wave 27: 2 min (was 5) — catch brief mispricings
+  min_margin_pct: 1.5              # Wave 27: 1.5% (was 3%) — zero fees means thin margins work
+  max_active_sets: 3               # Wave 27: 3 (was 2) — more concurrent arbs
+  max_days_to_close: 5             # Wave 27: 5 days (was 3) — more brackets in scope
   min_brackets: 3                  # need at least 3 brackets to form a set
 
 # CLV tracking

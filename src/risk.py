@@ -567,6 +567,19 @@ class RiskManager:
                 if date_str:
                     self.daily_pnl_date = datetime.fromisoformat(date_str).date()
                 self.trading_halted = state.get("trading_halted", False)
+
+                # Break chicken-and-egg deadlock: reset halt on new UTC day.
+                # Without this, trading_halted=True persists forever because
+                # update_daily_pnl() is never called (no fills when halted).
+                current_date = datetime.now(timezone.utc).date()
+                if self.daily_pnl_date != current_date:
+                    if self.trading_halted:
+                        self.logger.info("daily_halt_reset_new_day",
+                                         old_date=str(self.daily_pnl_date))
+                    self.daily_pnl = 0.0
+                    self.daily_pnl_date = current_date
+                    self.trading_halted = False
+                    self._save_state()
         except Exception as e:
             self.logger.warning("risk_state_load_error", error=str(e))
 

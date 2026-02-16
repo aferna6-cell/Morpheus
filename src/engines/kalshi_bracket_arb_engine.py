@@ -14,6 +14,7 @@ Risk: zero directional risk. Only execution risk (partial fills).
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,25 +29,13 @@ from ..market_filters import MarketFilters
 from ..utils import BotConfig
 
 
-# Bracket market prefixes — B-suffix tickers on Kalshi
-_BRACKET_PREFIXES = (
-    "KXHIGHTEMPB", "KXLOWTEMPB", "KXRAINB", "KXSNOWB", "KXWINDSPEEDB",
-    "KXINX-",  # S&P 500 brackets
-)
+# Bracket ticker pattern: -B followed by a digit (e.g., KXHIGHAUS-26FEB16-B74.5)
+_BRACKET_RE = re.compile(r'-B\d')
 
 
 def _is_bracket_ticker(ticker: str) -> bool:
-    """Check if a ticker is a bracket market (B-prefix or bracket-like)."""
-    t = ticker.upper()
-    # Explicit bracket prefixes
-    for prefix in _BRACKET_PREFIXES:
-        if t.startswith(prefix):
-            return True
-    # Generic pattern: event ticker ends with -B followed by range specifier
-    # e.g., KXHIGHTEMPB-NYC-26FEB14-B68-70
-    if "-B" in t and t.count("-") >= 3:
-        return True
-    return False
+    """Check if a ticker is a bracket market (-B{number} pattern)."""
+    return bool(_BRACKET_RE.search(ticker.upper()))
 
 
 def _extract_event_key(ticker: str, event_ticker: str) -> str:
@@ -230,6 +219,17 @@ class KalshiBracketArbEngine(BaseEngine):
                     margin_pct=round(bracket_set.margin_pct, 2),
                     tickers=[m.ticker for m in markets],
                     asks=[round(m.yes_ask, 3) for m in markets],
+                )
+            elif bracket_set.margin_pct > 0:
+                # Near-miss: sum is <$1 but margin below threshold
+                # Validates that mispricings exist (research claim)
+                self.logger.info(
+                    "bracket_arb_near_miss",
+                    event_key=event_key,
+                    n_brackets=bracket_set.n_brackets,
+                    sum_asks=round(bracket_set.sum_yes_asks, 4),
+                    margin_pct=round(bracket_set.margin_pct, 2),
+                    threshold_pct=self._min_margin_pct,
                 )
 
         # Sort by margin (best first)
