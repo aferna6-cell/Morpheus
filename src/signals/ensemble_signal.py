@@ -496,6 +496,22 @@ class EnsembleSignal(Signal):
                             )
                             return self._hold(market, "Weather buy_yes blocked (Wave 29: -$8.30 loss)")
 
+                        # Wave 30: Bracket buy_no price gate.
+                        # Data: bracket buy_no profitable only when YES < 40c:
+                        #   0-20c: 5W/0L +$0.80 | 20-40c: 11W/5L +$2.42
+                        #   40-60c: 2W/5L -$2.68 | 60-100c: 0W/5L -$5.82
+                        # When YES is cheap (<40c), NOAA confirms the market's NO bias
+                        # (safe bet). When YES > 40c, NOAA disagrees with market = risky.
+                        if not is_weather_threshold and side == TradingSide.BUY_NO:
+                            if market_price >= 0.40:
+                                self.logger.info(
+                                    "weather_bracket_no_price_gate",
+                                    market_id=market.id,
+                                    market_price=round(market_price, 3),
+                                    reason="Wave 30: bracket buy_no only profitable when YES < 40c",
+                                )
+                                return self._hold(market, "Bracket buy_no price gate: YES >= 40c")
+
                         # Payout ratio filter — skip for NOAA thresholds
                         # ("obvious bet" strategy: buy near-certain at 85-95c)
                         if side != TradingSide.HOLD and not is_weather_threshold:
@@ -744,6 +760,20 @@ class EnsembleSignal(Signal):
                             return result
                 except Exception as e:
                     self.logger.debug("econ_release_check_error", error=str(e))
+
+            # Wave 30: Skip LLM for non-fast-path markets entirely.
+            # Data (Feb 10-16): LLM-only trades are 20W/41L (33% WR) -$19.36.
+            # The LLM has no informational edge on markets without a data
+            # fast-path (NOAA weather, Yahoo index, FRED economics).
+            # All profitable trades come from fast-paths which already returned above.
+            # Skipping saves ~$0.50/day LLM cost AND eliminates ~$4/day in losses.
+            self.logger.debug(
+                "llm_skip_no_fast_path",
+                market_id=market.id,
+                mtype=mtype,
+                reason="No data fast-path matched, LLM has no edge",
+            )
+            return self._hold(market, f"No data fast-path for {mtype} — LLM skip (Wave 30)")
 
             # Budget check — AFTER fast-paths (NOAA/FRED/Yahoo cost $0, only LLM calls need budget)
             if self.cost_tracker and not self.cost_tracker.check_budget():

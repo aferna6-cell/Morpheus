@@ -76,9 +76,16 @@ _JUNK_TICKER_PREFIXES = [
     "KXEOWEEK", "KXTRUMPACT", "KXEXECORDER",
     # Person-specific mention markets
     "KXVLADTENEV", "KXELONMENTION",
+    "KXBERNIEMENTION",  # Wave 30: Bernie mention — unpredictable speech
     # Economics — Wave 21: 0W/4L -$3.08, near-efficient (Becker: 0.17pp gap)
     # Block until FRED sniping engine is validated
     "KXCPI", "KXCPICORE", "KXCPICOREYOY", "KXCPIYOY", "KXEGGS",
+    # Wave 30: Markets with no data fast-path that bled money (Feb 14-16)
+    "KXTRUTHSOCIAL",    # Social media engagement — 0W/4L -$3.03
+    "KXDHSFUND",        # Government funding — 0W/3L -$2.20 (repeated longshot buy_yes)
+    "KXGOVTSHUTDOWN",   # Government shutdown — 0W/1L -$1.69
+    "KXNURSESTRIKE",    # Labor action — unpredictable
+    "KXTOPMODEL",       # Entertainment — 0W/2L -$3.30
 ]
 
 
