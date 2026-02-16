@@ -89,7 +89,7 @@ llm:
   calibration_enabled: true
   calibration_floor: 0.05
   calibration_ceiling: 0.95
-  calibration_shrink_strength: 0.15  # reduced from 0.30 (Wave 10) — was over-dampening YES signals
+  calibration_shrink_strength: 0.03  # Wave 25: reduced from 0.15 — Platt handles calibration now
   consensus_enabled: false           # replaced by ensemble
   monthly_budget_usd: 25.0
   daily_budget_usd: 3.0
@@ -296,7 +296,7 @@ calibration:
   index_platt_alpha: 0.85          # index markets: 9W/0L, trust signals more
   index_shrink: 0.08               # less shrinkage for proven index signals
   weather_shrink: 0.12             # moderate shrinkage for weather
-  default_shrink: 0.15             # default calibration shrinkage
+  default_shrink: 0.03             # Wave 25: reduced — Platt handles calibration
   edge_cap: 0.30                   # edges >0.30 are unreliable (0% WR in data)
   per_type:
     index:
@@ -309,12 +309,12 @@ calibration:
       kelly_boost: 1.0
     politics:
       platt_alpha: 0.68
-      extra_shrink: 0.05           # more shrinkage (LLM overconfident on politics)
-      kelly_boost: 0.8
+      extra_shrink: 0.12           # Wave 25: LLMs worst at politics (ECE=0.40 per KalshiBench)
+      kelly_boost: 0.50            # Wave 25: quarter-Kelly for politics (was 0.80)
     economics:
       platt_alpha: 0.75
-      extra_shrink: 0.0
-      kelly_boost: 1.0
+      extra_shrink: 0.08           # Wave 25: economics also overconfident
+      kelly_boost: 0.70            # Wave 25: reduced from 1.0
 
 # Wave 23: high-probability bonding scanner
 bonding:

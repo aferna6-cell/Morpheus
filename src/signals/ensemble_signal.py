@@ -148,17 +148,17 @@ def edge_in_logodds(p_model: float, p_market: float) -> float:
 def calibrate_probability(
     p: float,
     *,
-    shrink_strength: float = 0.15,
+    shrink_strength: float = 0.03,
     platt_alpha: float = 0.68,
     floor: float = 0.05,
     ceiling: float = 0.95,
 ) -> float:
-    """Apply shrinkage toward 0.5 then Platt scaling for calibration.
+    """Apply Platt scaling then minimal shrinkage for calibration.
 
-    Wave 23: replaces linear YES dampening with Platt scaling (Platt 2000,
-    Niculescu-Mizil & Caruana 2005). Sigmoid recalibration is the principled
-    approach: f(p) = sigmoid(alpha * logit(p)) where alpha < 1.0 pulls
-    extreme predictions toward 0.5.
+    Wave 25: fixed double-calibration bug — Platt FIRST (handles systematic
+    overconfidence), then minimal shrinkage for per-type adjustment only.
+    Previously shrinkage was applied first, compounding with Platt to crush
+    edge by ~6pp instead of ~4pp.
 
     Alpha=0.68 fitted to our data: 58.9% NO WR implies systematic YES
     overestimation of ~15-20%. Maps: 80%→72%, 60%→57%, 90%→82%.
@@ -166,15 +166,14 @@ def calibrate_probability(
     """
     import math
 
-    # Symmetric shrink toward 0.5
-    p = p * (1.0 - shrink_strength) + 0.5 * shrink_strength
-
-    # Platt scaling: sigmoid(alpha * logit(p))
-    # Pulls extreme predictions toward 0.5 (both YES and NO sides)
-    # alpha < 1.0 = compression, alpha > 1.0 = expansion, alpha = 1.0 = identity
+    # Step 1: Platt scaling FIRST (handles systematic overconfidence)
+    # sigmoid(alpha * logit(p)) — alpha < 1.0 = compression toward 0.5
     if 0 < platt_alpha < 1.0 and 0.001 < p < 0.999:
         logit_p = math.log(p / (1.0 - p))
         p = 1.0 / (1.0 + math.exp(-platt_alpha * logit_p))
+
+    # Step 2: Minimal shrinkage for per-type adjustment only
+    p = p * (1.0 - shrink_strength) + 0.5 * shrink_strength
 
     p = max(floor, min(ceiling, p))
     return round(p, 4)
@@ -380,7 +379,7 @@ class EnsembleSignal(Signal):
         # Calibration — Wave 23: read from config.calibration (was hardcoded)
         cal_config = getattr(config, "calibration", None) or {}
         self.calibration_shrink = float(
-            cal_config.get("default_shrink", llm_config.get("calibration_shrink_strength", 0.15))
+            cal_config.get("default_shrink", llm_config.get("calibration_shrink_strength", 0.03))
         )
         self._platt_alpha_default = float(cal_config.get("default_platt_alpha", 0.68))
         self._platt_alpha_weather = float(cal_config.get("weather_platt_alpha", 0.83))
@@ -948,20 +947,19 @@ class EnsembleSignal(Signal):
                                 f"Model disagreement too high ({divergence:.0%})",
                             )
 
-            # Single-model penalty — no cross-validation available.
-            # When only one LLM responds (in any mode), reduce confidence and
-            # shrink toward 0.5. In full mode this means 4 of 5 models failed.
+            # Single-model flag — no cross-validation available.
+            # Wave 25: removed p_yes shrinkage (was double-penalizing with
+            # the 30% confidence reduction at line ~1204). Keep only the
+            # confidence penalty which affects Kelly sizing (correct lever).
             _single_model = False
             if len(p_values) == 1:
                 _single_model = True
                 model_name = list(model_predictions.keys())[0]
-                p_yes_raw = 0.5 + (p_yes_raw - 0.5) * 0.80  # extra 20% shrinkage
                 self.logger.info(
-                    "single_model_penalty",
+                    "single_model_signal",
                     market_id=market.id,
                     model=model_name,
-                    raw_p=round(p_values[0], 4),
-                    shrunk_p=round(p_yes_raw, 4),
+                    p_yes=round(p_values[0], 4),
                 )
 
             # Log per-model predictions for future weight computation
@@ -1068,16 +1066,17 @@ class EnsembleSignal(Signal):
                 platt_alpha=platt_alpha,
             )
 
-            # Adversarial challenge: when p_yes is in the danger zone (35-75%)
-            # and would result in BUY_YES, get a cheap second opinion
+            # Adversarial challenge: when p_yes would result in BUY_YES,
+            # get a cheap second opinion. Wave 25: extended from 35-70% to
+            # 25-85% — extreme predictions are MOST overconfident per KalshiBench.
             raw_edge_preliminary = p_yes - market_price
-            if 0.35 <= p_yes <= 0.70 and raw_edge_preliminary > 0:
+            if 0.25 <= p_yes <= 0.85 and raw_edge_preliminary > 0:
                 p_yes = await self._challenge_estimate(market, p_yes, market_price)
 
-            # Wave 23: adversarial challenge for BUY_NO too
-            # When p_yes is 30-65% (NO-side edge exists but not extreme), validate
+            # Adversarial challenge for BUY_NO too.
+            # Wave 25: extended from 30-65% to 15-75%.
             raw_no_edge = market_price - p_yes  # positive when NO has edge
-            if 0.30 <= p_yes <= 0.65 and raw_no_edge > 0:
+            if 0.15 <= p_yes <= 0.75 and raw_no_edge > 0:
                 p_yes = await self._challenge_estimate_no(market, p_yes, market_price)
 
             # Get metadata from whichever response succeeded

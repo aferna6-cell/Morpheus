@@ -257,12 +257,10 @@ class RiskManager:
                         1 for t in current_positions
                         if self.extract_event_prefix(t) == this_prefix
                     )
-                    # Correlated positions: full sqrt(n) penalty
-                    # Uncorrelated positions: mild 10% penalty per position
-                    n_uncorrelated = n_open - n_correlated
+                    # Wave 25: only penalize correlated positions (same event).
+                    # Uncorrelated positions are independent — no penalty.
                     corr_factor = max(1.0, n_correlated) ** 0.5
-                    uncorr_factor = 1.0 + 0.10 * n_uncorrelated
-                    effective_kelly /= corr_factor * uncorr_factor
+                    effective_kelly /= corr_factor
 
                 # Wave 22: consecutive loss breaker reduces Kelly
                 loss_breaker_mult = self.get_kelly_multiplier()

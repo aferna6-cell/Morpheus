@@ -396,8 +396,16 @@ class FillManager:
                     try:
                         km = await self.kalshi_client.fetch_market(resting.ticker)
                         if km is not None:
-                            current_mid_cents = int(km.yes_price * 100)
-                            drift = abs(current_mid_cents - resting.price_cents)
+                            # Wave 25: use relevant side price, not mid.
+                            # For buy-yes orders, compare to yes_ask (what we'd pay).
+                            # For buy-no orders, compare to no_ask.
+                            # Old code used yes_price (mid), causing false drift on maker orders.
+                            if resting.side == "yes":
+                                relevant_price = km.yes_ask if hasattr(km, 'yes_ask') and km.yes_ask else km.yes_price
+                            else:
+                                relevant_price = km.no_ask if hasattr(km, 'no_ask') and km.no_ask else km.no_price
+                            relevant_cents = int(relevant_price * 100)
+                            drift = abs(relevant_cents - resting.price_cents)
                             if drift > self.drift_threshold_cents:
                                 for client in self.trading_clients:
                                     if client.label == resting.account_label:
@@ -410,8 +418,9 @@ class FillManager:
                                                 "drift_guard_cancelled",
                                                 order_id=order_id,
                                                 ticker=resting.ticker,
+                                                side=resting.side,
                                                 order_price=resting.price_cents,
-                                                current_mid=current_mid_cents,
+                                                relevant_price=relevant_cents,
                                                 drift=drift,
                                             )
                                         break

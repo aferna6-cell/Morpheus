@@ -707,6 +707,112 @@ _CITY_SIGMA_HOURLY: Dict[str, float] = {
 }
 _DEFAULT_SIGMA_HOURLY = 2.0  # fallback for unlisted cities (was 1.5)
 
+
+# ---------------------------------------------------------------------------
+# Wave 25: Weather bias tracking & adaptive sigma
+# ---------------------------------------------------------------------------
+
+def _weather_bias_path(state_dir: str = "state") -> str:
+    return f"{state_dir}/weather_bias.json"
+
+
+def _weather_sigma_path(state_dir: str = "state") -> str:
+    return f"{state_dir}/weather_sigma.json"
+
+
+def _load_weather_json(path: str) -> Dict:
+    import json
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _save_weather_json(path: str, data: Dict) -> None:
+    import json
+    from pathlib import Path
+    Path(path).write_text(json.dumps(data, indent=2))
+
+
+def update_weather_bias(
+    city: str, t_type: str, nws_forecast: float, actual: float,
+    state_dir: str = "state",
+) -> None:
+    """Track rolling NWS forecast bias per city/type.
+
+    Stores exponential moving average of (forecast - actual) errors.
+    Positive bias = NWS forecasts too high; negative = too low.
+    """
+    key = f"{city.lower()}|{t_type.lower()}"
+    path = _weather_bias_path(state_dir)
+    data = _load_weather_json(path)
+
+    entry = data.get(key, {"bias": 0.0, "count": 0})
+    error = nws_forecast - actual
+    count = entry["count"] + 1
+    alpha = 0.3  # EMA smoothing
+    if count == 1:
+        new_bias = error
+    else:
+        new_bias = alpha * error + (1.0 - alpha) * entry["bias"]
+
+    data[key] = {"bias": round(new_bias, 2), "count": count}
+    _save_weather_json(path, data)
+
+
+def get_weather_bias(city: str, t_type: str, state_dir: str = "state") -> Optional[float]:
+    """Get current NWS bias correction for city/type.
+
+    Returns bias correction (subtract from forecast) when ≥5 samples
+    AND |bias| ≥ 1.0°F. Returns None otherwise.
+    """
+    key = f"{city.lower()}|{t_type.lower()}"
+    data = _load_weather_json(_weather_bias_path(state_dir))
+    entry = data.get(key)
+    if entry is None:
+        return None
+    if entry["count"] >= 5 and abs(entry["bias"]) >= 1.0:
+        return entry["bias"]
+    return None
+
+
+def update_weather_sigma(
+    city: str, t_type: str, abs_error: float,
+    state_dir: str = "state",
+) -> None:
+    """Track adaptive sigma per city/type using EMA of absolute forecast errors."""
+    key = f"{city.lower()}|{t_type.lower()}"
+    path = _weather_sigma_path(state_dir)
+    data = _load_weather_json(path)
+
+    entry = data.get(key, {"sigma": None, "count": 0})
+    count = entry["count"] + 1
+    alpha = 0.3
+    if entry["sigma"] is None or count == 1:
+        new_sigma = abs_error
+    else:
+        new_sigma = alpha * abs_error + (1.0 - alpha) * entry["sigma"]
+
+    data[key] = {"sigma": round(new_sigma, 2), "count": count}
+    _save_weather_json(path, data)
+
+
+def get_adaptive_sigma(city: str, t_type: str, state_dir: str = "state") -> Optional[float]:
+    """Get adaptive sigma for city/type when ≥10 samples available."""
+    key = f"{city.lower()}|{t_type.lower()}"
+    data = _load_weather_json(_weather_sigma_path(state_dir))
+    entry = data.get(key)
+    if entry is None:
+        return None
+    if entry["count"] >= 10 and entry["sigma"] is not None:
+        return entry["sigma"]
+    return None
+
+
 # Cache for NWS gridpoint URLs (permanent — grid doesn't change)
 _gridpoint_cache: Dict[str, str] = {}
 
@@ -2173,6 +2279,33 @@ async def compute_weather_probability(
     if period_name:
         weather_forecast_changed(city, period_name, forecast_temp)
 
+    # Wave 25: apply NWS bias correction if available
+    bias = get_weather_bias(city, t_type)
+    if bias is not None:
+        forecast_temp_raw = forecast_temp
+        forecast_temp -= bias  # subtract positive bias (NWS too high → reduce)
+        logger.info(
+            "weather_bias_correction",
+            city=city,
+            t_type=t_type,
+            raw_temp=round(forecast_temp_raw, 1),
+            corrected_temp=round(forecast_temp, 1),
+            bias=round(bias, 2),
+        )
+
+    # Wave 25: use adaptive sigma when enough samples available
+    adaptive_sig = get_adaptive_sigma(city, t_type)
+    if adaptive_sig is not None:
+        sigma_before = sigma
+        sigma = adaptive_sig
+        logger.info(
+            "weather_adaptive_sigma",
+            city=city,
+            t_type=t_type,
+            static_sigma=round(sigma_before, 2),
+            adaptive_sigma=round(sigma, 2),
+        )
+
     # 7. Compute NWS-based probability
     bracket_bounds = None
     if "bracket" in t_type:
@@ -2551,13 +2684,15 @@ async def compute_weather_probability(
             p_yes = p_nws
 
     # GraphCast post-blend refinement — when other sources already contributed,
-    # GraphCast adds a 10% weight as a 5th independent model signal.
+    # GraphCast adds 20% weight as a 5th independent ML model signal.
+    # Wave 25: increased from 10% to 20% — GraphCast is a distinct ML model
+    # that adds real diversification beyond NWS/GFS/ECMWF/HRRR.
     # Skipped if GraphCast was already used in the NWS-only path above.
     if p_graphcast is not None and (
         p_gfs is not None or p_ecmwf is not None or p_hrrr is not None
     ):
         p_yes_pre_gc = p_yes
-        p_yes = 0.90 * p_yes + 0.10 * p_graphcast
+        p_yes = 0.80 * p_yes + 0.20 * p_graphcast
         logger.info(
             "graphcast_post_blend",
             city=city,

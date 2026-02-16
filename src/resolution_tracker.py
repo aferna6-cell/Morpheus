@@ -358,6 +358,12 @@ async def check_resolutions(
                     clv=round(clv_val, 4),
                 )
 
+                # Wave 25: update weather bias/sigma tracking on resolution
+                try:
+                    _update_weather_tracking(market_id, market_data, actual_outcome, str(state_path), logger)
+                except Exception as we:
+                    logger.debug("weather_tracking_update_error", error=str(we))
+
                 # Remove from capital manager's open positions
                 try:
                     cm = get_capital_manager()
@@ -427,6 +433,106 @@ def _log_resolution_payout(
             )
     except Exception:
         pass  # bankroll logging is best-effort
+
+
+def _update_weather_tracking(
+    market_id: str,
+    market_data: Dict[str, Any],
+    actual_outcome: float,
+    state_dir: str,
+    logger: Any,
+) -> None:
+    """Update weather bias and sigma tracking after a weather market resolves.
+
+    Wave 25: extracts city/type/threshold from market title, looks up the
+    NWS forecast temperature from prediction data, and uses the resolution
+    outcome to determine forecast accuracy.
+    """
+    import re
+
+    # Only process weather markets (KXHIGH, KXLOW, KXTEMP prefixes)
+    ticker = market_id.upper()
+    if not any(ticker.startswith(p) for p in ("KXHIGH", "KXLOW", "KXTEMP")):
+        return
+
+    title = market_data.get("title", "") or market_data.get("subtitle", "") or ""
+    if not title:
+        return
+
+    # Parse city from title (e.g., "Will the high temperature in New York...")
+    from .structured_data import (
+        _parse_city, _parse_weather_threshold,
+        update_weather_bias, update_weather_sigma,
+    )
+    city = _parse_city(title)
+    if not city:
+        return
+
+    threshold_info = _parse_weather_threshold(title)
+    if threshold_info is None:
+        return
+
+    t_type, t_value = threshold_info
+
+    # We know the outcome (YES/NO) and the threshold. From this we can
+    # infer whether the actual temp was above/below the threshold.
+    # For ">X" markets: YES → actual > X, NO → actual <= X
+    # For "<X" markets: YES → actual < X, NO → actual >= X
+    # We approximate actual = threshold ± 1°F based on resolution.
+    # This is imprecise but sufficient for rolling bias tracking.
+    if "below" in t_type:
+        # YES = temp < threshold
+        if actual_outcome >= 0.5:
+            actual_approx = t_value - 1.0  # below threshold
+        else:
+            actual_approx = t_value + 1.0  # at/above threshold
+    else:
+        # YES = temp > threshold
+        if actual_outcome >= 0.5:
+            actual_approx = t_value + 1.0  # above threshold
+        else:
+            actual_approx = t_value - 1.0  # at/below threshold
+
+    # Read prediction records to find stored NWS forecast temp
+    # Look for weather predictions that have signal_source = noaa_direct
+    pred_path = Path(state_dir) / "predictions.jsonl"
+    nws_forecast = None
+    if pred_path.exists():
+        for line in pred_path.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+                if rec.get("market_id") == market_id:
+                    # Use the predicted p_yes and threshold to back-compute forecast
+                    # This is approximate but converges with the EMA
+                    p_pred = rec.get("predicted_p_yes", 0.5)
+                    # If we have the structured data forecast, use it directly
+                    if "nws_forecast_temp" in rec:
+                        nws_forecast = rec["nws_forecast_temp"]
+                    break
+            except Exception:
+                continue
+
+    if nws_forecast is not None:
+        error = abs(nws_forecast - actual_approx)
+        update_weather_bias(city, t_type, nws_forecast, actual_approx, state_dir)
+        update_weather_sigma(city, t_type, error, state_dir)
+        logger.info(
+            "weather_tracking_updated",
+            city=city,
+            t_type=t_type,
+            nws_forecast=nws_forecast,
+            actual_approx=actual_approx,
+        )
+    else:
+        # No stored forecast — still update sigma with threshold-based estimate
+        # The absolute error from threshold gives useful sigma information
+        update_weather_sigma(city, t_type, 1.0, state_dir)  # minimal 1°F base error
+        logger.debug(
+            "weather_tracking_sigma_only",
+            city=city,
+            t_type=t_type,
+            actual_approx=actual_approx,
+        )
 
 
 def main() -> None:

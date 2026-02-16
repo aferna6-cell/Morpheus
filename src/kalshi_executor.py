@@ -171,7 +171,7 @@ class KalshiExecutor:
             # Time-to-close from market metadata (hours)
             ttc_hours = meta.get("time_to_close_hours", 24.0)
 
-            if is_index and signal.confidence >= 0.70 and ttc_hours < 4.0:
+            if is_index and signal.confidence >= 0.60 and ttc_hours < 4.0:
                 # Index fast-path signals with high urgency: cross up to 3c
                 if spread_cents > 0:
                     cross_amount = min(max(1, spread_cents // 2), 3)
@@ -193,15 +193,20 @@ class KalshiExecutor:
                     cross_amount = min(max(1, spread_cents // 2), 2)
                 else:
                     cross_amount = 1
-            elif abs(net_edge_pre) >= 0.20 and signal.confidence >= 0.60:
-                # Wave 22: 20%+ edge signals (sweet spot) — cross up to 3c
-                # 3.9% fill rate → need more aggressive crossing for best signals
+            elif abs(net_edge_pre) >= 0.12 and signal.confidence >= 0.60:
+                # Wave 25: 12%+ edge signals (was 20%) — cross up to 3c
+                # 4% fill rate → need more aggressive crossing for positive-edge signals
                 if spread_cents > 0:
                     cross_amount = min(max(1, spread_cents // 2), 3)
                 else:
                     cross_amount = 2
-            elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.70 and ttc_hours < 4.0:
+            elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.70 and ttc_hours < 4.0:
                 # High-edge + high-confidence + urgent: cross 1c (strict gate)
+                cross_amount = 1
+            elif abs(net_edge_pre) >= 0.05 and signal.confidence >= 0.50:
+                # Wave 25: general fallback — any positive-edge signal crosses 1c.
+                # 4% fill rate → most maker orders expire unfilled. 1c cross
+                # costs ~1c in edge but captures alpha that otherwise expires.
                 cross_amount = 1
             else:
                 # Default: maker order (no crossing)

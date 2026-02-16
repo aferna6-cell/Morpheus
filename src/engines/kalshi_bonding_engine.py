@@ -485,11 +485,13 @@ class KalshiBondingEngine(BaseEngine):
                 )
                 if weather_result is not None:
                     p_yes, w_confidence, w_reasoning = weather_result
-                    # For YES bonds: data must agree outcome is very likely (p_yes > 0.85)
-                    # For NO bonds: data must agree YES is very unlikely (p_yes < 0.15)
-                    if side == "buy_yes" and p_yes >= 0.85:
+                    # Wave 25: data must agree with market price + 2% margin.
+                    # Old check (p_yes >= 0.85) allowed negative edge: a 95c bond
+                    # with NOAA=85% means NOAA *disagrees* with the market.
+                    buy_price = km.yes_price if side == "buy_yes" else km.no_price
+                    if side == "buy_yes" and p_yes >= buy_price + 0.02:
                         return True, "noaa", p_yes
-                    elif side == "buy_no" and p_yes <= 0.15:
+                    elif side == "buy_no" and p_yes <= (1.0 - buy_price) - 0.02:
                         return True, "noaa", 1.0 - p_yes
                     else:
                         # NOAA disagrees — this is NOT near-certain
@@ -517,9 +519,11 @@ class KalshiBondingEngine(BaseEngine):
                 )
                 if idx_result is not None:
                     p_yes, idx_confidence, idx_reasoning = idx_result
-                    if side == "buy_yes" and p_yes >= 0.85:
+                    # Wave 25: same fix as NOAA — data must agree with price
+                    buy_price = km.yes_price if side == "buy_yes" else km.no_price
+                    if side == "buy_yes" and p_yes >= buy_price + 0.02:
                         return True, "yahoo_finance", p_yes
-                    elif side == "buy_no" and p_yes <= 0.15:
+                    elif side == "buy_no" and p_yes <= (1.0 - buy_price) - 0.02:
                         return True, "yahoo_finance", 1.0 - p_yes
                     else:
                         self.logger.debug(
