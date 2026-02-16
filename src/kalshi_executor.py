@@ -193,6 +193,13 @@ class KalshiExecutor:
                     cross_amount = min(max(1, spread_cents // 2), 2)
                 else:
                     cross_amount = 1
+            elif abs(net_edge_pre) >= 0.20 and signal.confidence >= 0.60:
+                # Wave 22: 20%+ edge signals (sweet spot) — cross up to 3c
+                # 3.9% fill rate → need more aggressive crossing for best signals
+                if spread_cents > 0:
+                    cross_amount = min(max(1, spread_cents // 2), 3)
+                else:
+                    cross_amount = 2
             elif abs(net_edge_pre) >= 0.08 and signal.confidence >= 0.70 and ttc_hours < 4.0:
                 # High-edge + high-confidence + urgent: cross 1c (strict gate)
                 cross_amount = 1

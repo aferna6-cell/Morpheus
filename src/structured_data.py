@@ -952,6 +952,167 @@ async def _fetch_open_meteo_hrrr(
         return None
 
 
+# ---------------------------------------------------------------------------
+# NBM validation — NWS hourly forecast (NBM-calibrated) as independent check
+# ---------------------------------------------------------------------------
+
+_nbm_cache: Dict[str, Tuple[float, Dict]] = {}  # gridpoint_url -> (ts, data)
+_NBM_CACHE_TTL = 600.0  # 10 minutes
+_griddata_url_cache: Dict[str, str] = {}  # lat,lon -> forecastGridData URL
+
+
+async def _get_nws_griddata_url(lat: float, lon: float) -> Optional[str]:
+    """Get the NWS forecastGridData URL for NBM quantitative data."""
+    cache_key = f"{lat:.4f},{lon:.4f}"
+    if cache_key in _griddata_url_cache:
+        return _griddata_url_cache[cache_key]
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "(Morpheus Trading Bot, contact@example.com)"},
+        ) as client:
+            resp = await client.get(f"https://api.weather.gov/points/{lat},{lon}")
+            if resp.status_code == 200:
+                data = resp.json()
+                url = data.get("properties", {}).get("forecastGridData")
+                if url:
+                    _griddata_url_cache[cache_key] = url
+                    return url
+    except Exception as e:
+        logger.debug("nws_griddata_url_error", error=str(e))
+
+    return None
+
+
+async def _fetch_nbm_temperature(
+    lat: float, lon: float, target_date: str, t_type: str,
+) -> Optional[float]:
+    """Fetch NBM-calibrated temperature from NWS gridpoints quantitative data.
+
+    The NWS gridpoints endpoint returns the raw NBM-derived quantitative forecast.
+    Returns the max or min temperature for the target date, or None on failure.
+    """
+    griddata_url = await _get_nws_griddata_url(lat, lon)
+    if not griddata_url:
+        return None
+
+    now = time.monotonic()
+    cached = _nbm_cache.get(griddata_url)
+    if cached:
+        ts, data = cached
+        if now - ts < _NBM_CACHE_TTL:
+            return _extract_nbm_temp(data, target_date, t_type)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers={"User-Agent": "(Morpheus Trading Bot, contact@example.com)"},
+        ) as client:
+            resp = await client.get(griddata_url)
+            if resp.status_code != 200:
+                logger.debug("nbm_griddata_error", status=resp.status_code)
+                return None
+            data = resp.json()
+            _nbm_cache[griddata_url] = (now, data)
+            return _extract_nbm_temp(data, target_date, t_type)
+    except Exception as e:
+        logger.debug("nbm_fetch_error", error=str(e))
+        return None
+
+
+def _extract_nbm_temp(data: Dict, target_date: str, t_type: str) -> Optional[float]:
+    """Extract max or min temperature from NWS gridpoints data for a target date.
+
+    NWS gridpoints data uses ISO 8601 durations (e.g., "2026-02-15T12:00:00+00:00/PT6H").
+    Temperatures are in Celsius — convert to Fahrenheit.
+    """
+    props = data.get("properties", {})
+
+    # Choose the right temperature field
+    if "high" in t_type or "above" in t_type or t_type.endswith("_above"):
+        field = "maxTemperature"
+    elif "low" in t_type or "below" in t_type:
+        field = "minTemperature"
+    else:
+        field = "maxTemperature"
+
+    temp_data = props.get(field, {})
+    values = temp_data.get("values", [])
+    uom = temp_data.get("uom", "")
+
+    is_celsius = "degC" in uom or "celsius" in uom.lower()
+
+    for entry in values:
+        valid_time = entry.get("validTime", "")
+        if target_date in valid_time:
+            val = entry.get("value")
+            if val is not None:
+                temp_f = val * 9.0 / 5.0 + 32.0 if is_celsius else val
+                return temp_f
+
+    return None
+
+
+async def compute_nbm_validation(
+    p_blended: float,
+    t_value: float,
+    t_type: str,
+    sigma: float,
+    coords: Tuple[float, float],
+    target_date_str: str,
+    bracket_bounds: Optional[Tuple[float, float]] = None,
+) -> Tuple[float, Optional[str]]:
+    """Validate blended probability against NBM-calibrated forecast.
+
+    If NBM disagrees with our blend by >15%, adjust toward NBM estimate.
+    Returns (adjusted_p_yes, nbm_note) where nbm_note explains any adjustment.
+    """
+    nbm_temp = await _fetch_nbm_temperature(
+        coords[0], coords[1], target_date_str, t_type,
+    )
+    if nbm_temp is None:
+        return (p_blended, None)
+
+    # Compute NBM-based probability
+    if bracket_bounds:
+        lo, hi = bracket_bounds
+        p_nbm = _norm_cdf(hi, nbm_temp, sigma) - _norm_cdf(lo, nbm_temp, sigma)
+    elif "below" in t_type:
+        p_nbm = _norm_cdf(t_value, nbm_temp, sigma)
+    else:
+        p_nbm = 1.0 - _norm_cdf(t_value, nbm_temp, sigma)
+
+    p_nbm = max(0.001, min(0.999, p_nbm))
+    disagreement = abs(p_blended - p_nbm)
+
+    if disagreement > 0.15:
+        # Significant disagreement: blend 60% ours + 40% NBM
+        adjusted = 0.60 * p_blended + 0.40 * p_nbm
+        note = (
+            f"NBM validation: nbm_temp={nbm_temp:.1f}°F, p_nbm={p_nbm:.3f}, "
+            f"disagreement={disagreement:.3f}, adjusted {p_blended:.3f}→{adjusted:.3f}"
+        )
+        logger.info(
+            "nbm_validation_adjustment",
+            nbm_temp=round(nbm_temp, 1),
+            p_nbm=round(p_nbm, 4),
+            p_blended=round(p_blended, 4),
+            p_adjusted=round(adjusted, 4),
+            disagreement=round(disagreement, 4),
+        )
+        return (adjusted, note)
+    else:
+        logger.debug(
+            "nbm_validation_ok",
+            nbm_temp=round(nbm_temp, 1),
+            p_nbm=round(p_nbm, 4),
+            p_blended=round(p_blended, 4),
+            disagreement=round(disagreement, 4),
+        )
+        return (p_blended, None)
+
+
 def _ensemble_probability(
     members: List[float], threshold: float, direction: str,
     bracket_bounds: Optional[Tuple[float, float]] = None,
@@ -1996,9 +2157,30 @@ async def compute_weather_probability(
     # ECMWF IFS is the gold-standard global model (51 members),
     # HRRR adds high-resolution spatial detail for same-day.
     #
+    # HRRR time-weighting: HRRR 3km outperforms global models for 0-18h forecasts.
+    # Boost HRRR weight when close to market close time.
+    #
     # Agreement check: compare mean forecast temps across sources.
     # Within 2°F → sources agree (trust NWS calibration).
     # >2°F disagreement → trust model ensembles over NWS.
+
+    # Compute hours to close for HRRR time-weighting
+    _hours_to_close = None
+    if close_time:
+        _hours_to_close = max(0, (close_time - now).total_seconds() / 3600)
+    elif lead_days == 0:
+        _hours_to_close = 6.0  # default: assume ~6h remaining for day-0
+
+    # HRRR weight multiplier based on hours to close
+    # <6h: HRRR at peak accuracy → 50% weight (2x boost)
+    # <12h: HRRR still strong → 35% weight (~1.4x boost)
+    # >12h or unknown: default weights
+    if _hours_to_close is not None and _hours_to_close < 6.0:
+        _hrrr_tier = "near"  # <6h
+    elif _hours_to_close is not None and _hours_to_close < 12.0:
+        _hrrr_tier = "mid"   # 6-12h
+    else:
+        _hrrr_tier = "far"   # >12h or unknown
 
     # Compute mean ensemble temperatures for agreement check
     gfs_mean = sum(gfs_members) / len(gfs_members) if gfs_members else None
@@ -2027,15 +2209,33 @@ async def compute_weather_probability(
 
     if p_gfs is not None and p_ecmwf is not None and p_hrrr is not None:
         # Full 4-source blend: NWS + GFS + ECMWF + HRRR
-        if nws_ecmwf_agree_gfs_disagrees:
-            # NWS + ECMWF agree, GFS outlier → boost NWS+ECMWF, downweight GFS
-            p_yes = 0.35 * p_nws + 0.10 * p_gfs + 0.40 * p_ecmwf + 0.15 * p_hrrr
-        elif all_agree:
-            # All sources agree within 2°F: trust NWS calibration
-            p_yes = 0.35 * p_nws + 0.25 * p_gfs + 0.25 * p_ecmwf + 0.15 * p_hrrr
+        # Time-weighted: HRRR gets boosted for near-close markets
+        if _hrrr_tier == "near":
+            # <6h: HRRR 50%, others split remaining 50%
+            if nws_ecmwf_agree_gfs_disagrees:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.20, 0.05, 0.25, 0.50
+            elif all_agree:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.20, 0.15, 0.15, 0.50
+            else:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.15, 0.18, 0.17, 0.50
+        elif _hrrr_tier == "mid":
+            # 6-12h: HRRR 35%, rebalance rest
+            if nws_ecmwf_agree_gfs_disagrees:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.25, 0.08, 0.32, 0.35
+            elif all_agree:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.28, 0.19, 0.18, 0.35
+            else:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.20, 0.23, 0.22, 0.35
         else:
-            # Disagreement >2°F: trust model ensembles over NWS
-            p_yes = 0.25 * p_nws + 0.30 * p_gfs + 0.30 * p_ecmwf + 0.15 * p_hrrr
+            # >12h: original weights (HRRR less reliable at longer leads)
+            if nws_ecmwf_agree_gfs_disagrees:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.35, 0.10, 0.40, 0.15
+            elif all_agree:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.35, 0.25, 0.25, 0.15
+            else:
+                w_nws, w_gfs, w_ecmwf, w_hrrr = 0.25, 0.30, 0.30, 0.15
+
+        p_yes = w_nws * p_nws + w_gfs * p_gfs + w_ecmwf * p_ecmwf + w_hrrr * p_hrrr
         logger.info(
             "weather_full_blend",
             city=city,
@@ -2046,19 +2246,19 @@ async def compute_weather_probability(
             p_blended=round(p_yes, 4),
             all_agree=all_agree,
             nws_ecmwf_agree=nws_ecmwf_agree_gfs_disagrees,
+            hrrr_tier=_hrrr_tier,
+            hours_to_close=round(_hours_to_close, 1) if _hours_to_close is not None else None,
+            w_hrrr=w_hrrr,
             n_gfs=len(gfs_members),
             n_ecmwf=len(ecmwf_members),
         )
     elif p_gfs is not None and p_ecmwf is not None:
         # GFS + ECMWF available, no HRRR
         if nws_ecmwf_agree_gfs_disagrees:
-            # NWS + ECMWF agree, GFS outlier → boost agreeing pair
             p_yes = 0.40 * p_nws + 0.10 * p_gfs + 0.50 * p_ecmwf
         elif all_agree:
-            # All agree within 2°F: 0.4 NWS / 0.3 GFS / 0.3 ECMWF
             p_yes = 0.40 * p_nws + 0.30 * p_gfs + 0.30 * p_ecmwf
         else:
-            # Disagreement >2°F: 0.3 NWS / 0.35 GFS / 0.35 ECMWF
             p_yes = 0.30 * p_nws + 0.35 * p_gfs + 0.35 * p_ecmwf
         logger.info(
             "weather_triple_blend",
@@ -2073,12 +2273,22 @@ async def compute_weather_probability(
             n_ecmwf=len(ecmwf_members),
         )
     elif p_gfs is not None and p_hrrr is not None:
-        # GFS + HRRR available, no ECMWF (fallback to old blend)
+        # GFS + HRRR available, no ECMWF — time-weight HRRR
         disagreement = abs(p_nws - p_gfs)
-        if disagreement > 0.15:
-            p_yes = 0.30 * p_nws + 0.50 * p_gfs + 0.20 * p_hrrr
+        if _hrrr_tier == "near":
+            w_hrrr = 0.45
+            w_nws = 0.20 if disagreement > 0.15 else 0.25
+            w_gfs = 1.0 - w_nws - w_hrrr
+        elif _hrrr_tier == "mid":
+            w_hrrr = 0.35
+            w_nws = 0.25 if disagreement > 0.15 else 0.30
+            w_gfs = 1.0 - w_nws - w_hrrr
         else:
-            p_yes = 0.40 * p_nws + 0.35 * p_gfs + 0.25 * p_hrrr
+            if disagreement > 0.15:
+                w_nws, w_gfs, w_hrrr = 0.30, 0.50, 0.20
+            else:
+                w_nws, w_gfs, w_hrrr = 0.40, 0.35, 0.25
+        p_yes = w_nws * p_nws + w_gfs * p_gfs + w_hrrr * p_hrrr
         logger.info(
             "weather_gfs_hrrr_blend",
             city=city,
@@ -2087,15 +2297,27 @@ async def compute_weather_probability(
             p_hrrr=round(p_hrrr, 4),
             p_blended=round(p_yes, 4),
             disagreement=round(disagreement, 4),
+            hrrr_tier=_hrrr_tier,
+            w_hrrr=w_hrrr,
             n_gfs=len(gfs_members),
         )
     elif p_ecmwf is not None and p_hrrr is not None:
-        # ECMWF + HRRR available, no GFS
+        # ECMWF + HRRR available, no GFS — time-weight HRRR
         disagreement = abs(p_nws - p_ecmwf)
-        if disagreement > 0.15:
-            p_yes = 0.30 * p_nws + 0.50 * p_ecmwf + 0.20 * p_hrrr
+        if _hrrr_tier == "near":
+            w_hrrr = 0.45
+            w_nws = 0.20 if disagreement > 0.15 else 0.25
+            w_ecmwf = 1.0 - w_nws - w_hrrr
+        elif _hrrr_tier == "mid":
+            w_hrrr = 0.35
+            w_nws = 0.25 if disagreement > 0.15 else 0.30
+            w_ecmwf = 1.0 - w_nws - w_hrrr
         else:
-            p_yes = 0.40 * p_nws + 0.35 * p_ecmwf + 0.25 * p_hrrr
+            if disagreement > 0.15:
+                w_nws, w_ecmwf, w_hrrr = 0.30, 0.50, 0.20
+            else:
+                w_nws, w_ecmwf, w_hrrr = 0.40, 0.35, 0.25
+        p_yes = w_nws * p_nws + w_ecmwf * p_ecmwf + w_hrrr * p_hrrr
         logger.info(
             "weather_ecmwf_hrrr_blend",
             city=city,
@@ -2104,6 +2326,8 @@ async def compute_weather_probability(
             p_hrrr=round(p_hrrr, 4),
             p_blended=round(p_yes, 4),
             disagreement=round(disagreement, 4),
+            hrrr_tier=_hrrr_tier,
+            w_hrrr=w_hrrr,
             n_ecmwf=len(ecmwf_members),
         )
     elif p_gfs is not None:
@@ -2139,20 +2363,41 @@ async def compute_weather_probability(
             n_ecmwf=len(ecmwf_members),
         )
     elif p_hrrr is not None:
-        # HRRR only (both ensembles failed) — blend with NWS
-        p_yes = 0.55 * p_nws + 0.45 * p_hrrr
+        # HRRR only (both ensembles failed) — time-weight with NWS
+        if _hrrr_tier == "near":
+            p_yes = 0.35 * p_nws + 0.65 * p_hrrr  # HRRR dominant near close
+        elif _hrrr_tier == "mid":
+            p_yes = 0.45 * p_nws + 0.55 * p_hrrr
+        else:
+            p_yes = 0.55 * p_nws + 0.45 * p_hrrr
         logger.info(
             "weather_hrrr_blend",
             city=city,
             p_nws=round(p_nws, 4),
             p_hrrr=round(p_hrrr, 4),
             p_blended=round(p_yes, 4),
+            hrrr_tier=_hrrr_tier,
         )
     else:
         p_yes = p_nws
 
     # Clamp
     p_yes = max(0.001, min(0.999, p_yes))
+
+    # 7d. NBM validation layer — compare against NWS gridpoints quantitative data
+    # If our multi-model blend disagrees with NBM by >15%, adjust toward NBM.
+    if coords:
+        target_str = target_date.strftime("%Y-%m-%d") if target_date else now.strftime("%Y-%m-%d")
+        p_yes, nbm_note = await compute_nbm_validation(
+            p_blended=p_yes,
+            t_value=t_value,
+            t_type=t_type,
+            sigma=sigma,
+            coords=coords,
+            target_date_str=target_str,
+            bracket_bounds=bracket_bounds,
+        )
+        p_yes = max(0.001, min(0.999, p_yes))
 
     # 8. Only return for confident cases.
     # Lowered from 1.0 to 0.7 — at z=0.7, probability is ~76%/24%.
@@ -2452,6 +2697,133 @@ _INDEX_PRICE_CACHE_TTL = 60.0  # 60 seconds
 _realized_vol_cache: Dict[str, Tuple[float, float]] = {}
 _REALIZED_VOL_CACHE_TTL = 3600.0  # 1 hour
 
+# VIX1D cache: (timestamp, vix1d_value)
+_vix1d_cache: Optional[Tuple[float, float]] = None
+_VIX1D_CACHE_TTL = 300.0  # 5 minutes
+
+# First-hour realized vol cache: {yahoo_symbol: (timestamp, vol)}
+_first_hour_vol_cache: Dict[str, Tuple[float, float]] = {}
+_FIRST_HOUR_VOL_CACHE_TTL = 300.0  # 5 minutes
+
+
+async def _fetch_vix1d() -> Optional[float]:
+    """Fetch VIX1D (1-day expected S&P 500 move) from Yahoo Finance.
+
+    Returns daily vol as a fraction (e.g., 0.012 for 1.2%) or None on failure.
+    VIX1D is annualized, so: daily_vol = VIX1D / 100 / sqrt(252).
+    """
+    global _vix1d_cache
+    now = time.monotonic()
+    if _vix1d_cache is not None and now - _vix1d_cache[0] < _VIX1D_CACHE_TTL:
+        return _vix1d_cache[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX1D",
+                params={"interval": "1m", "range": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code != 200:
+                logger.debug("vix1d_fetch_failed", status=resp.status_code)
+                return None
+
+            data = resp.json()
+            meta = data["chart"]["result"][0]["meta"]
+            vix1d_raw = float(meta["regularMarketPrice"])
+
+            # VIX1D is annualized percentage → convert to daily fraction
+            daily_vol = vix1d_raw / 100.0 / math.sqrt(252)
+
+            _vix1d_cache = (now, daily_vol)
+            logger.info("vix1d_fetched", vix1d_raw=round(vix1d_raw, 2), daily_vol=round(daily_vol, 4))
+            return daily_vol
+    except Exception as e:
+        logger.debug("vix1d_fetch_error", error=str(e))
+        return None
+
+
+async def _fetch_first_hour_vol(yahoo_symbol: str) -> Optional[float]:
+    """Compute realized vol from first trading hour (9:30-10:30 ET) intraday data.
+
+    After 10:30 ET, the first-hour realized vol explains ~68% of daily vol
+    (Bloomberg research). Returns daily vol estimate as fraction or None.
+    """
+    from zoneinfo import ZoneInfo
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    # Only available after 10:30 ET on trading days (Mon-Fri)
+    if now_et.weekday() >= 5:  # Weekend
+        return None
+    current_hour = now_et.hour + now_et.minute / 60.0
+    if current_hour < 10.5:  # Before 10:30 ET
+        return None
+
+    now_mono = time.monotonic()
+    cached = _first_hour_vol_cache.get(yahoo_symbol)
+    if cached and now_mono - cached[0] < _FIRST_HOUR_VOL_CACHE_TTL:
+        return cached[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+                params={"interval": "1m", "range": "1d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            result = data["chart"]["result"][0]
+            timestamps = result.get("timestamp", [])
+            closes = result["indicators"]["quote"][0].get("close", [])
+
+            if not timestamps or not closes:
+                return None
+
+            # Filter to 9:30-10:30 ET window (timestamps are Unix epoch)
+            et_tz = ZoneInfo("America/New_York")
+            first_hour_closes = []
+            for ts, c in zip(timestamps, closes):
+                if c is None:
+                    continue
+                dt = datetime.fromtimestamp(ts, tz=et_tz)
+                hour_frac = dt.hour + dt.minute / 60.0
+                if 9.5 <= hour_frac <= 10.5:
+                    first_hour_closes.append(c)
+
+            if len(first_hour_closes) < 10:  # Need at least 10 minutes of data
+                return None
+
+            # Compute 1-min log returns
+            returns = [
+                math.log(first_hour_closes[i] / first_hour_closes[i - 1])
+                for i in range(1, len(first_hour_closes))
+            ]
+            if not returns:
+                return None
+
+            mean_r = sum(returns) / len(returns)
+            var = sum((r - mean_r) ** 2 for r in returns) / max(len(returns) - 1, 1)
+            vol_per_min = math.sqrt(var)
+
+            # Scale to daily: 1-min vol * sqrt(390 trading minutes)
+            daily_vol = vol_per_min * math.sqrt(390)
+
+            _first_hour_vol_cache[yahoo_symbol] = (now_mono, daily_vol)
+            logger.info(
+                "first_hour_vol",
+                symbol=yahoo_symbol,
+                n_bars=len(first_hour_closes),
+                vol_per_min=round(vol_per_min, 6),
+                daily_vol=round(daily_vol, 4),
+            )
+            return daily_vol
+    except Exception as e:
+        logger.debug("first_hour_vol_error", symbol=yahoo_symbol, error=str(e))
+        return None
+
 
 async def _fetch_realized_volatility(yahoo_symbol: str) -> Optional[float]:
     """Fetch 10-day realized volatility from Yahoo Finance daily bars.
@@ -2630,13 +3002,56 @@ def _parse_bracket_range(question: str) -> Optional[Tuple[float, float]]:
     return None
 
 
+async def _best_daily_vol(config: Dict[str, Any]) -> Tuple[float, str]:
+    """Select best daily volatility estimate from multiple sources.
+
+    Priority (for equity indices only):
+    1. First-hour realized vol (after 10:30 ET, explains ~68% of daily vol)
+    2. VIX1D implied vol (market-implied same-day expectation)
+    3. 10-day realized vol (historical baseline)
+    4. Static config default (floor)
+
+    For non-equity (crypto, commodities): uses realized vol or config default.
+
+    Returns (daily_vol, source_name).
+    """
+    yahoo = config["yahoo"]
+    floor = config["daily_vol"]
+    trading_hours = config.get("trading_hours", 6.5)
+    is_equity = trading_hours < 24.0 and yahoo in ("^GSPC", "^NDX", "^RUT", "^DJI")
+
+    if is_equity:
+        # Try first-hour vol (best after 10:30 ET)
+        fh_vol = await _fetch_first_hour_vol(yahoo)
+        if fh_vol is not None and fh_vol > floor * 0.5:
+            # Blend: 60% first-hour, 40% VIX1D/realized for stability
+            vix1d = await _fetch_vix1d()
+            if vix1d is not None and vix1d > floor * 0.5:
+                blended = 0.6 * fh_vol + 0.4 * vix1d
+                return (max(blended, floor), "first_hour+vix1d")
+            return (max(fh_vol, floor), "first_hour")
+
+        # Try VIX1D (market-implied same-day vol)
+        vix1d = await _fetch_vix1d()
+        if vix1d is not None and vix1d > floor * 0.5:
+            return (max(vix1d, floor), "vix1d")
+
+    # Fallback: 10-day realized vol
+    realized = await _fetch_realized_volatility(yahoo)
+    if realized is not None and realized > floor:
+        return (realized, "realized_10d")
+
+    return (floor, "config_default")
+
+
 async def compute_stock_index_probability(
     question: str, market_id: str,
     close_time: Optional[datetime] = None,
 ) -> Optional[Tuple[float, float, str]]:
     """Compute probability for stock index threshold markets.
 
-    Uses real-time Yahoo Finance price + intraday volatility model.
+    Uses real-time Yahoo Finance price + dynamic volatility model.
+    Vol sources (equity): first-hour realized → VIX1D implied → 10d realized → static.
     Returns (p_yes, confidence, reasoning) or None if can't compute.
     """
     parsed = _parse_index_ticker(market_id)
@@ -2674,10 +3089,7 @@ async def compute_stock_index_probability(
             if hours_left is None or hours_left <= 0:
                 hours_left = 0.001
 
-        daily_vol = config["daily_vol"]  # floor
-        realized = await _fetch_realized_volatility(config["yahoo"])
-        if realized is not None and realized > daily_vol:
-            daily_vol = realized
+        daily_vol, vol_source = await _best_daily_vol(config)
         time_fraction = max(hours_left / trading_hours, 0.001)
         sigma_remaining = current_price * daily_vol * math.sqrt(time_fraction)
         sigma_remaining = max(sigma_remaining, current_price * 0.001)
@@ -2708,6 +3120,7 @@ async def compute_stock_index_probability(
             f"Yahoo Finance direct (bracket): {config['name']} = {current_price:.2f} "
             f"(day: {daily_change_pct:+.2f}%), range = [{lower:.0f}, {upper:.0f}], "
             f"σ_remaining = {sigma_remaining:.1f} pts ({hours_left:.1f}h left), "
+            f"vol_source = {vol_source}, daily_vol = {daily_vol:.4f}, "
             f"z_from_edge = {z_from_edge:.2f}, P(inside) = {p_inside:.4f}"
         )
 
@@ -2722,6 +3135,8 @@ async def compute_stock_index_probability(
             hours_left=round(hours_left, 2),
             z_from_edge=round(z_from_edge, 2),
             p_inside=round(p_inside, 4),
+            vol_source=vol_source,
+            daily_vol=round(daily_vol, 4),
         )
 
         return (p_inside, confidence, reasoning)
@@ -2748,11 +3163,7 @@ async def compute_stock_index_probability(
             hours_left = 0.001  # tiny epsilon to avoid division by zero
 
     # Intraday volatility: daily_vol * sqrt(hours_left / trading_hours)
-    daily_vol = config["daily_vol"]  # floor
-    realized = await _fetch_realized_volatility(config["yahoo"])
-    if realized is not None and realized > daily_vol:
-        daily_vol = realized
-    trading_hours = config["trading_hours"]
+    daily_vol, vol_source = await _best_daily_vol(config)
     time_fraction = max(hours_left / trading_hours, 0.001)
     sigma_remaining = current_price * daily_vol * math.sqrt(time_fraction)
 
@@ -2790,6 +3201,7 @@ async def compute_stock_index_probability(
         f"(day: {daily_change_pct:+.2f}%), threshold = {threshold:.0f}, "
         f"gap = {current_price - threshold:+.1f} pts, "
         f"σ_remaining = {sigma_remaining:.1f} pts ({hours_left:.1f}h left), "
+        f"vol_source = {vol_source}, daily_vol = {daily_vol:.4f}, "
         f"z = {z_score:.2f}, P(above) = {p_above:.4f}"
     )
 
@@ -2804,6 +3216,8 @@ async def compute_stock_index_probability(
         hours_left=round(hours_left, 2),
         z_score=round(z_score, 2),
         p_above=round(p_above, 4),
+        vol_source=vol_source,
+        daily_vol=round(daily_vol, 4),
     )
 
     return (p_above, confidence, reasoning)

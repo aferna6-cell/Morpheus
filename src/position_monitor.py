@@ -66,7 +66,7 @@ class PositionMonitor:
         risk_cfg = config.risk
         self.check_interval = float(risk_cfg.get("position_check_interval_minutes", 5)) * 60
         self.stop_loss_pct = float(risk_cfg.get("stop_loss_pct", 0.35))
-        self.take_profit_pct = float(risk_cfg.get("take_profit_pct", 0.30))
+        self.take_profit_pct = float(risk_cfg.get("take_profit_pct", 0.60))
         self.max_hold_hours = float(risk_cfg.get("max_position_hold_hours", 24))
 
         # Track positions with entry metadata

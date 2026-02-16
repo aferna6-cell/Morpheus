@@ -69,7 +69,7 @@ class RiskManager:
         self.max_loss_per_trade = risk_config.get("max_loss_per_trade", 10.0)
         self.max_daily_loss = risk_config.get("max_daily_loss", 20.0)
         self.stop_loss_pct = risk_config.get("stop_loss_pct", 0.35)
-        self.take_profit_pct = risk_config.get("take_profit_pct", 0.30)
+        self.take_profit_pct = risk_config.get("take_profit_pct", 0.60)
         self.max_position_hold_hours = risk_config.get("max_position_hold_hours", 24)
 
         # Third-Kelly with 5% bankroll cap
@@ -97,6 +97,12 @@ class RiskManager:
             self._contrarian_max_position = float(contrarian_cfg.get("max_position_size", 25.0))
         else:
             self._contrarian_max_position = 25.0
+
+        # Wave 22: consecutive loss breaker — quarter-Kelly after 5 losses
+        self._consecutive_losses = 0
+        self._loss_breaker_cooldown = 0  # trades remaining at reduced Kelly
+        self._loss_breaker_threshold = 5  # trigger after 5 consecutive losses
+        self._loss_breaker_trades = 3     # stay at quarter-Kelly for 3 trades
 
         from pathlib import Path
         self.state_file = str(Path(self.state_dir) / "risk_state.json")
@@ -218,7 +224,15 @@ class RiskManager:
                 # Also: diversified across independent cities → lower portfolio risk.
                 signal_source = getattr(signal, "signal_source", None)
                 is_noaa = signal_source == "noaa_direct"
-                effective_kelly = 0.50 if is_noaa else self.kelly_fraction
+                is_index = signal_source == "yahoo_direct"
+                # Wave 22: index-specific sizing (9W/0L +$107.67)
+                index_kelly = float(self.config.strategy.get("index_kelly_fraction", 0.50))
+                if is_index:
+                    effective_kelly = index_kelly
+                elif is_noaa:
+                    effective_kelly = 0.50
+                else:
+                    effective_kelly = self.kelly_fraction
                 effective_bankroll_pct = self.max_bankroll_pct
 
                 # Brackets have two edges to defend and higher variance than
@@ -237,6 +251,10 @@ class RiskManager:
                 n_open = len(current_positions)
                 if n_open > 0:
                     effective_kelly /= (1 + 0.1 * n_open)
+
+                # Wave 22: consecutive loss breaker reduces Kelly
+                loss_breaker_mult = self.get_kelly_multiplier()
+                effective_kelly *= loss_breaker_mult
 
                 # Calculate Kelly fraction
                 kelly_f = calculate_kelly_fraction(edge, odds, effective_kelly)
@@ -270,8 +288,12 @@ class RiskManager:
             # Per-strategy position limits
             meta = getattr(signal, "metadata", None) or {}
             strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
+            signal_source = getattr(signal, "signal_source", None)
             if strategy == "contrarian":
                 effective_max = self._contrarian_max_position
+            elif signal_source == "yahoo_direct":
+                # Wave 22: index trades get higher cap (9W/0L +$107.67)
+                effective_max = float(self.config.strategy.get("index_max_position_size", 15.0))
             else:
                 effective_max = self.max_position_size
             if conv_str == "high":
@@ -406,15 +428,45 @@ class RiskManager:
             self.daily_pnl = 0.0
             self.daily_pnl_date = current_date
             self.trading_halted = False
+            self._consecutive_losses = 0
+            self._loss_breaker_cooldown = 0
             self.logger.info("new_trading_day", date=current_date)
 
         self.daily_pnl += pnl_change
+
+        # Wave 22: consecutive loss tracking
+        if pnl_change < 0:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self._loss_breaker_threshold:
+                self._loss_breaker_cooldown = self._loss_breaker_trades
+                self.logger.warning(
+                    "loss_breaker_triggered",
+                    consecutive_losses=self._consecutive_losses,
+                    cooldown_trades=self._loss_breaker_cooldown,
+                )
+        else:
+            self._consecutive_losses = 0
 
         if self.daily_pnl <= -self.max_daily_loss:
             self.trading_halted = True
             self.logger.error("daily_loss_limit_hit",
                               daily_pnl=self.daily_pnl, limit=self.max_daily_loss)
         self._save_state()
+
+    def get_kelly_multiplier(self) -> float:
+        """Get current Kelly multiplier accounting for loss breaker.
+
+        Wave 22: after 5 consecutive losses, reduce to quarter-Kelly for 3 trades.
+        """
+        if self._loss_breaker_cooldown > 0:
+            self._loss_breaker_cooldown -= 1
+            self.logger.info(
+                "loss_breaker_active",
+                remaining_trades=self._loss_breaker_cooldown + 1,
+                kelly_multiplier=0.25,
+            )
+            return 0.25
+        return 1.0
 
     def get_risk_metrics(
         self, available_capital: float, current_positions: Dict[str, float]

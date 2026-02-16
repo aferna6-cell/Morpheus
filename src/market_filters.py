@@ -54,10 +54,18 @@ _JUNK_TICKER_PREFIXES = [
     # Stock intraday ranges — NOW UNBLOCKED (Yahoo Finance real-time price fast-path)
     # "KXSPY", "KXQQQ", "KXIWM", "KXDIA",
     # Entertainment / pop culture — LLMs have no edge on celebrity/media outcomes
+    # Wave 22: expanded — 0W/13L -$11.28 on entertainment, 0W/4L -$3.03 Truth Social
     "KXSUPERBOWLAD", "KXRT", "KXSPOTIFY", "KXSPOTIFYD", "KXSPOTIFYGLOBALD",
     "KXSBADAPPEARANCES", "KXTOPSONG", "KXTOPALBUM", "KXALBUMDEBUT",
     "KXFIRSTSUPERBOWLSONG", "KXAAAGASW", "KXNEXTTEAMNFL",
     "KXNETFLIXRANK", "KXNETFLIX",  # Netflix #1 show/movie — unpredictable streaming
+    "KXALBUMSALES",  # Album sales — no data edge
+    "KXTOP10BILLBOARD", "KXRANKLISTSONG",  # Billboard charts — unpredictable
+    "KXMENTION",  # Generic mention markets
+    "KXBILLBOARD",  # Billboard charts
+    "KXSTREAM",  # Streaming metrics
+    "KXSONG",  # Song-related markets
+    "KXALBUM",  # Album-related markets
     # Racing — LLMs have no edge on race outcomes
     "KXNASCARRACE", "KXNASCAR", "KXF1RACE", "KXINDYRACE",
     # LLM mention markets — what will an AI chatbot say? No edge.

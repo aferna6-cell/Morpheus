@@ -392,7 +392,7 @@ class EnsembleSignal(Signal):
                     # Threshold markets (T-prefix) need less edge — one boundary,
                     # higher win rate. Brackets (B-prefix) need more — two edges.
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.08 if is_weather_threshold else 0.25
+                    min_edge = 0.08 if is_weather_threshold else 0.30  # Wave 22: bracket 25%→30% (still losing)
 
                     if net_edge >= min_edge:
                         if raw_edge > 0:
@@ -821,6 +821,11 @@ class EnsembleSignal(Signal):
                 # Negative means trust YES more (e.g., politics)
                 yes_dampen = max(0.0, yes_dampen + type_cal.yes_boost)
 
+            # Wave 22: weather markets have hard NOAA/NWS data anchors —
+            # trust data-backed YES signals more than generic LLM YES
+            if mtype == "weather" and isinstance(structured_context, str) and structured_context:
+                yes_dampen = min(yes_dampen, 0.15)
+
             # Reduce calibration when structured data shows extreme confidence.
             # Hard FRED/NOAA data should override generic LLM overconfidence adjustments.
             _skip_mushy = False  # set True when structured data overrides calibration
@@ -948,14 +953,14 @@ class EnsembleSignal(Signal):
             # Wave 21: buy_yes needs 15% min edge (was 10%, still 21% WR -$17.97)
             # Wave 20: add longshot premium + NO-side discount
             if side == TradingSide.BUY_YES:
-                yes_min_edge = 0.15  # base YES edge gate (raised Wave 21)
+                yes_min_edge = 0.25  # Wave 22: 20% WR → need massive edge (was 0.15)
                 # Longshot premium: cheap YES contracts are the biggest
                 # money pit in prediction markets (Whelan: lose 60%+)
                 # Check deep longshots first (order matters!)
                 if market_price < 0.20:
-                    yes_min_edge = 0.20  # 20% for deep longshots
+                    yes_min_edge = 0.30  # 30% for deep longshots (was 0.20)
                 elif market_price < 0.30:
-                    yes_min_edge = 0.15  # 15% for longshots
+                    yes_min_edge = 0.25  # 25% for longshots (was 0.15)
                 if net_edge < yes_min_edge:
                     result = self._hold(
                         market,
@@ -967,10 +972,9 @@ class EnsembleSignal(Signal):
             elif side == TradingSide.BUY_NO:
                 # NO-side discount: buying NO is structurally advantaged
                 # (Becker 72.1M trades: makers buying NO earn +1.25% excess return)
-                # Discount scales with YES price — high-price YES (>70c) = cheap NO
-                no_min_edge = min_edge
-                if market_price > 0.70:
-                    no_min_edge = max(0.03, min_edge - 0.02)  # 2% easier entry
+                # Wave 22: apply 2% discount at ALL price levels (was only >70c)
+                # Data: buy_no 58.9% WR +$90.15
+                no_min_edge = max(0.03, min_edge - 0.02)  # always 2% easier entry
                 if net_edge < no_min_edge:
                     result = self._hold(
                         market,
@@ -1002,6 +1006,10 @@ class EnsembleSignal(Signal):
                     confidence = min(1.0, confidence + 0.10)
                 elif divergence > 0.15:
                     confidence = max(0.3, confidence - 0.15)
+
+            # Wave 22: sweet spot boost — 20-30% edge bucket is 64.5% WR +$66.85
+            if 0.20 <= net_edge <= 0.30:
+                confidence = min(0.95, confidence + 0.05)
 
             reasoning = (
                 f"{rationale} | "
@@ -1434,7 +1442,7 @@ Rules:
 
                     # Min-edge gate for contrarian weather
                     is_weather_threshold = "-T" in market.id and "-B" not in market.id
-                    min_edge = 0.03 if is_weather_threshold else 0.25
+                    min_edge = 0.03 if is_weather_threshold else 0.30  # Wave 22: bracket 25%→30%
                     if net_edge < min_edge:
                         return self._hold(market, f"Contrarian weather: net edge {net_edge:.3f} < {min_edge:.3f}")
 

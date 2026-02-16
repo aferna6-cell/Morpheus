@@ -369,20 +369,21 @@ class FillManager:
                     effective_timeout = 120.0  # MM quotes: 2 min expiry (refresh is 60s)
                 elif resting.is_weather:
                     if resting.signal_source == "noaa_direct":
-                        effective_timeout = 480.0  # NOAA-direct: 8 min (high confidence)
+                        effective_timeout = 300.0  # Wave 22: 8→5 min (was too patient)
                     else:
-                        effective_timeout = 300.0  # LLM weather: 5 min
+                        effective_timeout = 180.0  # Wave 22: 5→3 min (free capital faster)
                 else:
-                    # Time-aware timeout: 5% of time-to-close, bounded [120s, 600s]
-                    # 2h→360s, 1h→180s, 30m→120s floor (Wave 10)
+                    # Wave 22: reduced timeouts — 3.9% fill rate means stale orders
+                    # are tying up capital. Tighter TTL → re-evaluate sooner.
+                    # Time-aware: 4% of TTC, bounded [90s, 300s] (was 5%, [120s, 600s])
                     if resting.close_time is not None:
                         time_to_close = (resting.close_time - now).total_seconds()
                         if time_to_close > 0:
-                            effective_timeout = max(120.0, min(600.0, time_to_close * 0.05))
+                            effective_timeout = max(90.0, min(300.0, time_to_close * 0.04))
                         else:
                             effective_timeout = 0.0  # already closed, cancel immediately
                     else:
-                        effective_timeout = self.stale_timeout  # Default: 10 min
+                        effective_timeout = 180.0  # Wave 22: 10→3 min default
                 if age > effective_timeout:
                     # Cancel stale order
                     for client in self.trading_clients:

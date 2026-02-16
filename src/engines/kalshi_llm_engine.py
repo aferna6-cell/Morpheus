@@ -86,7 +86,7 @@ class KalshiLLMEngine(BaseEngine):
         kalshi_cfg = getattr(config, "kalshi", None) or {}
         if isinstance(kalshi_cfg, dict):
             self._interval = float(kalshi_cfg.get("scan_interval_seconds", 300))
-            self._min_volume = int(kalshi_cfg.get("min_volume", 500))
+            self._min_volume = int(kalshi_cfg.get("min_volume", 1000))
             self._categories = kalshi_cfg.get("categories", [
                 "Politics", "Economics", "Elections", "Climate and Weather",
                 "Science and Technology", "Companies", "Financials",
@@ -96,7 +96,7 @@ class KalshiLLMEngine(BaseEngine):
             self._max_spread_pct = float(kalshi_cfg.get("max_spread_pct", 0.08))
         else:
             self._interval = 300
-            self._min_volume = 500
+            self._min_volume = 1000
             self._categories = ["Politics", "Economics", "Elections"]
             self._fee_per_contract = 0.0
             self._max_resolution_days = 1
@@ -105,9 +105,9 @@ class KalshiLLMEngine(BaseEngine):
         # Strategy config — lowered thresholds
         strategy_cfg = getattr(config, "strategy", {}) or {}
         if isinstance(strategy_cfg, dict):
-            self._min_edge = float(strategy_cfg.get("min_edge", 0.03))
+            self._min_edge = float(strategy_cfg.get("min_edge", 0.05))
         else:
-            self._min_edge = 0.03
+            self._min_edge = 0.05
 
         self._pending: List[TradeSignal] = []
         self._task: Optional[asyncio.Task] = None

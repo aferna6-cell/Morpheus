@@ -2,11 +2,13 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm", "kalshi_crypto", "kalshi_bracket_arb", "kalshi_theta"]
+  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]  # Wave 22: removed crypto (blocked), bracket_arb (never triggers), theta (not producing)
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
   max_position_size: 8.0            # $8 max (was $3)
+  index_max_position_size: 15.0     # Wave 22: $15 max for index (9W/0L +$107.67)
+  index_kelly_fraction: 0.50        # Wave 22: half-Kelly for index (vs 0.33 base)
   max_total_exposure: 25.0          # $25 max exposure (was $10)
   min_confidence: 0.3
   min_conviction: "low"             # allow all positive-edge trades (was "medium")

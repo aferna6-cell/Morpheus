@@ -118,9 +118,15 @@ class CapitalManager:
         self.per_type_halt_threshold = float(clv_cfg.get("per_type_halt_threshold", -0.01))
         self._disabled_market_types: set = set()  # market types with poor CLV
 
+        # Wave 22: per-market-type win rate tracking
+        self._wr_min_samples = 20  # need 20 trades before auto-disable
+        self._wr_min_rate = 0.40   # auto-disable types below 40% WR
+        self._wr_disabled_types: set = set()  # types disabled by win rate
+
         # State files
         self.positions_file = self.state_dir / "open_positions.json"
         self.clv_file = self.state_dir / "clv_history.jsonl"
+        self.wr_file = self.state_dir / "win_rate_tracking.jsonl"  # Wave 22
         self.capital_state_file = self.state_dir / "capital_state.json"
 
         # In-memory state
@@ -390,10 +396,14 @@ class CapitalManager:
     # -------------------------------------------------------------------------
 
     def is_market_type_allowed(self, market_type: str) -> bool:
-        """Check if a market type is allowed based on per-type CLV tracking."""
+        """Check if a market type is allowed based on per-type CLV and win rate tracking."""
         if not self.per_type_tracking:
             return True
-        return market_type not in self._disabled_market_types
+        if market_type in self._disabled_market_types:
+            return False
+        if market_type in self._wr_disabled_types:
+            return False
+        return True
 
     def check_per_type_clv(self) -> Dict[str, Dict[str, Any]]:
         """Check CLV per market type, signal source, and engine.
@@ -483,6 +493,90 @@ class CapitalManager:
         if results:
             self.logger.info("clv_per_dimension_summary", dimensions=len(results),
                              breakdown={k: v for k, v in results.items() if v.get("count", 0) >= 5})
+
+        return results
+
+    # -------------------------------------------------------------------------
+    # Wave 22: Per-market-type win rate tracking
+    # -------------------------------------------------------------------------
+
+    def log_trade_outcome(
+        self,
+        market_type: str,
+        won: bool,
+        pnl_usd: float = 0.0,
+        signal_source: str = "unknown",
+    ) -> None:
+        """Log a trade outcome for per-type win rate tracking."""
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_type": market_type,
+            "won": won,
+            "pnl_usd": pnl_usd,
+            "signal_source": signal_source,
+        }
+        try:
+            with open(self.wr_file, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as e:
+            self.logger.error("wr_log_error", error=str(e))
+
+    def check_win_rates(self) -> Dict[str, Dict[str, Any]]:
+        """Check per-type win rates and auto-disable types below threshold.
+
+        Wave 22: prevents future category-level losses like entertainment (0W/13L)
+        and Truth Social (0W/4L). Types with <40% WR over 20+ samples are disabled.
+        """
+        if not self.per_type_tracking:
+            return {}
+
+        records: List[Dict] = []
+        try:
+            if self.wr_file.exists():
+                with open(self.wr_file, "r") as f:
+                    for line in f:
+                        if line.strip():
+                            records.append(json.loads(line))
+        except Exception:
+            return {}
+
+        from collections import defaultdict
+        by_type: Dict[str, List[bool]] = defaultdict(list)
+        for r in records:
+            mtype = r.get("market_type", "unknown")
+            by_type[mtype].append(r.get("won", False))
+
+        results = {}
+        for mtype, outcomes in by_type.items():
+            count = len(outcomes)
+            wins = sum(1 for o in outcomes if o)
+            wr = wins / count if count > 0 else 0.0
+            results[mtype] = {
+                "wins": wins,
+                "losses": count - wins,
+                "win_rate": round(wr, 3),
+                "count": count,
+                "disabled": False,
+            }
+
+            if count >= self._wr_min_samples and wr < self._wr_min_rate:
+                results[mtype]["disabled"] = True
+                if mtype not in self._wr_disabled_types:
+                    self._wr_disabled_types.add(mtype)
+                    self.logger.warning(
+                        "wr_type_disabled",
+                        market_type=mtype,
+                        win_rate=round(wr, 3),
+                        count=count,
+                        threshold=self._wr_min_rate,
+                    )
+            elif mtype in self._wr_disabled_types and wr >= self._wr_min_rate:
+                self._wr_disabled_types.discard(mtype)
+                self.logger.info("wr_type_re_enabled", market_type=mtype, win_rate=round(wr, 3))
+
+        if results:
+            self.logger.info("win_rate_summary", types=len(results),
+                             breakdown={k: v for k, v in results.items() if v["count"] >= 5})
 
         return results
 
