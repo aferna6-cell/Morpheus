@@ -245,12 +245,13 @@ class RiskManager:
                 if "-B" in _mid:
                     effective_kelly *= 0.50
 
-                # Simultaneous-bet Kelly adjustment (Meister arXiv 2412.14144):
-                # With N concurrent bets, reduce individual Kelly fractions to
-                # avoid over-leveraging. ~10% reduction per open position.
+                # Simultaneous-bet Kelly adjustment (Meister arXiv, Thorp):
+                # Wave 23: 1/sqrt(n) for correlated bets. With 4 positions Kelly
+                # halves, with 9 it's 1/3. Previous 1/(1+0.1*n) barely reduced
+                # (10 positions → still 50% of solo Kelly).
                 n_open = len(current_positions)
-                if n_open > 0:
-                    effective_kelly /= (1 + 0.1 * n_open)
+                if n_open > 1:
+                    effective_kelly /= n_open ** 0.5
 
                 # Wave 22: consecutive loss breaker reduces Kelly
                 loss_breaker_mult = self.get_kelly_multiplier()

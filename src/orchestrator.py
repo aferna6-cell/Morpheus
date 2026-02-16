@@ -472,7 +472,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _apply_consensus(self, signals: List[TradeSignal]) -> List[TradeSignal]:
-        """Detect consensus (2+ engines same direction on same market) and boost."""
+        """Detect consensus (2+ engines same direction on same market) and boost.
+
+        Wave 23: consensus boost stored as metadata for scoring priority only.
+        Confidence is NOT mutated — this prevents weak signals from getting
+        inflated Kelly fractions just because multiple engines agree.
+        The boost only affects execution priority via _score_signals().
+        """
 
         # Group by (market_id, side)
         groups: Dict[tuple, List[TradeSignal]] = defaultdict(list)
@@ -491,7 +497,7 @@ class Orchestrator:
                     engines=list(engine_names),
                 )
                 for s in group:
-                    s.confidence = min(1.0, s.confidence * self._multi_boost)
+                    # Store boost as metadata for scoring — don't inflate confidence
                     s.metadata["_multi_engine_bonus"] = 1.0
 
         # Detect disagreement: same market, different sides

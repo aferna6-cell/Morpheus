@@ -203,13 +203,14 @@ class KalshiMMEngine(BaseEngine):
 
             # Skip sports markets — outcome is binary event, not suitable for MM
             # (price jumps on goals/events cause adverse selection)
-            _SPORTS_PREFIXES = (
-                "KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXMLS", "KXEPL",
-                "KXUFC", "KXSOCCER", "KXSCOTTISHPREM", "KXEFLCHAMPIONSHIP",
-                "KXLALIGA", "KXBUNDESLIGA", "KXSERIEA", "KXLIGUE1",
-                "KXCHAMPIONSLEAGUE", "KXNCAA",
+            # Wave 23: use shared check_sports() for comprehensive filter
+            sports_result = self._filters.check_sports(
+                market_id=m.ticker,
+                title=m.title,
+                category=m.category,
+                is_live=False,
             )
-            if m.ticker.upper().startswith(_SPORTS_PREFIXES):
+            if not sports_result.passed:
                 continue
 
             candidates.append(m)

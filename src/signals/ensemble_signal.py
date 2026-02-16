@@ -120,31 +120,32 @@ def calibrate_probability(
     p: float,
     *,
     shrink_strength: float = 0.10,
-    yes_dampen: float = 0.15,
+    platt_alpha: float = 0.68,
     floor: float = 0.05,
     ceiling: float = 0.95,
-    skip_mushy: bool = False,
 ) -> float:
-    """Apply shrinkage toward 0.5 with asymmetric YES dampening.
+    """Apply shrinkage toward 0.5 then Platt scaling for calibration.
 
-    LLM YES predictions are systematically overconfident (40-70% predicted
-    → 18-29% actual). NO predictions are well-calibrated. So:
-    - Symmetric shrinkage toward 0.5 (baseline correction)
-    - Asymmetric: pull YES-leaning predictions (p > 0.5) back toward 0.5
-    - Mushy-middle correction: remap 0.40-0.70 based on 200-market backtest
-    - Leave NO-leaning predictions (p < 0.5) untouched
+    Wave 23: replaces linear YES dampening with Platt scaling (Platt 2000,
+    Niculescu-Mizil & Caruana 2005). Sigmoid recalibration is the principled
+    approach: f(p) = sigmoid(alpha * logit(p)) where alpha < 1.0 pulls
+    extreme predictions toward 0.5.
+
+    Alpha=0.68 fitted to our data: 58.9% NO WR implies systematic YES
+    overestimation of ~15-20%. Maps: 80%→72%, 60%→57%, 90%→82%.
+    Symmetric — works on both YES and NO extremes.
     """
+    import math
+
     # Symmetric shrink toward 0.5
     p = p * (1.0 - shrink_strength) + 0.5 * shrink_strength
 
-    # Asymmetric YES dampening — only affects p > 0.5
-    if p > 0.5 and yes_dampen > 0:
-        overshoot = p - 0.5
-        p = 0.5 + overshoot * (1.0 - yes_dampen)
-
-    # Mushy-middle remap REMOVED in Wave 10.
-    # The 200-market backtest remap was over-dampening: 60% YES → 22%,
-    # flipping most signals to NO. Actual data: 50/50 YES/NO resolution.
+    # Platt scaling: sigmoid(alpha * logit(p))
+    # Pulls extreme predictions toward 0.5 (both YES and NO sides)
+    # alpha < 1.0 = compression, alpha > 1.0 = expansion, alpha = 1.0 = identity
+    if 0 < platt_alpha < 1.0 and 0.001 < p < 0.999:
+        logit_p = math.log(p / (1.0 - p))
+        p = 1.0 / (1.0 + math.exp(-platt_alpha * logit_p))
 
     p = max(floor, min(ceiling, p))
     return round(p, 4)
@@ -793,6 +794,21 @@ class EnsembleSignal(Signal):
                             f"Model disagreement too high ({divergence:.0%})",
                         )
 
+            # Wave 23: single-model penalty — no cross-validation available.
+            # When only one LLM responds, reduce confidence and shrink toward 0.5.
+            _single_model = False
+            if len(p_values) == 1:
+                _single_model = True
+                model_name = list(model_predictions.keys())[0]
+                p_yes_raw = 0.5 + (p_yes_raw - 0.5) * 0.80  # extra 20% shrinkage
+                self.logger.info(
+                    "single_model_penalty",
+                    market_id=market.id,
+                    model=model_name,
+                    raw_p=round(p_values[0], 4),
+                    shrunk_p=round(p_yes_raw, 4),
+                )
+
             # Log per-model predictions for future weight computation
             if model_predictions:
                 try:
@@ -806,47 +822,44 @@ class EnsembleSignal(Signal):
                 except Exception:
                     pass  # logging is best-effort
 
-            # Per-type calibration: apply type-specific shrinkage + YES dampening
+            # Per-type calibration: apply type-specific shrinkage + Platt scaling
             type_cal = _MARKET_TYPE_CALIBRATION_LLM.get(
                 mtype, MarketTypeCalibration()
             )
             total_shrink = min(0.40, self.calibration_shrink + type_cal.extra_shrink)
             if _high_divergence:
                 total_shrink = min(0.50, total_shrink + 0.10)
-            yes_dampen = 0.35  # base YES dampening (0.25→0.35 Wave 21: predicted avg 0.50 vs actual 0.25)
-            if type_cal.yes_boost > 0:
-                # type_cal.yes_boost > 0 means distrust YES more
-                yes_dampen += type_cal.yes_boost
-            elif type_cal.yes_boost < 0:
-                # Negative means trust YES more (e.g., politics)
-                yes_dampen = max(0.0, yes_dampen + type_cal.yes_boost)
 
-            # Wave 22: weather markets have hard NOAA/NWS data anchors —
-            # trust data-backed YES signals more than generic LLM YES
+            # Wave 23: Platt alpha replaces linear YES dampening.
+            # Default alpha=0.68 (maps 80%→72%, 60%→57%, 90%→82%).
+            # Lower alpha = more compression (less trust in extremes).
+            # Higher alpha (toward 1.0) = less compression (more trust).
+            platt_alpha = 0.68  # default
+
+            # Weather with structured data: trust data-anchored signals more
             if mtype == "weather" and isinstance(structured_context, str) and structured_context:
-                yes_dampen = min(yes_dampen, 0.15)
+                platt_alpha = 0.83  # less compression for data-backed weather
 
             # Reduce calibration when structured data shows extreme confidence.
             # Hard FRED/NOAA data should override generic LLM overconfidence adjustments.
-            _skip_mushy = False  # set True when structured data overrides calibration
             if isinstance(structured_context, str):
                 if "FAR ABOVE" in structured_context or "FAR BELOW" in structured_context:
-                    _skip_mushy = True
                     total_shrink *= 0.15
-                    yes_dampen = min(yes_dampen, 0.05)
+                    platt_alpha = 0.95  # near-passthrough for extreme data
                     self.logger.info(
                         "calibration_reduced_extreme_data",
                         market_id=market.id,
                         effective_shrink=round(total_shrink, 3),
+                        platt_alpha=platt_alpha,
                     )
                 elif "well above" in structured_context or "well below" in structured_context:
-                    _skip_mushy = True
                     total_shrink *= 0.50
-                    yes_dampen = min(yes_dampen, 0.10)
+                    platt_alpha = 0.90  # mild compression for strong data
                     self.logger.info(
                         "calibration_reduced_strong_data",
                         market_id=market.id,
                         effective_shrink=round(total_shrink, 3),
+                        platt_alpha=platt_alpha,
                     )
                 elif mtype == "weather" and (
                     "CLOSE to threshold" in structured_context
@@ -869,20 +882,19 @@ class EnsembleSignal(Signal):
                 elif mtype == "weather" and "FAR OUTSIDE bracket range" in structured_context:
                     # NOAA forecast is 4°F+ from the bracket — genuine disagreement.
                     # Trust the data, reduce calibration to let the prediction through.
-                    _skip_mushy = True
                     total_shrink *= 0.25
-                    yes_dampen = min(yes_dampen, 0.05)
+                    platt_alpha = 0.95  # near-passthrough
                     self.logger.info(
                         "calibration_reduced_weather_far_outside",
                         market_id=market.id,
                         effective_shrink=round(total_shrink, 3),
+                        platt_alpha=platt_alpha,
                     )
 
             p_yes = calibrate_probability(
                 p_yes_raw,
                 shrink_strength=total_shrink,
-                yes_dampen=yes_dampen,
-                skip_mushy=_skip_mushy,
+                platt_alpha=platt_alpha,
             )
 
             self.logger.info(
@@ -892,6 +904,7 @@ class EnsembleSignal(Signal):
                 raw_avg=round(p_yes_raw, 4),
                 calibrated=p_yes,
                 models_used=len(p_values),
+                platt_alpha=platt_alpha,
             )
 
             # Adversarial challenge: when p_yes is in the danger zone (35-75%)
@@ -899,6 +912,12 @@ class EnsembleSignal(Signal):
             raw_edge_preliminary = p_yes - market_price
             if 0.35 <= p_yes <= 0.70 and raw_edge_preliminary > 0:
                 p_yes = await self._challenge_estimate(market, p_yes, market_price)
+
+            # Wave 23: adversarial challenge for BUY_NO too
+            # When p_yes is 30-65% (NO-side edge exists but not extreme), validate
+            raw_no_edge = market_price - p_yes  # positive when NO has edge
+            if 0.30 <= p_yes <= 0.65 and raw_no_edge > 0:
+                p_yes = await self._challenge_estimate_no(market, p_yes, market_price)
 
             # Get metadata from whichever response succeeded
             primary = openai_result or anthropic_result or {}
@@ -1006,6 +1025,10 @@ class EnsembleSignal(Signal):
                     confidence = min(1.0, confidence + 0.10)
                 elif divergence > 0.15:
                     confidence = max(0.3, confidence - 0.15)
+
+            # Wave 23: single-model confidence penalty (30% reduction)
+            if _single_model:
+                confidence *= 0.70
 
             # Wave 22: sweet spot boost — 20-30% edge bucket is 64.5% WR +$66.85
             if 0.20 <= net_edge <= 0.30:
@@ -1276,6 +1299,86 @@ Output JSON: {{"p_yes": <your estimate, float 0.0-1.0>, "reason": "your reasonin
 
         except Exception as e:
             self.logger.warning("adversarial_challenge_error", error=str(e))
+            return p_yes
+
+    async def _challenge_estimate_no(
+        self, market: Market, p_yes: float, market_price: float
+    ) -> float:
+        """Run a cheap adversarial challenge for BUY_NO signals.
+
+        Wave 23: mirror of _challenge_estimate but with reversed framing.
+        Argues why the event IS more likely (challenging the NO thesis).
+        Lighter blend (70% original + 30% challenge) since NO has proven edge.
+        """
+        challenge_prompt = f"""A prediction market forecaster estimated {p_yes:.0%} YES for this question:
+
+"{market.question}"
+
+The market price is {market_price:.0%}. The forecaster wants to BUY NO (betting the event won't happen).
+
+Your job: critically evaluate whether {p_yes:.0%} is too LOW. Consider:
+- What factors could make this event MORE likely than the forecaster thinks?
+- Is there momentum, political will, or institutional pressure toward YES?
+- Are there upcoming catalysts that could move this toward YES?
+- Is the forecaster being too pessimistic based on availability bias?
+
+If you believe the estimate is reasonable, output your own independent estimate (which may be similar).
+Output JSON: {{"p_yes": <your estimate, float 0.0-1.0>, "reason": "your reasoning"}}"""
+
+        try:
+            await self.rate_limiter.acquire()
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a critical analyst. Evaluate whether a probability estimate "
+                            "is too low. If the forecaster is being too pessimistic, explain why. "
+                            "If the estimate seems reasonable, say so. Output ONLY valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": challenge_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if self.cost_tracker and response.usage:
+                self.cost_tracker.record_call(
+                    "gpt-4o-mini",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            if not content:
+                return p_yes
+
+            data = json.loads(content)
+            challenge_p = float(data.get("p_yes", p_yes))
+            challenge_p = max(0.01, min(0.99, challenge_p))
+
+            # Only blend when challenger meaningfully disagrees (>15% higher)
+            if challenge_p > p_yes * 1.15:
+                blended = 0.70 * p_yes + 0.30 * challenge_p  # lighter blend for NO
+            else:
+                blended = p_yes  # Challenger agrees — keep original
+
+            self.logger.info(
+                "challenge_estimate_no",
+                market_id=market.id,
+                original_p_yes=p_yes,
+                challenge_p_yes=challenge_p,
+                blended_p_yes=round(blended, 4),
+                reason=data.get("reason", "")[:100],
+            )
+
+            return round(blended, 4)
+
+        except Exception as e:
+            self.logger.warning("challenge_estimate_no_error", error=str(e))
             return p_yes
 
     # ------------------------------------------------------------------

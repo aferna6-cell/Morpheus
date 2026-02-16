@@ -1083,7 +1083,7 @@ async def compute_nbm_validation(
     else:
         p_nbm = 1.0 - _norm_cdf(t_value, nbm_temp, sigma)
 
-    p_nbm = max(0.001, min(0.999, p_nbm))
+    p_nbm = max(0.02, min(0.98, p_nbm))
     disagreement = abs(p_blended - p_nbm)
 
     if disagreement > 0.15:
@@ -1753,7 +1753,7 @@ async def compute_weather_probability(
 
         # Confidence gate: only signal when clearly raining or clearly dry
         if p_yes_cumulative >= 0.80 or p_yes_cumulative <= 0.15:
-            p_yes = max(0.001, min(0.999, p_yes_cumulative))
+            p_yes = max(0.02, min(0.98, p_yes_cumulative))
             confidence = 0.85 if (p_yes_cumulative >= 0.90 or p_yes_cumulative <= 0.05) else 0.70
             reasoning = (
                 f"NOAA rain direct: cumulative p_rain={p_yes_cumulative:.3f} (max hourly PoP={max_pop:.0f}%) "
@@ -1904,6 +1904,11 @@ async def compute_weather_probability(
         avg_wind = sum(wind_speeds) / len(wind_speeds)
         wind_sigma = 4.0  # empirical NWS wind forecast error (~4 mph)
 
+        # Wave 23: inflate sigma for extreme z-scores — forecast error has fat tails
+        _z_pre_wind = abs(max_wind - t_value) / wind_sigma if wind_sigma > 0 else 0
+        if _z_pre_wind > 2.5:
+            wind_sigma *= 1.20
+
         if t_type == "wind":
             # ">X mph" threshold
             p_yes = 1.0 - _norm_cdf(t_value, max_wind, wind_sigma)
@@ -1916,7 +1921,7 @@ async def compute_weather_probability(
             p_yes = (_norm_cdf(t_value + bracket_half, avg_wind, wind_sigma)
                      - _norm_cdf(t_value - bracket_half, avg_wind, wind_sigma))
 
-        p_yes = max(0.001, min(0.999, p_yes))
+        p_yes = max(0.02, min(0.98, p_yes))
         z_score = abs(max_wind - t_value) / wind_sigma
 
         if z_score < 1.0:  # Wave 21: raised from 0.7
@@ -2069,12 +2074,24 @@ async def compute_weather_probability(
         lower = float(m.group(1))
         upper = float(m.group(2))
         bracket_bounds = (lower, upper)
+        # Wave 23: inflate sigma for extreme z-scores — forecast error has fat tails
+        _z_pre = abs(forecast_temp - (lower + upper) / 2) / sigma if sigma > 0 else 0
+        if _z_pre > 2.5:
+            sigma *= 1.20
         p_nws = _norm_cdf(upper, forecast_temp, sigma) - _norm_cdf(lower, forecast_temp, sigma)
     elif "below" in t_type:
         # "<X" market: YES means temp is below threshold
+        # Wave 23: inflate sigma for extreme z-scores — forecast error has fat tails
+        _z_pre = abs(forecast_temp - t_value) / sigma if sigma > 0 else 0
+        if _z_pre > 2.5:
+            sigma *= 1.20
         p_nws = _norm_cdf(t_value, forecast_temp, sigma)
     else:
         # ">X" market: YES means temp is above threshold
+        # Wave 23: inflate sigma for extreme z-scores — forecast error has fat tails
+        _z_pre = abs(forecast_temp - t_value) / sigma if sigma > 0 else 0
+        if _z_pre > 2.5:
+            sigma *= 1.20
         p_nws = 1.0 - _norm_cdf(t_value, forecast_temp, sigma)
 
     # 7b. Multi-model ensemble blend (GFS+GEM+ICON ~92 + ECMWF IFS 51 members)
@@ -2382,7 +2399,7 @@ async def compute_weather_probability(
         p_yes = p_nws
 
     # Clamp
-    p_yes = max(0.001, min(0.999, p_yes))
+    p_yes = max(0.02, min(0.98, p_yes))
 
     # 7d. NBM validation layer — compare against NWS gridpoints quantitative data
     # If our multi-model blend disagrees with NBM by >15%, adjust toward NBM.
@@ -2397,7 +2414,7 @@ async def compute_weather_probability(
             target_date_str=target_str,
             bracket_bounds=bracket_bounds,
         )
-        p_yes = max(0.001, min(0.999, p_yes))
+        p_yes = max(0.02, min(0.98, p_yes))
 
     # 8. Only return for confident cases.
     # Lowered from 1.0 to 0.7 — at z=0.7, probability is ~76%/24%.
@@ -3096,7 +3113,7 @@ async def compute_stock_index_probability(
 
         # P(lower < price < upper at close)
         p_inside = _norm_cdf(upper, current_price, sigma_remaining) - _norm_cdf(lower, current_price, sigma_remaining)
-        p_inside = max(0.001, min(0.999, p_inside))
+        p_inside = max(0.02, min(0.98, p_inside))
 
         # Safety gate: z-score from nearest bracket edge must be >= 1.5
         dist_lower = abs(current_price - lower)
@@ -3172,7 +3189,7 @@ async def compute_stock_index_probability(
 
     # P(index > threshold at close)
     p_above = 1.0 - _norm_cdf(threshold, current_price, sigma_remaining)
-    p_above = max(0.001, min(0.999, p_above))
+    p_above = max(0.02, min(0.98, p_above))
 
     # z-score for confidence
     z_score = abs(current_price - threshold) / sigma_remaining if sigma_remaining > 0 else 0
@@ -3294,7 +3311,7 @@ async def compute_jobless_claims_probability(
 
     # Compute P(claims > threshold) using normal CDF
     p_above = 1.0 - _norm_cdf(threshold, avg_4w, stdev)
-    p_above = max(0.001, min(0.999, p_above))
+    p_above = max(0.02, min(0.98, p_above))
 
     # Confidence based on z-score (how far from threshold)
     z_score = abs(avg_4w - threshold) / stdev
