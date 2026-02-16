@@ -832,6 +832,24 @@ _ensemble_cache: Dict[str, Tuple[float, Dict]] = {}
 _ENSEMBLE_CACHE_TTL = 900.0  # 15 min
 
 
+async def _open_meteo_get_with_retry(
+    client: httpx.AsyncClient, url: str, params: dict, max_retries: int = 3,
+) -> Optional[httpx.Response]:
+    """GET with exponential backoff on 429 (rate limit).
+
+    Open-Meteo free tier has ~10K req/day; bursts of weather market
+    evaluation can trigger per-minute limits.
+    """
+    for attempt in range(max_retries):
+        resp = await client.get(url, params=params)
+        if resp.status_code != 429:
+            return resp
+        wait = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
+        logger.info("open_meteo_rate_limited", attempt=attempt + 1, wait=wait, url=url)
+        await asyncio.sleep(wait)
+    return resp  # return last 429 response so caller can handle
+
+
 async def _fetch_open_meteo_ensemble(
     lat: float, lon: float, target_date: str,
 ) -> Optional[Dict[str, List[float]]]:
@@ -864,9 +882,9 @@ async def _fetch_open_meteo_ensemble(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.debug("open_meteo_http_error", status=resp.status_code)
+            resp = await _open_meteo_get_with_retry(client, url, params)
+            if resp is None or resp.status_code != 200:
+                logger.debug("open_meteo_http_error", status=getattr(resp, "status_code", None))
                 return None
             data = resp.json()
 
@@ -949,9 +967,9 @@ async def _fetch_ecmwf_ensemble(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.debug("ecmwf_http_error", status=resp.status_code)
+            resp = await _open_meteo_get_with_retry(client, url, params)
+            if resp is None or resp.status_code != 200:
+                logger.debug("ecmwf_http_error", status=getattr(resp, "status_code", None))
                 return None
             data = resp.json()
 
@@ -1027,9 +1045,9 @@ async def _fetch_open_meteo_hrrr(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.debug("hrrr_http_error", status=resp.status_code)
+            resp = await _open_meteo_get_with_retry(client, url, params)
+            if resp is None or resp.status_code != 200:
+                logger.debug("hrrr_http_error", status=getattr(resp, "status_code", None))
                 return None
             data = resp.json()
 
@@ -1102,9 +1120,9 @@ async def _fetch_graphcast_forecast(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.debug("graphcast_http_error", status=resp.status_code)
+            resp = await _open_meteo_get_with_retry(client, url, params)
+            if resp is None or resp.status_code != 200:
+                logger.debug("graphcast_http_error", status=getattr(resp, "status_code", None))
                 return None
             data = resp.json()
 

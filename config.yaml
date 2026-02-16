@@ -141,7 +141,7 @@ logging:
 orchestrator:
   enabled: true
   signal_ttl_seconds: 300
-  max_signals_per_cycle: 5          # reduced (was 10) — fewer positions, better capital use
+  max_signals_per_cycle: 12         # Wave 27: raised — bracket arb needs 4 signals per set, was starving other engines
   multi_engine_boost: 1.5
   cycle_interval_seconds: 60
   liquidate_on_startup: false       # Only use for one-time manual cleanup

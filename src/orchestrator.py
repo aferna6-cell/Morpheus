@@ -302,20 +302,27 @@ class Orchestrator:
                     break
 
             # Dedup: skip if we already dispatched this exact signal
+            # Exception: bracket_arb — engine tracks active sets internally;
+            # stale _dispatched entries block completion of partial arb sets.
             dedup_key = (signal.market_id, signal.side, signal.engine)
             if dedup_key in self._dispatched:
-                self.logger.debug(
-                    "dispatch_dedup_skip",
-                    market_id=signal.market_id,
-                    side=signal.side,
-                    engine=signal.engine,
-                )
-                continue
+                if signal.metadata.get("strategy") != "bracket_arb":
+                    self.logger.debug(
+                        "dispatch_dedup_skip",
+                        market_id=signal.market_id,
+                        side=signal.side,
+                        engine=signal.engine,
+                    )
+                    continue
 
             # Position dedup: skip markets where we already hold a position
-            # Exception: MM signals — market makers should quote on held markets
+            # Exceptions:
+            #   - MM signals: market makers should refresh quotes on held markets
+            #   - bracket_arb signals: arb needs ALL legs filled; partial sets
+            #     must be completable. Engine's _active_sets handles its own dedup.
             if signal.market_id in held_tickers:
-                if signal.metadata.get("strategy") != "mm":
+                strategy = signal.metadata.get("strategy", "")
+                if strategy not in ("mm", "bracket_arb"):
                     self.logger.info(
                         "dispatch_position_dedup_skip",
                         market_id=signal.market_id,
