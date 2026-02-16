@@ -210,18 +210,26 @@ class KalshiBracketArbEngine(BaseEngine):
             # Sum all YES ask prices
             bracket_set.sum_yes_asks = sum(m.yes_ask for m in markets)
 
-            # Sanity check: margins > 20% almost certainly indicate an incomplete
-            # bracket set (missing brackets not returned by API or with no asks).
-            # Real arb margins are 1-10%.  A 52% "margin" on 4 brackets likely means
-            # we're only seeing 4 of 8+ brackets — buying those 4 is NOT risk-free.
-            if bracket_set.margin_pct > 20.0:
-                self.logger.warning(
-                    "bracket_arb_suspicious_margin",
+            # Partition completeness guard: bracket arb is ONLY risk-free when
+            # you own ALL brackets in the event.  Kalshi weather events typically
+            # have 7-12 brackets spanning the full temperature range; the API may
+            # return only the 4-5 brackets that have active asks.  Buying a subset
+            # is NOT arbitrage — it's a directional bet.
+            #
+            # Evidence (live scan 2026-02-16): every "opportunity" had exactly 4
+            # brackets with 8-20% margins.  268 brackets / 36 events = 7.4 avg.
+            # The 4-bracket sets are clearly incomplete.
+            #
+            # Guard 1: Margin cap.  In efficient prediction markets, real arb is
+            # 1-3% (Tetlock 2004).  Margin > 5% almost certainly = missing brackets.
+            if bracket_set.margin_pct > 5.0:
+                self.logger.info(
+                    "bracket_arb_incomplete_set_rejected",
                     event_key=event_key,
                     margin_pct=round(bracket_set.margin_pct, 2),
                     n_brackets=len(markets),
                     sum_asks=round(bracket_set.sum_yes_asks, 4),
-                    reason="Margin too high — likely incomplete bracket set",
+                    reason="Margin > 5% — almost certainly incomplete bracket set",
                 )
                 continue
 

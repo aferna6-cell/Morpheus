@@ -242,7 +242,7 @@ bracket_arb:
   min_margin_pct: 1.5              # Wave 27: 1.5% — zero fees means thin margins work
   max_active_sets: 5               # Wave 28: 5 (was 3) — more concurrent arbs with fresh capital
   max_days_to_close: 5             # Wave 27: 5 days — more brackets in scope
-  min_brackets: 3                  # need at least 3 brackets to form a set
+  min_brackets: 6                  # Wave 28.1: 6 (was 3) — weather events have 7-12, 4-bracket sets are always incomplete
   max_contracts_per_leg: 1         # Wave 27.2: 1 contract per leg (safety)
   max_total_arb_usd: 5.0           # Wave 28: $5 (was $2) — scale up with deposit
 
@@ -325,7 +325,7 @@ bonding:
   min_price_cents: 90              # minimum YES price to consider
   max_price_cents: 98              # don't buy 99c (1c profit = below fees)
   max_hours_to_settle: 72          # within 3 days
-  min_volume: 2000                 # reasonable liquidity
+  min_volume: 500                  # Wave 28.1: 500 (was 2000) — bonding holds to settlement, doesn't need sell liquidity
   max_position_usd: 10.0           # $10 max per bond
   max_total_bonds: 5               # max 5 simultaneous bonds
   min_profit_pct: 0.02             # 2% minimum profit (covers fees)
