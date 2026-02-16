@@ -234,7 +234,10 @@ class KalshiExecutor:
             return self._fail(ticker, side, 0, 0, "Invalid entry cost")
 
         raw_count = math.floor(position_size.amount_usd / entry_cost)
-        count = min(max(raw_count, 1), self._max_contracts)
+        if raw_count <= 0:
+            return self._fail(ticker, side, 0, price_cents,
+                              f"Position size ${position_size.amount_usd:.2f} too small for 1 contract at {price_cents}c")
+        count = min(raw_count, self._max_contracts)
 
         # Dollar-cost guard: ensure actual cost doesn't exceed approved position size
         actual_cost = count * entry_cost

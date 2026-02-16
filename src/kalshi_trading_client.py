@@ -368,7 +368,7 @@ class KalshiTradingClient:
                 ticker=ticker,
                 client_order_id=str(uuid.uuid4()),
                 side=side,
-                action="buy",
+                action="sell" if is_exit else "buy",
                 count=count,
                 type=order_type,
             )

@@ -210,6 +210,21 @@ class KalshiBracketArbEngine(BaseEngine):
             # Sum all YES ask prices
             bracket_set.sum_yes_asks = sum(m.yes_ask for m in markets)
 
+            # Sanity check: margins > 20% almost certainly indicate an incomplete
+            # bracket set (missing brackets not returned by API or with no asks).
+            # Real arb margins are 1-10%.  A 52% "margin" on 4 brackets likely means
+            # we're only seeing 4 of 8+ brackets — buying those 4 is NOT risk-free.
+            if bracket_set.margin_pct > 20.0:
+                self.logger.warning(
+                    "bracket_arb_suspicious_margin",
+                    event_key=event_key,
+                    margin_pct=round(bracket_set.margin_pct, 2),
+                    n_brackets=len(markets),
+                    sum_asks=round(bracket_set.sum_yes_asks, 4),
+                    reason="Margin too high — likely incomplete bracket set",
+                )
+                continue
+
             # Check if profitable
             if bracket_set.margin_pct >= self._min_margin_pct:
                 opportunities.append(bracket_set)

@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_contrarian", "kalshi_mm"]  # Wave 22: removed crypto (blocked), bracket_arb (never triggers), theta (not producing)
+  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 28: added bracket_arb + bonding, removed contrarian (0 signals)
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -91,8 +91,8 @@ llm:
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.03  # Wave 25: reduced from 0.15 — Platt handles calibration now
   consensus_enabled: false           # replaced by ensemble
-  monthly_budget_usd: 25.0
-  daily_budget_usd: 3.0
+  monthly_budget_usd: 15.0
+  daily_budget_usd: 0.50             # Wave 28: reduced from $3 — NOAA fast-path is free, LLM ensemble has no proven edge
   require_data_sources: false
   min_data_sources: 0
 
@@ -203,10 +203,10 @@ market_making:
   min_spread_cents: 3               # 3c minimum spread to capture
   max_spread_cents: 15              # avoid illiquid markets
   quote_size: 2                     # 2 contracts per side
-  max_inventory: 8                  # max 8 contracts one-sided
+  max_inventory: 10                 # Wave 28: 10 (was 8) — more inventory capacity with fresh capital
   max_inventory_usd: 5.0            # $5 max exposure per market
-  inventory_skew_cents: 2           # skew quotes 2c per inventory unit
-  quote_refresh_seconds: 60         # re-quote every minute
+  inventory_skew_cents: 3           # Wave 28: 3c skew (was 2) — widen when one-sided
+  quote_refresh_seconds: 30         # Wave 28: 30s (was 60) — faster requoting for tighter spreads
   scan_interval_seconds: 300        # rescan markets every 5 min
   min_price_cents: 15               # only MM in 15-85 range
   max_price_cents: 85
@@ -238,13 +238,13 @@ crypto_engine:
 # Bracket arbitrage scanner — risk-free profit from mispriced bracket sets
 bracket_arb:
   enabled: true
-  scan_interval_seconds: 120       # Wave 27: 2 min (was 5) — catch brief mispricings
-  min_margin_pct: 1.5              # Wave 27: 1.5% (was 3%) — zero fees means thin margins work
-  max_active_sets: 3               # Wave 27: 3 (was 2) — more concurrent arbs
-  max_days_to_close: 5             # Wave 27: 5 days (was 3) — more brackets in scope
+  scan_interval_seconds: 60        # Wave 28: 1 min (was 2) — catch brief mispricings faster
+  min_margin_pct: 1.5              # Wave 27: 1.5% — zero fees means thin margins work
+  max_active_sets: 5               # Wave 28: 5 (was 3) — more concurrent arbs with fresh capital
+  max_days_to_close: 5             # Wave 27: 5 days — more brackets in scope
   min_brackets: 3                  # need at least 3 brackets to form a set
-  max_contracts_per_leg: 1         # Wave 27.2: 1 contract per leg (was unbounded — min_actionable bug inflated to 8)
-  max_total_arb_usd: 2.0           # Wave 27.2: cap total arb deployment at $2 (leaves capital for other strategies)
+  max_contracts_per_leg: 1         # Wave 27.2: 1 contract per leg (safety)
+  max_total_arb_usd: 5.0           # Wave 28: $5 (was $2) — scale up with deposit
 
 # CLV tracking
 clv_tracking:

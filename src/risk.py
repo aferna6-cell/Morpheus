@@ -163,6 +163,18 @@ class RiskManager:
         current_positions: Dict[str, float],
     ) -> PositionSize:
         try:
+            # STOP_TRADING kill switch — documented in CLAUDE.md
+            from pathlib import Path
+            kill_switch = Path(self.state_dir) / "STOP_TRADING"
+            if kill_switch.exists():
+                if not self.trading_halted:
+                    self.trading_halted = True
+                    self._save_state()
+                    self.logger.error("stop_trading_kill_switch_active",
+                                      path=str(kill_switch))
+                return PositionSize(0.0, 0.0, RiskLevel.CRITICAL,
+                                    "STOP_TRADING kill switch active", 0.0)
+
             if self.trading_halted:
                 return PositionSize(0.0, 0.0, RiskLevel.CRITICAL,
                                     "Trading halted — daily loss limit", 0.0)
