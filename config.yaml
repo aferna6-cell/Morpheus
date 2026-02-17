@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding", "kalshi_cross_arb", "kalshi_crypto"]  # Wave 32: added cross_arb + re-enabled crypto (latency arb)
+  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding", "kalshi_crypto"]  # Wave 33: disabled cross_arb — fuzzy matching produces bogus signals on bracket/threshold markets
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
