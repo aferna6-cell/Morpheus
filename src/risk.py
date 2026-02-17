@@ -420,6 +420,31 @@ class RiskManager:
         if position_size.risk_level == RiskLevel.CRITICAL:
             return False
 
+        # Wave 33: Hard safeguard — NEVER trade markets resolving > 7 days out.
+        # The cross_arb engine bought 11-month FED rate bets because it bypassed
+        # market_filters. This check is the last line of defense.
+        max_days = 7
+        if hasattr(market, "time_to_close_hours") and market.time_to_close_hours is not None:
+            days_out = market.time_to_close_hours / 24.0
+            if days_out > max_days:
+                self.logger.warning(
+                    "trade_rejected_too_far_out",
+                    market_id=market.id,
+                    days_to_close=round(days_out, 1),
+                    max_days=max_days,
+                )
+                return False
+        elif hasattr(market, "end_date") and market.end_date is not None:
+            days_out = (market.end_date - datetime.now(timezone.utc)).total_seconds() / 86400
+            if days_out > max_days:
+                self.logger.warning(
+                    "trade_rejected_too_far_out",
+                    market_id=market.id,
+                    days_to_close=round(days_out, 1),
+                    max_days=max_days,
+                )
+                return False
+
         # MM/contrarian/crypto signals already pass their own edge filters in the
         # engine. Skip generic min_edge check for these strategies.
         meta = getattr(signal, "metadata", None) or {}
