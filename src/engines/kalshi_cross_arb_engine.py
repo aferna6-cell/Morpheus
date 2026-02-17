@@ -25,6 +25,7 @@ import structlog
 from ..engines.base import BaseEngine
 from ..engines.signals import TradeSignal
 from ..kalshi_client import KalshiClient, KalshiMarket
+from ..market_filters import _JUNK_TICKER_PREFIXES
 from ..utils import BotConfig
 
 
@@ -170,6 +171,11 @@ class KalshiCrossArbEngine(BaseEngine):
         for t in stale:
             del self._signaled[t]
 
+        # Wave 33: Per-scan price cache — fetch each Polymarket token ONCE per scan.
+        # Multiple Kalshi tickers (e.g., KXBTC brackets) map to the same Polymarket
+        # token, causing N redundant API calls without this cache.
+        scan_price_cache: Dict[str, Optional[float]] = {}  # token_id -> price
+
         # Compare prices for each pair
         signals_found = 0
         for kalshi_ticker, pair_info in list(self._pairs.items()):
@@ -177,7 +183,22 @@ class KalshiCrossArbEngine(BaseEngine):
                 continue
 
             try:
-                poly_price = await self._get_polymarket_price(pair_info)
+                # Skip tickers that are in the junk blocklist (saves Kalshi API calls)
+                ticker_upper = kalshi_ticker.upper()
+                if any(ticker_upper.startswith(p.upper()) for p in _JUNK_TICKER_PREFIXES):
+                    continue
+
+                # Use per-scan cache keyed by token_id (or condition_id as fallback)
+                cache_key = pair_info.get("token_id", "") or pair_info.get("condition_id", "")
+                if not cache_key:
+                    continue
+
+                if cache_key in scan_price_cache:
+                    poly_price = scan_price_cache[cache_key]
+                else:
+                    poly_price = await self._get_polymarket_price(pair_info)
+                    scan_price_cache[cache_key] = poly_price
+
                 if poly_price is None:
                     continue
 
@@ -306,6 +327,7 @@ class KalshiCrossArbEngine(BaseEngine):
 
         Uses Gamma API outcomePrices (cached from discovery) first,
         falls back to CLOB midpoint for real-time price.
+        Only ONE fallback API call per invocation (not both CLOB + Gamma).
         """
         if not self._http:
             return None
@@ -320,7 +342,7 @@ class KalshiCrossArbEngine(BaseEngine):
             except (ValueError, TypeError):
                 pass
 
-        # Fallback: CLOB midpoint for real-time price
+        # Single fallback: try CLOB midpoint first, then Gamma only if no token_id
         token_id = pair_info.get("token_id", "")
         if token_id:
             try:
@@ -335,13 +357,17 @@ class KalshiCrossArbEngine(BaseEngine):
                         return mid
             except Exception as e:
                 self.logger.debug("poly_midpoint_error", token_id=token_id[:20], error=str(e))
+            # CLOB midpoint returned invalid price — don't also hit Gamma.
+            # The price is likely 0 or 1 (settled/extreme), skip this market.
+            return None
 
-        # Last resort: Gamma API single market refresh
+        # Only reach here if no token_id — use Gamma API as last resort
         condition_id = pair_info.get("condition_id", "")
         if condition_id:
             try:
                 resp = await self._http.get(
-                    f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}",
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"conditionId": condition_id},
                 )
                 if resp.status_code == 200:
                     data = resp.json()
