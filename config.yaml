@@ -1,19 +1,19 @@
 # Morpheus v2 — Kalshi trading bot
-# ~$6.56 capital (2 accounts), same-day markets only
+# Wave 34: Micro-capital rebuild mode (~$20 capital)
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 33: disabled cross_arb + crypto (KXBTC15M blocked, no edge)
-  min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
-  kelly_fraction: 0.50              # half-Kelly (was third)
-  max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
-  max_position_size: 8.0            # $8 max (was $3)
-  index_max_position_size: 20.0     # Wave 27.2: $20 max for index (9W/0L +$107.67, best performer)
-  index_kelly_fraction: 0.60        # Wave 27.2: 60% Kelly for index (was 0.50) — proven 100% WR
-  max_total_exposure: 25.0          # $25 max exposure (was $10)
-  min_confidence: 0.3
-  min_conviction: "low"             # allow all positive-edge trades (was "medium")
-  high_conviction_multiplier: 1.3
-  min_payout_ratio: 0.12
+  enabled_strategies: ["kalshi_llm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 34: dropped MM (needs capital depth), kept LLM for free weather fast-paths
+  min_edge: 0.04                    # 4% minimum edge — take more trades at small size
+  kelly_fraction: 0.33              # third-Kelly — conservative rebuild
+  max_position_pct: 0.12            # 12% of bankroll cap — $20 * 12% = $2.40
+  max_position_size: 2.50           # $2.50 max per trade
+  index_max_position_size: 5.0      # Wave 34: $5 max for index (scaled down from $20)
+  index_kelly_fraction: 0.50        # Wave 34: 50% Kelly for index
+  max_total_exposure: 15.0          # Wave 34: $15 max exposure — leave cash for opportunities
+  min_confidence: 0.35              # Wave 34: slightly higher bar — fewer but better trades
+  min_conviction: "low"             # allow all positive-edge trades
+  high_conviction_multiplier: 1.2   # Wave 34: reduced multiplier — conservative
+  min_payout_ratio: 0.15            # Wave 34: slightly higher — skip marginal trades
   fee_pct: 0.004                    # ~0.4% avg maker fee (0.0175 * P * (1-P))
   slippage_pct: 0.005
 
@@ -91,8 +91,8 @@ llm:
   calibration_ceiling: 0.95
   calibration_shrink_strength: 0.03  # Wave 25: reduced from 0.15 — Platt handles calibration now
   consensus_enabled: false           # replaced by ensemble
-  monthly_budget_usd: 15.0
-  daily_budget_usd: 0.50             # Wave 28: reduced from $3 — NOAA fast-path is free, LLM ensemble has no proven edge
+  monthly_budget_usd: 5.0            # Wave 34: $5/mo (was $15) — micro-capital mode, mostly free fast-paths
+  daily_budget_usd: 0.20             # Wave 34: $0.20/day (was $0.50) — only for rare non-fast-path signals
   require_data_sources: false
   min_data_sources: 0
 
@@ -107,18 +107,18 @@ news:
   fetch_full_articles: true
   max_article_chars: 1500
 
-# Risk — tuned for $100/account
+# Risk — Wave 34: tuned for $20 micro-capital rebuild
 risk:
-  max_loss_per_trade: 4.0           # $4 max loss per trade (was $2)
-  max_daily_loss: 6.0               # $6 daily loss limit (was $3)
-  stop_loss_pct: 0.35               # 35% stop loss (was 25%)
-  take_profit_pct: 0.60             # 60% take profit — let winners run in binary markets
-  max_position_hold_hours: 24       # same-day (was 168)
+  max_loss_per_trade: 2.0           # $2 max loss per trade — protect small bankroll
+  max_daily_loss: 3.0               # $3 daily loss limit (15% of $20)
+  stop_loss_pct: 0.40               # 40% stop loss — wider for binary markets
+  take_profit_pct: 0.60             # 60% take profit — let winners run
+  max_position_hold_hours: 24       # same-day
   position_check_interval_minutes: 5
-  cooldown_minutes: 15              # shorter cooldown
+  cooldown_minutes: 15
   prevent_retrade: true
-  use_quarter_kelly: false          # using third-Kelly now
-  max_bankroll_pct: 0.20            # 20% per trade (was 15%)
+  use_quarter_kelly: false          # using third-Kelly
+  max_bankroll_pct: 0.15            # 15% per trade — conservative
   weather_repricing_enabled: true
   weather_exit_threshold: -0.05     # exit when edge drops to -5%
   weather_exit_threshold_high_conf: -0.03  # tighter exit for high-confidence NOAA signals
@@ -153,7 +153,7 @@ kalshi:
   scan_interval_seconds: 600        # 10 min scans (budget-friendly)
   fee_per_contract: 0.00            # no flat fee — maker fees modeled via strategy.fee_pct (0.0175*P*(1-P))
   min_volume: 1000                  # lowered — match market_filters threshold
-  max_position_contracts: 50
+  max_position_contracts: 25        # Wave 34: 25 (was 50) — smaller positions
   categories:
     - "Politics"
     - "Economics"
@@ -195,11 +195,11 @@ contrarian:
     - "Companies"
     - "Financials"
 
-# Market Making — low maker fees (0.0175 * C * P * (1-P))
+# Market Making — DISABLED Wave 34: needs capital depth for proper inventory management
 market_making:
-  enabled: true
-  max_markets: 8                    # Wave 32: 8 (was 3) — scale up after capital frees
-  min_volume: 2000                  # Wave 33: 2000 (was 500) — stop churning on dead markets (3886 orders, 2 fills on KXTRUMPSAY)
+  enabled: false                    # Wave 34: disabled — $20 can't sustain two-sided quotes
+  max_markets: 8
+  min_volume: 2000
   min_spread_cents: 3               # 3c minimum spread to capture
   max_spread_cents: 15              # avoid illiquid markets
   quote_size: 5                     # Wave 32: 5 (was 2) — more contracts per side
@@ -219,7 +219,7 @@ market_making:
 # 15-minute crypto engine — Wave 32: latency arbitrage on KXBTC15M
 # Exploits 30-90s price lag between Coinbase real-time and Kalshi orderbook
 crypto_engine:
-  enabled: true                     # Wave 32: re-enabled with latency_arb mode
+  enabled: false                    # Wave 34: disabled — KXBTC15M blocked, no edge
   mode: "latency_arb"              # NEW: was "llm_prediction" — follow confirmed momentum
   scan_interval_seconds: 60         # rescan for new windows every 60s
   signal_interval_seconds: 15       # check momentum every 15s
@@ -237,13 +237,13 @@ crypto_engine:
 # Bracket arbitrage scanner — risk-free profit from mispriced bracket sets
 bracket_arb:
   enabled: true
-  scan_interval_seconds: 15         # Wave 32: 15s (was 60) — catch brief mispricings faster
-  min_margin_pct: 1.5              # Wave 27: 1.5% — zero fees means thin margins work
-  max_active_sets: 5               # Wave 28: 5 (was 3) — more concurrent arbs with fresh capital
-  max_days_to_close: 5             # Wave 27: 5 days — more brackets in scope
-  min_brackets: 6                  # Wave 28.1: 6 (was 3) — weather events have 7-12, 4-bracket sets are always incomplete
-  max_contracts_per_leg: 3         # Wave 32: 3 (was 1) — scale up per leg
-  max_total_arb_usd: 15.0          # Wave 32: $15 (was $5) — scale up after capital frees
+  scan_interval_seconds: 15         # 15s — catch brief mispricings fast
+  min_margin_pct: 1.5              # 1.5% — zero fees means thin margins work
+  max_active_sets: 3               # Wave 34: 3 (was 5) — fewer concurrent arbs with less capital
+  max_days_to_close: 3             # Wave 34: 3 days (was 5) — tighter timeframe
+  min_brackets: 6                  # 6 — weather events have 7-12
+  max_contracts_per_leg: 1         # Wave 34: 1 (was 3) — minimize capital per arb
+  max_total_arb_usd: 5.0           # Wave 34: $5 (was $15) — 25% of capital max
 
 # CLV tracking
 clv_tracking:
@@ -320,14 +320,14 @@ calibration:
 # Wave 23: high-probability bonding scanner
 bonding:
   enabled: true
-  scan_interval_seconds: 120        # Wave 32: 120s (was 600) — faster scanning
+  scan_interval_seconds: 120        # 120s — fast scanning for opportunities
   min_price_cents: 90              # minimum YES price to consider
-  max_price_cents: 98              # don't buy 99c (1c profit = below fees)
-  max_hours_to_settle: 72          # within 3 days
-  min_volume: 500                  # Wave 28.1: 500 (was 2000) — bonding holds to settlement, doesn't need sell liquidity
-  max_position_usd: 15.0           # Wave 32: $15 (was $10) — scale up per bond
-  max_total_bonds: 10              # Wave 32: 10 (was 5) — more simultaneous bonds
-  min_profit_pct: 0.02             # 2% minimum profit (covers fees)
+  max_price_cents: 97              # Wave 34: 97 (was 98) — slightly wider range for more opps
+  max_hours_to_settle: 48          # Wave 34: 48h (was 72) — shorter bonds = faster capital recycling
+  min_volume: 500                  # 500 — bonding holds to settlement
+  max_position_usd: 3.0            # Wave 34: $3 (was $15) — small bonds, many of them
+  max_total_bonds: 8               # Wave 34: 8 (was 10) — still diversified
+  min_profit_pct: 0.03             # Wave 34: 3% (was 2%) — slightly higher bar
   verify_with_data: true           # use NOAA/Yahoo to verify near-certainty
 
 # Wave 32: Cross-platform arbitrage — Polymarket price signals for Kalshi trades
