@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 28: added bracket_arb + bonding, removed contrarian (0 signals)
+  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding", "kalshi_cross_arb", "kalshi_crypto"]  # Wave 32: added cross_arb + re-enabled crypto (latency arb)
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -20,7 +20,7 @@ strategy:
 # Market filters — loosened for volume
 market_filters:
   min_volume_24h: 1000              # raised (was 500) — only liquid markets
-  min_price: 0.10
+  min_price: 0.12                   # Wave 33: raised (was 0.10) — contracts <10c lose 60%+ (Whelan 300K study)
   max_price: 0.90
   min_liquidity: 500                # raised (was 200) — better fill rates
   min_liquidity_aggressive: 500
@@ -195,18 +195,18 @@ contrarian:
     - "Companies"
     - "Financials"
 
-# Market Making — zero maker fees
+# Market Making — low maker fees (0.0175 * C * P * (1-P))
 market_making:
   enabled: true
-  max_markets: 3                    # MM on up to 3 markets
-  min_volume: 1000                  # lowered — small quote sizes fill fine
+  max_markets: 8                    # Wave 32: 8 (was 3) — scale up after capital frees
+  min_volume: 2000                  # Wave 33: 2000 (was 500) — stop churning on dead markets (3886 orders, 2 fills on KXTRUMPSAY)
   min_spread_cents: 3               # 3c minimum spread to capture
   max_spread_cents: 15              # avoid illiquid markets
-  quote_size: 2                     # 2 contracts per side
-  max_inventory: 10                 # Wave 28: 10 (was 8) — more inventory capacity with fresh capital
+  quote_size: 5                     # Wave 32: 5 (was 2) — more contracts per side
+  max_inventory: 25                 # Wave 32: 25 (was 10) — scale with more markets
   max_inventory_usd: 5.0            # $5 max exposure per market
   inventory_skew_cents: 3           # Wave 28: 3c skew (was 2) — widen when one-sided
-  quote_refresh_seconds: 30         # Wave 28: 30s (was 60) — faster requoting for tighter spreads
+  quote_refresh_seconds: 15         # Wave 32: 15s (was 30) — faster requoting
   scan_interval_seconds: 300        # rescan markets every 5 min
   min_price_cents: 15               # only MM in 15-85 range
   max_price_cents: 85
@@ -216,20 +216,19 @@ market_making:
     min_spread_cents: 2               # never quote tighter than 2c
     max_spread_cents: 15              # never quote wider than 15c
 
-# 15-minute crypto engine — directional momentum on KXBTC15M
+# 15-minute crypto engine — Wave 32: latency arbitrage on KXBTC15M
+# Exploits 30-90s price lag between Coinbase real-time and Kalshi orderbook
 crypto_engine:
-  enabled: false  # Wave 29: disabled since Wave 22, match config to reality
+  enabled: true                     # Wave 32: re-enabled with latency_arb mode
+  mode: "latency_arb"              # NEW: was "llm_prediction" — follow confirmed momentum
   scan_interval_seconds: 60         # rescan for new windows every 60s
   signal_interval_seconds: 15       # check momentum every 15s
-  momentum_threshold_pct: 0.15      # 0.15% move triggers momentum signal
-  reversion_threshold_pct: 0.50     # 0.50% move triggers mean reversion
-  min_elapsed_minutes: 3            # don't signal in first 3 min
-  momentum_window_minutes: 7        # momentum signals valid minutes 3-7
-  reversion_window_minutes: 13      # reversion signals valid minutes 8-13
-  max_position_usd: 5.0             # $5 max per trade (start conservative)
-  kelly_fraction_momentum: 0.67     # 2/3 Kelly for momentum
-  kelly_fraction_reversion: 0.50    # 1/2 Kelly for reversion
-  min_confidence: 0.45              # minimum confidence to trade
+  momentum_threshold_pct: 0.15      # 0.15% confirmed move triggers signal
+  confirmation_window_seconds: 120  # check price change over last 2 min
+  min_elapsed_minutes: 2            # Wave 32: 2 min (was 3) — latency arb benefits from earlier entry
+  max_elapsed_minutes: 10           # don't signal too late in window
+  max_position_usd: 5.0             # $5 max per trade
+  min_confidence: 0.50              # Wave 32: raised from 0.45 — need confirmed direction
   cooldown_per_window_seconds: 120  # only 1 signal per window per 2 min
   maker_fee_coefficient: 0.0175     # Kalshi maker fee formula coefficient
   ws_url: "wss://ws-feed.exchange.coinbase.com"  # Coinbase (US-friendly)
@@ -238,13 +237,13 @@ crypto_engine:
 # Bracket arbitrage scanner — risk-free profit from mispriced bracket sets
 bracket_arb:
   enabled: true
-  scan_interval_seconds: 60        # Wave 28: 1 min (was 2) — catch brief mispricings faster
+  scan_interval_seconds: 15         # Wave 32: 15s (was 60) — catch brief mispricings faster
   min_margin_pct: 1.5              # Wave 27: 1.5% — zero fees means thin margins work
   max_active_sets: 5               # Wave 28: 5 (was 3) — more concurrent arbs with fresh capital
   max_days_to_close: 5             # Wave 27: 5 days — more brackets in scope
   min_brackets: 6                  # Wave 28.1: 6 (was 3) — weather events have 7-12, 4-bracket sets are always incomplete
-  max_contracts_per_leg: 1         # Wave 27.2: 1 contract per leg (safety)
-  max_total_arb_usd: 5.0           # Wave 28: $5 (was $2) — scale up with deposit
+  max_contracts_per_leg: 3         # Wave 32: 3 (was 1) — scale up per leg
+  max_total_arb_usd: 15.0          # Wave 32: $15 (was $5) — scale up after capital frees
 
 # CLV tracking
 clv_tracking:
@@ -321,15 +320,28 @@ calibration:
 # Wave 23: high-probability bonding scanner
 bonding:
   enabled: true
-  scan_interval_seconds: 600
+  scan_interval_seconds: 120        # Wave 32: 120s (was 600) — faster scanning
   min_price_cents: 90              # minimum YES price to consider
   max_price_cents: 98              # don't buy 99c (1c profit = below fees)
   max_hours_to_settle: 72          # within 3 days
   min_volume: 500                  # Wave 28.1: 500 (was 2000) — bonding holds to settlement, doesn't need sell liquidity
-  max_position_usd: 10.0           # $10 max per bond
-  max_total_bonds: 5               # max 5 simultaneous bonds
+  max_position_usd: 15.0           # Wave 32: $15 (was $10) — scale up per bond
+  max_total_bonds: 10              # Wave 32: 10 (was 5) — more simultaneous bonds
   min_profit_pct: 0.02             # 2% minimum profit (covers fees)
   verify_with_data: true           # use NOAA/Yahoo to verify near-certainty
+
+# Wave 32: Cross-platform arbitrage — Polymarket price signals for Kalshi trades
+# Reads public Polymarket CLOB API prices, compares to Kalshi orderbooks.
+# When same event diverges > threshold, trade Kalshi side.
+cross_arb:
+  enabled: true
+  scan_interval_seconds: 30          # check every 30s for price divergence
+  min_divergence_pct: 3.0            # 3% after fees (Kalshi maker = 0, Poly = 2% on winnings)
+  max_position_usd: 10.0             # $10 max per cross-arb trade
+  polymarket_api_url: "https://clob.polymarket.com"
+  pair_cache_file: "state/cross_arb_pairs.json"
+  pair_refresh_seconds: 3600         # refresh pair mappings every hour
+  signal_cooldown_seconds: 300       # 5 min cooldown per ticker after signal
 
 # Wave 27.2: Longshot seller — exploit favorite-longshot bias
 # Markets priced YES < 12c resolve YES far less than implied (2-4% vs 5-12%)

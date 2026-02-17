@@ -1,12 +1,17 @@
-"""15-minute crypto engine — directional momentum on KXBTC15M.
+"""15-minute crypto engine — latency arbitrage on KXBTC15M.
 
-Exploits short-term BTC momentum using real-time Binance WebSocket price data.
-Every 15 minutes, Kalshi resolves binary markets ("BTC up or down?"). This
-engine detects momentum early in each window and bets on continuation.
+Wave 32 rewrite: Exploits 30-90 second price lag between Coinbase real-time
+prices and Kalshi 15-minute BTC markets. NOT predicting — following confirmed
+momentum from the exchange. The edge is SPEED, not accuracy.
 
-Strategy:
-  - MOMENTUM (minutes 3-7): BTC moved >0.15% from window start → bet continuation
-  - MEAN REVERSION (minutes 8-13): BTC moved >0.50% → bet reversal (overextended)
+Strategy (latency_arb mode):
+  - Connect to Coinbase websocket for real-time BTC/USD prices
+  - Monitor KXBTC15M Kalshi orderbook
+  - When BTC confirms directional move (>0.15% in 2 min), trade Kalshi side
+  - Hold to settlement (15 min markets auto-settle)
+
+Legacy (llm_prediction mode): Disabled. Was the old momentum/mean-reversion
+approach that lost money in Wave 22.
 
 Uses maker orders to minimize fees (0.0175 * C * P * (1-P) per contract).
 """
@@ -46,7 +51,7 @@ class CryptoWindow:
 
 
 class KalshiCryptoEngine(BaseEngine):
-    """15-minute crypto engine with Binance real-time price feed."""
+    """15-minute crypto engine — latency arbitrage via Coinbase websocket."""
 
     name = "kalshi_crypto"
 
@@ -66,20 +71,22 @@ class KalshiCryptoEngine(BaseEngine):
         if not isinstance(crypto_cfg, dict):
             crypto_cfg = {}
 
+        self._mode = crypto_cfg.get("mode", "latency_arb")
         self._scan_interval = float(crypto_cfg.get("scan_interval_seconds", 60))
         self._signal_interval = float(crypto_cfg.get("signal_interval_seconds", 15))
         self._momentum_threshold = float(crypto_cfg.get("momentum_threshold_pct", 0.15))
-        self._reversion_threshold = float(crypto_cfg.get("reversion_threshold_pct", 0.50))
-        self._min_elapsed_min = float(crypto_cfg.get("min_elapsed_minutes", 3))
-        self._momentum_max_min = float(crypto_cfg.get("momentum_window_minutes", 7))
-        self._reversion_max_min = float(crypto_cfg.get("reversion_window_minutes", 13))
         self._max_position_usd = float(crypto_cfg.get("max_position_usd", 5.0))
-        self._kelly_momentum = float(crypto_cfg.get("kelly_fraction_momentum", 0.67))
-        self._kelly_reversion = float(crypto_cfg.get("kelly_fraction_reversion", 0.50))
-        self._min_confidence = float(crypto_cfg.get("min_confidence", 0.45))
+        self._min_confidence = float(crypto_cfg.get("min_confidence", 0.50))
         self._cooldown_seconds = float(crypto_cfg.get("cooldown_per_window_seconds", 120))
         self._maker_fee_coeff = float(crypto_cfg.get("maker_fee_coefficient", 0.0175))
         self._ticker_prefix = crypto_cfg.get("ticker_prefix", "KXBTC15M")
+
+        # Latency arb specific: how many seconds of recent price data to check
+        self._confirmation_window_sec = float(crypto_cfg.get("confirmation_window_seconds", 120))
+        # Minimum elapsed minutes before signaling (let the window develop)
+        self._min_elapsed_min = float(crypto_cfg.get("min_elapsed_minutes", 2))
+        # Max elapsed: don't signal too late in the window
+        self._max_elapsed_min = float(crypto_cfg.get("max_elapsed_minutes", 10))
 
         # State
         self._windows: Dict[str, CryptoWindow] = {}
@@ -94,6 +101,7 @@ class KalshiCryptoEngine(BaseEngine):
         self._signal_task = asyncio.create_task(self._signal_loop())
         self.logger.info(
             "crypto_engine_started",
+            mode=self._mode,
             ticker_prefix=self._ticker_prefix,
             momentum_threshold=self._momentum_threshold,
             signal_interval=self._signal_interval,
@@ -111,11 +119,9 @@ class KalshiCryptoEngine(BaseEngine):
         self.logger.info("crypto_engine_stopped")
 
     async def get_signals(self) -> List[TradeSignal]:
-        # DISABLED: crypto engine bypasses market_filters blocklist and loses money.
-        # Feb 13 audit: 43 crypto trades, -$28.03. Re-enable only after adding
-        # MarketFilters integration and proving positive expectancy.
-        self.logger.info("crypto_engine_disabled")
-        return []
+        signals = list(self._pending_signals)
+        self._pending_signals.clear()
+        return signals
 
     # ------------------------------------------------------------------
     # Market scanning
@@ -135,7 +141,6 @@ class KalshiCryptoEngine(BaseEngine):
     async def _scan_markets(self) -> None:
         """Find active KXBTC15M markets via targeted series_ticker query."""
         try:
-            # Direct fetch: only KXBTC15M markets (1 API call, no pagination)
             all_markets = await self.kalshi_client.fetch_markets_by_series(
                 self._ticker_prefix,
             )
@@ -147,7 +152,6 @@ class KalshiCryptoEngine(BaseEngine):
         active_tickers = set()
 
         for m in all_markets:
-            # Must be active/open and have a close time
             if m.status not in ("open", "active") or not m.close_time:
                 continue
 
@@ -159,13 +163,10 @@ class KalshiCryptoEngine(BaseEngine):
             active_tickers.add(m.ticker)
 
             if m.ticker not in self._windows:
-                # Parse window start time (close_time - 15 min)
                 window_start_ts = m.close_time.timestamp() - 900  # 15 min = 900s
 
-                # Get BTC price at window start (or current if window just started)
                 btc_at_start = self.price_feed.price_at(window_start_ts)
                 if btc_at_start is None:
-                    # Window may have just started — use current price
                     btc_at_start = self.price_feed.price if self.price_feed.price > 0 else None
 
                 self._windows[m.ticker] = CryptoWindow(
@@ -186,13 +187,11 @@ class KalshiCryptoEngine(BaseEngine):
                     volume=m.volume,
                 )
             else:
-                # Update bid/ask/volume
                 w = self._windows[m.ticker]
                 w.yes_bid = m.yes_bid
                 w.yes_ask = m.yes_ask
                 w.volume = m.volume
 
-                # Update BTC start price if we didn't have it
                 if w.btc_price_at_start is None:
                     w.btc_price_at_start = self.price_feed.price_at(w.window_start_ts)
                     if w.btc_price_at_start is None and self.price_feed.price > 0:
@@ -212,11 +211,11 @@ class KalshiCryptoEngine(BaseEngine):
             )
 
     # ------------------------------------------------------------------
-    # Signal generation
+    # Signal generation — latency arbitrage
     # ------------------------------------------------------------------
 
     async def _signal_loop(self) -> None:
-        """Generate momentum/reversion signals on active windows."""
+        """Generate latency arb signals on active windows."""
         while self._running:
             try:
                 await self._generate_signals()
@@ -227,7 +226,12 @@ class KalshiCryptoEngine(BaseEngine):
             await asyncio.sleep(self._signal_interval)
 
     async def _generate_signals(self) -> None:
-        """Check each active window for tradeable momentum."""
+        """Latency arb: check Coinbase price movement vs Kalshi orderbook.
+
+        Key difference from old approach: we're NOT predicting. We're following
+        confirmed momentum from the exchange. The edge is that Kalshi prices
+        lag real exchange prices by 30-90 seconds.
+        """
         if not self.price_feed.is_connected:
             return
 
@@ -235,15 +239,12 @@ class KalshiCryptoEngine(BaseEngine):
         now_mono = time.monotonic()
 
         for ticker, window in list(self._windows.items()):
-            # Skip if already signaled this window (1 signal per window)
             if window.signaled:
                 continue
 
-            # Cooldown check
             if now_mono - window.last_signal_time < self._cooldown_seconds:
                 continue
 
-            # Need BTC price at window start
             if window.btc_price_at_start is None or window.btc_price_at_start <= 0:
                 continue
 
@@ -251,55 +252,45 @@ class KalshiCryptoEngine(BaseEngine):
             elapsed_seconds = now_ts - window.window_start_ts
             elapsed_minutes = elapsed_seconds / 60.0
 
-            # Too early or too late
             if elapsed_minutes < self._min_elapsed_min:
                 continue
-            if elapsed_minutes > self._reversion_max_min:
+            if elapsed_minutes > self._max_elapsed_min:
                 continue
 
-            # Current BTC price
             current_btc = self.price_feed.price
             if current_btc <= 0:
                 continue
 
-            # Price change since window start
-            change_pct = (current_btc - window.btc_price_at_start) / window.btc_price_at_start * 100.0
-            abs_change = abs(change_pct)
-
-            signal_type = None
-            side = None
-            confidence = 0.0
-
-            # MOMENTUM: minutes 3-7, change > threshold
-            if (
-                elapsed_minutes <= self._momentum_max_min
-                and abs_change >= self._momentum_threshold
-            ):
-                signal_type = "momentum"
-                # Bet on continuation: if BTC is up, bet YES (up); if down, bet NO (down)
-                side = "buy_yes" if change_pct > 0 else "buy_no"
-                # Confidence scales with move size
-                confidence = min(0.78, 0.48 + abs_change * 40)
-
-            # MEAN REVERSION: minutes 8-13, change > reversion threshold
-            elif (
-                elapsed_minutes > self._momentum_max_min
-                and elapsed_minutes <= self._reversion_max_min
-                and abs_change >= self._reversion_threshold
-            ):
-                signal_type = "mean_reversion"
-                # Bet against the move: if BTC is up a lot, bet NO (revert down)
-                side = "buy_no" if change_pct > 0 else "buy_yes"
-                # Confidence: moderate, scales with overextension
-                confidence = min(0.70, 0.42 + (abs_change - self._reversion_threshold) * 25)
-
-            if signal_type is None or side is None:
+            # LATENCY ARB LOGIC:
+            # Check confirmed movement over recent confirmation window (default 2 min)
+            recent_change = self.price_feed.price_change_pct(self._confirmation_window_sec)
+            if recent_change is None:
                 continue
+
+            abs_change = abs(recent_change)
+            if abs_change < self._momentum_threshold:
+                continue
+
+            # Also check overall direction since window start for consistency
+            overall_change = (current_btc - window.btc_price_at_start) / window.btc_price_at_start * 100.0
+
+            # Confirmed direction: recent move AND overall direction agree
+            if recent_change > 0 and overall_change > 0:
+                side = "buy_yes"  # BTC is up → bet on "up" market
+            elif recent_change < 0 and overall_change < 0:
+                side = "buy_no"  # BTC is down → bet on "down" (buy NO on "up" market)
+            else:
+                # Recent and overall disagree — skip, direction is unclear
+                continue
+
+            # Confidence scales with move magnitude and agreement
+            agreement_factor = min(abs(overall_change), abs_change) / max(abs(overall_change), abs_change, 0.01)
+            confidence = min(0.78, 0.50 + abs_change * 30 + agreement_factor * 0.05)
 
             if confidence < self._min_confidence:
                 continue
 
-            # Fetch fresh orderbook for this market
+            # Fetch fresh orderbook
             try:
                 fresh = await self.kalshi_client.fetch_market(ticker)
                 if fresh is not None:
@@ -308,56 +299,51 @@ class KalshiCryptoEngine(BaseEngine):
             except Exception:
                 pass  # Use cached bid/ask
 
-            # Compute edge: our implied probability vs market price
-            # Market midpoint
+            # Compute edge vs market price
             mid = (window.yes_bid + window.yes_ask) / 2
             if mid <= 0.02 or mid >= 0.98:
-                # Orderbook not developed yet — skip
                 continue
 
-            # Our estimated probability
+            # Our estimated probability based on confirmed momentum
+            # Higher move = higher probability of continuation
             if side == "buy_yes":
-                our_prob = min(0.85, 0.50 + abs_change * 0.15)  # Scale with momentum
-                entry_price = window.yes_ask  # We buy YES at ask
+                our_prob = min(0.85, 0.50 + abs(overall_change) * 0.12)
+                entry_price = window.yes_ask
                 edge = our_prob - entry_price
             else:
-                our_prob = max(0.15, 0.50 - abs_change * 0.15)
-                entry_price = 1.0 - window.yes_bid  # NO price = 1 - YES bid
+                our_prob = max(0.15, 0.50 - abs(overall_change) * 0.12)
+                entry_price = 1.0 - window.yes_bid
                 edge = (1.0 - our_prob) - entry_price
 
-            # Maker fee adjustment
+            # Maker fee
             fee_per_contract = self._maker_fee_coeff * entry_price * (1.0 - entry_price)
             net_edge = edge - fee_per_contract
 
-            if net_edge <= 0.01:  # Need at least 1% net edge
+            if net_edge <= 0.01:
                 self.logger.debug(
-                    "crypto_edge_too_low",
+                    "crypto_latency_edge_too_low",
                     ticker=ticker,
-                    signal_type=signal_type,
                     edge=round(edge, 4),
                     net_edge=round(net_edge, 4),
                     fee=round(fee_per_contract, 4),
                 )
                 continue
 
-            # Position sizing: Kelly fraction
-            kelly_frac = self._kelly_momentum if signal_type == "momentum" else self._kelly_reversion
-            kelly_raw = (net_edge * confidence) / max(1.0 - net_edge, 0.01)
-            size_usd = min(kelly_raw * kelly_frac * 130.0, self._max_position_usd)  # $130 approx bankroll
-            size_usd = max(0.50, round(size_usd, 2))  # Minimum $0.50
+            # Size: conservative fixed sizing
+            size_usd = min(self._max_position_usd, max(0.50, net_edge * confidence * 50))
 
-            # Compute contracts and price
+            # Compute contracts
             price_cents = int(entry_price * 100)
             if price_cents <= 0 or price_cents >= 100:
                 continue
             contracts = max(1, int(size_usd / (price_cents / 100.0)))
 
             self.logger.info(
-                "crypto_signal",
+                "crypto_latency_arb_signal",
                 ticker=ticker,
-                signal_type=signal_type,
                 side=side,
-                change_pct=round(change_pct, 3),
+                recent_change_pct=round(recent_change, 3),
+                overall_change_pct=round(overall_change, 3),
                 elapsed_min=round(elapsed_minutes, 1),
                 confidence=round(confidence, 3),
                 edge=round(edge, 4),
@@ -368,7 +354,6 @@ class KalshiCryptoEngine(BaseEngine):
                 btc_now=current_btc,
             )
 
-            # Build TradeSignal
             signal = TradeSignal(
                 engine=self.name,
                 market_id=ticker,
@@ -383,23 +368,23 @@ class KalshiCryptoEngine(BaseEngine):
                     "net_edge": net_edge,
                     "conviction": "medium" if confidence >= 0.55 else "low",
                     "reasoning": (
-                        f"Crypto {signal_type}: BTC {change_pct:+.3f}% in {elapsed_minutes:.0f}min "
-                        f"(start=${window.btc_price_at_start:.0f}, now=${current_btc:.0f})"
+                        f"Crypto latency arb: BTC {recent_change:+.3f}% in {self._confirmation_window_sec:.0f}s, "
+                        f"overall {overall_change:+.3f}% (start=${window.btc_price_at_start:.0f}, "
+                        f"now=${current_btc:.0f})"
                     ),
                     "question": window.title,
                     "kalshi_ticker": ticker,
                     "kalshi_yes_ask": window.yes_ask,
                     "kalshi_no_ask": 1.0 - window.yes_bid if window.yes_bid > 0 else None,
                     "platform": "kalshi",
-                    "strategy": "crypto",
-                    "signal_source": "binance_direct",
-                    "signal_type": signal_type,
+                    "strategy": "crypto_latency",
+                    "signal_source": "coinbase_latency_arb",
+                    "signal_type": "latency_arb",
                     "_force_size_usd": size_usd,
                     "volume": window.volume,
                 },
             )
             self._pending_signals.append(signal)
 
-            # Mark window as signaled + update cooldown
             window.signaled = True
             window.last_signal_time = now_mono

@@ -86,6 +86,12 @@ _JUNK_TICKER_PREFIXES = [
     "KXGOVTSHUTDOWN",   # Government shutdown — 0W/1L -$1.69
     "KXNURSESTRIKE",    # Labor action — unpredictable
     "KXTOPMODEL",       # Entertainment — 0W/2L -$3.30
+    # Wave 33: MM engine churning on dead markets — 3,886 orders on KXTRUMPSAY for 2 fills
+    "KXTRUMPSAY",       # "Trump says X" word markets — unpredictable speech, zero fills
+    "KXSTARMERMENTIONB", # UK PM mention — no data edge
+    "KXNYCMAYORDEBATEMENTION",  # NYC debate mentions — no data edge
+    "KXAPRPOTUS",       # Presidential approval — no data fast-path
+    "KXTSAW",           # TSA checkpoint — no live data feed
 ]
 
 

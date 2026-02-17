@@ -44,10 +44,11 @@ _URGENCY_BONUS: Dict[str, float] = {
 }
 
 _ENGINE_PRIORITY: Dict[str, float] = {
+    "kalshi_cross_arb": 0.95,   # Cross-platform arb — Polymarket price signal
     "kalshi_bracket_arb": 0.9,  # Structural arb — near-certain profit
     "kalshi_bonding": 0.8,      # Data-verified — NOAA/FRED backed
     "kalshi_longshot": 0.75,    # Statistical bias — favorite-longshot
-    "kalshi_crypto": 0.7,
+    "kalshi_crypto": 0.7,       # Latency arb — Coinbase price feed
     "kalshi_contrarian": 0.6,
     "kalshi_llm": 0.5,
     "kalshi_mm": 0.4,
@@ -55,7 +56,8 @@ _ENGINE_PRIORITY: Dict[str, float] = {
 
 # Engines whose signals route to Kalshi executor
 _KALSHI_ENGINES = {"kalshi_llm", "kalshi_mm", "kalshi_contrarian", "kalshi_crypto",
-                   "kalshi_bracket_arb", "kalshi_bonding", "kalshi_longshot"}
+                   "kalshi_bracket_arb", "kalshi_bonding", "kalshi_longshot",
+                   "kalshi_cross_arb"}
 
 
 def _extract_event_prefix(ticker: str) -> str:
@@ -477,8 +479,12 @@ class Orchestrator:
                 score += 0.20
 
             # Crypto boost: time-sensitive 15-min windows need fast execution
-            if s.metadata.get("strategy") == "crypto":
+            if s.metadata.get("strategy") in ("crypto", "crypto_latency"):
                 score += 0.25
+
+            # Cross-arb boost: structural edge from price divergence
+            if s.metadata.get("strategy") == "cross_arb":
+                score += 0.30
 
             return score
 

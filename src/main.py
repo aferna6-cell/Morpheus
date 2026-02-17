@@ -293,6 +293,17 @@ async def run(
                 engines.append(longshot_engine)
                 logger.info("kalshi_longshot_seller_initialized")
 
+            # Cross-platform arbitrage engine (Polymarket → Kalshi price signals)
+            cross_arb_cfg = getattr(config, "cross_arb", None) or {}
+            if isinstance(cross_arb_cfg, dict) and cross_arb_cfg.get("enabled", False):
+                from .engines.kalshi_cross_arb_engine import KalshiCrossArbEngine
+                cross_arb_engine = KalshiCrossArbEngine(
+                    config=config,
+                    kalshi_client=kalshi_read,
+                )
+                engines.append(cross_arb_engine)
+                logger.info("kalshi_cross_arb_engine_initialized")
+
             # Wire resume callback: when a halted account resumes, trigger engine rescans
             _engines_for_rescan = list(engines)
             def _on_account_resume():

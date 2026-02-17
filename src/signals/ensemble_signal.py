@@ -605,6 +605,19 @@ class EnsembleSignal(Signal):
                         else:
                             side = TradingSide.HOLD
 
+                        # Wave 33: Block buy_yes on economics fast-paths.
+                        # buy_yes is 8W/38L -$13.20 overall. Only index
+                        # buy_yes is profitable. Economics buy_yes has no
+                        # proven track record.
+                        if side == TradingSide.BUY_YES:
+                            self.logger.info(
+                                "econ_buy_yes_blocked",
+                                market_id=market.id,
+                                raw_edge=round(raw_edge, 4),
+                                reason="Wave 33: buy_yes blocked on economics",
+                            )
+                            return self._hold(market, "Economics buy_yes blocked (Wave 33)")
+
                         if side != TradingSide.HOLD:
                             entry_cost = market_price if side == TradingSide.BUY_YES else (1.0 - market_price)
                             payout_ratio = (1.0 - entry_cost) / entry_cost if entry_cost > 0 else 0
@@ -727,6 +740,16 @@ class EnsembleSignal(Signal):
                                 side = TradingSide.BUY_NO
                             else:
                                 side = TradingSide.HOLD
+
+                            # Wave 33: Block buy_yes on econ release path
+                            if side == TradingSide.BUY_YES:
+                                self.logger.info(
+                                    "econ_release_buy_yes_blocked",
+                                    market_id=market.id,
+                                    raw_edge=round(raw_edge, 4),
+                                    reason="Wave 33: buy_yes blocked on economics",
+                                )
+                                return self._hold(market, "Econ release buy_yes blocked (Wave 33)")
 
                             conviction = "high" if net_edge >= 0.10 else "medium"
                             reasoning = (
@@ -1183,30 +1206,29 @@ class EnsembleSignal(Signal):
             else:
                 side = TradingSide.HOLD
 
-            # Direction-dependent edge gating (Whelan 300K + Becker 72.1M trades):
-            # - YES side is systematically overpriced (optimism tax)
-            # - Makers buying NO earn +1.25% vs +0.77% for YES
-            # - Longshot YES (<30c) lose 60%+ of investment
-            #
-            # Wave 21: buy_yes needs 15% min edge (was 10%, still 21% WR -$17.97)
-            # Wave 20: add longshot premium + NO-side discount
+            # Wave 33: Block LLM buy_yes ENTIRELY.
+            # Data (Feb 10-16): buy_yes 8W/38L (17.4% WR), -$13.20.
+            # Even with 25-30% min edge thresholds (Wave 21-22), buy_yes
+            # consistently loses. Edge claims on losing trades are HIGHER
+            # than winners (calibration broken). Only index buy_yes works
+            # (100% WR via yahoo_direct fast-path, which returns before
+            # reaching this code). Weather buy_yes already blocked above.
             if side == TradingSide.BUY_YES:
-                yes_min_edge = 0.25  # Wave 22: 20% WR → need massive edge (was 0.15)
-                # Longshot premium: cheap YES contracts are the biggest
-                # money pit in prediction markets (Whelan: lose 60%+)
-                # Check deep longshots first (order matters!)
-                if market_price < 0.20:
-                    yes_min_edge = 0.30  # 30% for deep longshots (was 0.20)
-                elif market_price < 0.30:
-                    yes_min_edge = 0.25  # 25% for longshots (was 0.15)
-                if net_edge < yes_min_edge:
-                    result = self._hold(
-                        market,
-                        f"buy_yes edge {net_edge:.3f} below {yes_min_edge:.0%} "
-                        f"(YES bias + longshot filter, mkt={market_price:.2f})",
-                    )
-                    self._cache.put(ck, result)
-                    return result
+                self.logger.info(
+                    "llm_buy_yes_blocked",
+                    market_id=market.id,
+                    raw_edge=round(raw_edge, 4),
+                    net_edge=round(net_edge, 4),
+                    market_price=round(market_price, 3),
+                    reason="Wave 33: LLM buy_yes 8W/38L -$13.20, blocked",
+                )
+                result = self._hold(
+                    market,
+                    f"LLM buy_yes blocked (Wave 33: 17% WR, -$13.20). "
+                    f"net_edge={net_edge:.3f}, mkt={market_price:.2f}",
+                )
+                self._cache.put(ck, result)
+                return result
             elif side == TradingSide.BUY_NO:
                 # NO-side discount: buying NO is structurally advantaged
                 # (Becker 72.1M trades: makers buying NO earn +1.25% excess return)

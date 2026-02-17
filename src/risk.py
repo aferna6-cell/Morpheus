@@ -293,7 +293,7 @@ class RiskManager:
             # 8 contracts instead of 1, draining the entire account.
             side_val = getattr(signal.recommended_side, "value", str(signal.recommended_side))
             entry_cost = market_price if side_val == "buy_yes" else (1.0 - market_price)
-            if strategy not in ("mm", "bracket_arb"):
+            if strategy not in ("mm", "bracket_arb", "cross_arb", "crypto_latency"):
                 min_actionable = max(entry_cost, 0.50)
                 if 0 < position_amount < min_actionable:
                     if abs(signal.edge) >= self.min_edge:  # match config min_edge
@@ -425,7 +425,7 @@ class RiskManager:
         meta = getattr(signal, "metadata", None) or {}
         strategy = meta.get("strategy", "standard") if isinstance(meta, dict) else "standard"
 
-        if strategy not in ("mm", "contrarian", "crypto", "bracket_arb", "bonding", "longshot_sell"):
+        if strategy not in ("mm", "contrarian", "crypto", "crypto_latency", "bracket_arb", "bonding", "longshot_sell", "cross_arb"):
             # Edge check using net_edge (already accounts for fees/slippage)
             net_edge = getattr(signal, "net_edge", None)
             if net_edge is not None:

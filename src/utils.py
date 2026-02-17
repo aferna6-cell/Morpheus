@@ -112,6 +112,9 @@ class BotConfig(BaseModel):
     # Longshot seller (favorite-longshot bias exploitation)
     longshot_seller: Dict[str, Any] = Field(default_factory=dict)
 
+    # Cross-platform arbitrage (Polymarket → Kalshi price signals)
+    cross_arb: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,

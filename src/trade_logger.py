@@ -21,6 +21,11 @@ class TradeLogger:
         self.log_path = Path(log_path or "state/trade_history.jsonl")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.logger = structlog.get_logger()
+        # Wave 33: Dedup set for position_closed events.
+        # Prevents duplicate PnL logging when positions briefly disappear
+        # from API then reappear (transient glitch). Key: (account, ticker).
+        self._recent_closes: Dict[str, float] = {}  # key -> timestamp
+        self._CLOSE_DEDUP_WINDOW = 300  # 5 min dedup window
 
     def _write(self, record: Dict[str, Any]) -> None:
         """Append a record to the JSONL file."""
@@ -129,7 +134,33 @@ class TradeLogger:
         pnl_usd: float,
         account_label: Optional[str] = None,
     ) -> None:
-        """Log a position closure with P&L."""
+        """Log a position closure with P&L (with dedup)."""
+        import time
+        now = time.monotonic()
+
+        # Wave 33: Dedup — skip if same (account, ticker) closed within window.
+        # Prevents phantom PnL from transient API glitches where positions
+        # briefly disappear then reappear. Research found 179 duplicate
+        # records inflating PnL by ~$1,070.
+        dedup_key = f"{account_label}:{ticker}"
+        last_close = self._recent_closes.get(dedup_key)
+        if last_close is not None and (now - last_close) < self._CLOSE_DEDUP_WINDOW:
+            self.logger.warning(
+                "position_closed_dedup_skip",
+                ticker=ticker,
+                account=account_label,
+                pnl_usd=pnl_usd,
+                seconds_since_last=round(now - last_close, 1),
+            )
+            return
+
+        # Prune old entries (> 10 min)
+        stale = [k for k, t in self._recent_closes.items() if now - t > 600]
+        for k in stale:
+            del self._recent_closes[k]
+
+        self._recent_closes[dedup_key] = now
+
         self._write({
             "event": "position_closed",
             "platform": platform,
