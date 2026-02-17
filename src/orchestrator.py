@@ -12,6 +12,7 @@ async loop that drains every engine on each cycle.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -120,6 +121,15 @@ class Orchestrator:
         # Event-level dedup: track (event_prefix, side) to prevent correlated trades
         # e.g., buying NO on 5 different BTC threshold tickers simultaneously
         self._event_dispatched: Dict[str, int] = {}  # event_prefix -> count
+
+        # Wave 35: Stop-loss re-entry cooldown.
+        # When a position exits (pruned from _dispatched), block re-entry for
+        # 30 minutes to prevent enter→stop-loss→re-enter death loops.
+        # Tracks BOTH exact tickers AND event prefixes (so KXINXU-26FEB17H1600-T6749
+        # exit also blocks KXINXU-26FEB17H1600-T6774 re-entry).
+        self._exit_cooldown: Dict[str, float] = {}  # ticker -> monotonic time
+        self._event_cooldown: Dict[str, float] = {}  # event_prefix -> monotonic time
+        self._exit_cooldown_seconds = 1800.0  # 30 minutes
         self._max_per_event = int(
             getattr(config, "market_filters", {}).get("max_per_correlation_cluster", 2)
             if isinstance(getattr(config, "market_filters", None), dict) else 2
@@ -281,13 +291,44 @@ class Orchestrator:
         # resolved markets (opportunity starvation).
         stale = {key for key in self._dispatched if key[0] not in held_tickers}
         if stale:
+            # Wave 35: Record pruned tickers + event prefixes in cooldown
+            # to prevent re-entry after stop-loss (enter→SL→re-enter death loop).
+            now_mono = time.monotonic()
+            for key in stale:
+                ticker = key[0]
+                self._exit_cooldown[ticker] = now_mono
+                ep = _extract_event_prefix(ticker)
+                self._event_cooldown[ep] = now_mono
             self._dispatched -= stale
             self.logger.debug("dispatched_pruned", count=len(stale))
+
+        # Expire old cooldowns
+        now_mono = time.monotonic()
+        for cd in (self._exit_cooldown, self._event_cooldown):
+            expired = [k for k, ts in cd.items()
+                       if now_mono - ts > self._exit_cooldown_seconds]
+            for k in expired:
+                del cd[k]
 
         # Reset event dispatch tracker to match actual held positions.
         # Direct assignment instead of max() merge — when positions resolve,
         # the counter must go down so new entries are allowed.
         self._event_dispatched = dict(held_event_counts)
+
+        # Wave 35: Detect halt→resume transitions and clear stale dedup.
+        # After a daily-loss halt lifts, stale _event_dispatched counts from
+        # pre-halt could block valid trades on the new day.
+        is_halted = self.risk_manager.trading_halted
+        if hasattr(self, "_was_halted") and self._was_halted and not is_halted:
+            self._dispatched.clear()
+            self._event_dispatched.clear()
+            # Don't clear cooldowns — stop-loss protection should survive halt
+            self.logger.info("dedup_reset_after_halt_resume")
+        self._was_halted = is_halted
+
+        # Wave 35: Track exposure added this cycle so later dispatches
+        # account for earlier (not yet reflected in get_positions()).
+        self._cycle_pending_exposure: Dict[str, float] = {}
 
         # 5. Execute top N within risk limits
         executed = 0
@@ -333,11 +374,36 @@ class Orchestrator:
                     )
                     continue
 
+            # Extract event prefix early — used by both cooldown and event dedup.
+            event_prefix = _extract_event_prefix(signal.market_id)
+
+            # Wave 35: Stop-loss re-entry cooldown.
+            # After a position exits (SL or any exit), block re-entry for
+            # 30 minutes to prevent enter→stop-loss→re-enter death loops.
+            # Checks BOTH exact ticker AND event prefix (blocks re-entry on
+            # different thresholds of same event, e.g. KXINXU T6749→T6774).
+            # Exempt bracket_arb (arb legs are independent of stop-losses).
+            strategy = signal.metadata.get("strategy", "")
+            if strategy != "bracket_arb":
+                cooldown_ticker = self._exit_cooldown.get(signal.market_id)
+                cooldown_event = self._event_cooldown.get(event_prefix)
+                cooldown_ts = max(cooldown_ticker or 0, cooldown_event or 0)
+                if cooldown_ts > 0:
+                    remaining = self._exit_cooldown_seconds - (time.monotonic() - cooldown_ts)
+                    if remaining > 0:
+                        self.logger.info(
+                            "dispatch_cooldown_skip",
+                            market_id=signal.market_id,
+                            engine=signal.engine,
+                            event_prefix=event_prefix,
+                            cooldown_remaining_min=round(remaining / 60, 1),
+                        )
+                        continue
+
             # Event-level dedup: prevent correlated trades
             # (e.g., NO on 5 different BTC threshold tickers)
             # Weather markets get a higher limit (3 vs 2) because each city-date
             # can have a threshold + bracket that are independent bets.
-            event_prefix = _extract_event_prefix(signal.market_id)
             event_count = self._event_dispatched.get(event_prefix, 0)
             is_weather_event = any(
                 event_prefix.startswith(p)
@@ -361,6 +427,11 @@ class Orchestrator:
                     self._dispatched.add(dedup_key)
                     # Track event-level for correlation limiting
                     self._event_dispatched[event_prefix] = self._event_dispatched.get(event_prefix, 0) + 1
+
+                    # Wave 35: Track cycle-level pending exposure
+                    intended_exp = trade.intended_contracts * (trade.price_cents / 100.0)
+                    if intended_exp > 0:
+                        self._cycle_pending_exposure[trade.ticker] = intended_exp
 
                     # Register position with capital manager for recycling/CLV tracking
                     if self._capital_manager:
@@ -660,6 +731,12 @@ class Orchestrator:
                 except Exception:
                     self.logger.warning("exposure_fetch_failed_skip_signal", label=label, market_id=signal.market_id)
                     continue  # Skip this signal — don't size with empty exposure
+
+                # Wave 35: Inject pending exposure from earlier dispatches
+                # in this cycle (not yet reflected in get_positions).
+                for pticker, pexp in self._cycle_pending_exposure.items():
+                    if pticker not in exposure:
+                        exposure[pticker] = pexp
 
                 # Correlation guard: block if too much exposure on same event
                 if not self.risk_manager.check_event_correlation(signal.market_id, exposure):

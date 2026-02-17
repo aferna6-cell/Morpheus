@@ -3533,7 +3533,10 @@ async def compute_stock_index_probability(
     z_score = abs(current_price - threshold) / sigma_remaining if sigma_remaining > 0 else 0
     # Crypto needs higher z-gate due to higher volatility and model uncertainty
     is_crypto = config.get("trading_hours", 6.5) >= 24.0
-    min_z = 0.5  # Uniform z-gate: 0.3 was too permissive, took marginal index trades
+    # Wave 35: Raised from 0.5 to 1.5. At 0.5, bot took marginal trades near
+    # threshold (e.g., S&P at 6748 vs 6750 threshold) → repeated stop-losses.
+    # Bracket markets already require z_from_edge >= 1.5; threshold should match.
+    min_z = 1.5
     if z_score < min_z:
         logger.info(
             "stock_index_ambiguous",
