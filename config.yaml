@@ -2,7 +2,7 @@
 # ~$6.56 capital (2 accounts), same-day markets only
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding", "kalshi_crypto"]  # Wave 33: disabled cross_arb — fuzzy matching produces bogus signals on bracket/threshold markets
+  enabled_strategies: ["kalshi_llm", "kalshi_mm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 33: disabled cross_arb + crypto (KXBTC15M blocked, no edge)
   min_edge: 0.05                    # 5% minimum edge (aligned with ensemble defaults)
   kelly_fraction: 0.50              # half-Kelly (was third)
   max_position_pct: 0.08            # 8% of bankroll cap (was 5%)
@@ -334,7 +334,7 @@ bonding:
 # Reads public Polymarket CLOB API prices, compares to Kalshi orderbooks.
 # When same event diverges > threshold, trade Kalshi side.
 cross_arb:
-  enabled: true
+  enabled: false  # Wave 33: DISABLED — compares Polymarket binary to Kalshi threshold markets (different questions)
   scan_interval_seconds: 30          # check every 30s for price divergence
   min_divergence_pct: 3.0            # 3% after fees (Kalshi maker = 0, Poly = 2% on winnings)
   max_position_usd: 10.0             # $10 max per cross-arb trade

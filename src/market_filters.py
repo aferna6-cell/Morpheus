@@ -92,6 +92,8 @@ _JUNK_TICKER_PREFIXES = [
     "KXNYCMAYORDEBATEMENTION",  # NYC debate mentions — no data edge
     "KXAPRPOTUS",       # Presidential approval — no data fast-path
     "KXTSAW",           # TSA checkpoint — no live data feed
+    # Wave 33: FED rate markets — resolve in 2027, cross_arb bought $40+ worth
+    "KXFED",            # Fed rate thresholds — year-long, ties up all capital
 ]
 
 
