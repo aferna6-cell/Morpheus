@@ -203,7 +203,7 @@ async def run(
 
             # Market making engine (zero maker fees)
             mm_cfg = getattr(config, "market_making", None) or {}
-            if isinstance(mm_cfg, dict) and mm_cfg.get("enabled", False):
+            if isinstance(mm_cfg, dict) and mm_cfg.get("enabled", False) and "kalshi_mm" in enabled:
                 from .engines.kalshi_mm_engine import KalshiMMEngine
                 mm_engine = KalshiMMEngine(
                     config=config,
@@ -250,7 +250,7 @@ async def run(
 
             # Bracket arbitrage engine (risk-free bracket set mispricings)
             arb_cfg = getattr(config, "bracket_arb", None) or {}
-            if isinstance(arb_cfg, dict) and arb_cfg.get("enabled", False):
+            if isinstance(arb_cfg, dict) and arb_cfg.get("enabled", False) and "kalshi_bracket_arb" in enabled:
                 from .engines.kalshi_bracket_arb_engine import KalshiBracketArbEngine
                 bracket_arb_engine = KalshiBracketArbEngine(
                     config=config,
@@ -273,7 +273,7 @@ async def run(
 
             # Bonding engine (near-certain outcome harvesting, bond-like returns)
             bonding_cfg = getattr(config, "bonding", None) or {}
-            if isinstance(bonding_cfg, dict) and bonding_cfg.get("enabled", False):
+            if isinstance(bonding_cfg, dict) and bonding_cfg.get("enabled", False) and "kalshi_bonding" in enabled:
                 from .engines.kalshi_bonding_engine import KalshiBondingEngine
                 bonding_engine = KalshiBondingEngine(
                     config=config,
@@ -284,7 +284,7 @@ async def run(
 
             # Longshot seller engine — exploit favorite-longshot bias
             ls_cfg = getattr(config, "longshot_seller", None) or {}
-            if isinstance(ls_cfg, dict) and ls_cfg.get("enabled", False):
+            if isinstance(ls_cfg, dict) and ls_cfg.get("enabled", False) and "kalshi_longshot" in enabled:
                 from .engines.kalshi_longshot_seller import KalshiLongshotSeller
                 longshot_engine = KalshiLongshotSeller(
                     config=config,
@@ -295,7 +295,7 @@ async def run(
 
             # Cross-platform arbitrage engine (Polymarket → Kalshi price signals)
             cross_arb_cfg = getattr(config, "cross_arb", None) or {}
-            if isinstance(cross_arb_cfg, dict) and cross_arb_cfg.get("enabled", False):
+            if isinstance(cross_arb_cfg, dict) and cross_arb_cfg.get("enabled", False) and "kalshi_cross_arb" in enabled:
                 from .engines.kalshi_cross_arb_engine import KalshiCrossArbEngine
                 cross_arb_engine = KalshiCrossArbEngine(
                     config=config,
@@ -311,6 +311,17 @@ async def run(
                     if hasattr(eng, "trigger_rescan"):
                         eng.trigger_rescan()
             position_monitor.on_resume(_on_account_resume)
+
+            # Defense-in-depth: drop any engine not in enabled_strategies.
+            # Individual engine checks above SHOULD prevent this, but the
+            # cross_arb incident (Wave 33, $49 lost) proved a single gate
+            # is not enough — config.enabled can be True while the engine
+            # is absent from enabled_strategies.
+            before_count = len(engines)
+            engines = [e for e in engines if e.name in enabled]
+            if len(engines) < before_count:
+                dropped = before_count - len(engines)
+                logger.warning("engines_dropped_by_enabled_strategies_gate", dropped=dropped, allowed=enabled)
 
             logger.info("kalshi_setup_complete", executors=len(kalshi_executors), engines=[e.name for e in engines])
         except Exception as exc:
