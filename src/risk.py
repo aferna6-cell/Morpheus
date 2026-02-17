@@ -339,9 +339,9 @@ class RiskManager:
             # cash, not a soft exposure limit.  Large existing positions (e.g.
             # 4096-contract penny bets) can exhaust the exposure cap while the
             # account still has deployable cash.  Allow arb/bonding/mm signals
-            # to trade up to 80% of available cash in that case.
+            # to trade up to 95% of available cash in that case.
             if position_amount <= 0 and forced_size is not None and forced_size > 0:
-                cash_limit = available_capital * 0.80
+                cash_limit = available_capital * 0.95
                 if cash_limit >= 0.05:  # at least 5c (one cheap contract)
                     position_amount = min(forced_size, cash_limit, effective_max)
                     self.logger.info(
@@ -357,7 +357,7 @@ class RiskManager:
 
             # When cash-override is active, assess risk relative to cash
             # (not the exceeded exposure cap).  The position was already
-            # sized within 80% of available cash — it's safe.
+            # sized within 95% of available cash — it's safe.
             cash_override_active = (
                 remaining_exposure < 0
                 and forced_size is not None
