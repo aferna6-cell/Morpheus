@@ -304,6 +304,17 @@ async def run(
                 engines.append(cross_arb_engine)
                 logger.info("kalshi_cross_arb_engine_initialized")
 
+            # Order flow engine (VPIN-based informed money detection)
+            orderflow_cfg = getattr(config, "orderflow", None) or {}
+            if isinstance(orderflow_cfg, dict) and orderflow_cfg.get("enabled", False) and "kalshi_orderflow" in enabled:
+                from .engines.kalshi_orderflow_engine import KalshiOrderFlowEngine
+                orderflow_engine = KalshiOrderFlowEngine(
+                    config=config,
+                    kalshi_client=kalshi_read,
+                )
+                engines.append(orderflow_engine)
+                logger.info("kalshi_orderflow_engine_initialized")
+
             # Wire resume callback: when a halted account resumes, trigger engine rescans
             _engines_for_rescan = list(engines)
             def _on_account_resume():

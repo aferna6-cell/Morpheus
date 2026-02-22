@@ -2,7 +2,7 @@
 # Wave 34: Micro-capital rebuild mode (~$20 capital)
 
 strategy:
-  enabled_strategies: ["kalshi_llm", "kalshi_bracket_arb", "kalshi_bonding"]  # Wave 34: dropped MM (needs capital depth), kept LLM for free weather fast-paths
+  enabled_strategies: ["kalshi_llm", "kalshi_bracket_arb", "kalshi_bonding", "kalshi_orderflow"]  # Wave 36: added orderflow (VPIN)
   min_edge: 0.04                    # 4% minimum edge — take more trades at small size
   kelly_fraction: 0.33              # third-Kelly — conservative rebuild
   max_position_pct: 0.12            # 12% of bankroll cap — $20 * 12% = $2.40
@@ -357,6 +357,23 @@ longshot_seller:
   max_positions: 5                 # max 5 longshot sells active
   max_per_trade_usd: 2.0           # conservative $2 per trade
   min_profit_pct: 0.03             # 3% minimum return per trade
+
+# Wave 36: Order flow engine — VPIN-based informed money detection
+# Monitors Kalshi public trade tape for volume-synchronized imbalances.
+# When taker flow heavily skews YES or NO, follows the informed money.
+# Zero LLM cost — purely data-driven from the trade tape.
+orderflow:
+  enabled: true
+  scan_interval_seconds: 60          # 1 min between full scans
+  bucket_size: 50                    # contracts per VPIN bucket
+  n_buckets: 20                      # rolling window of 20 buckets = 1000 contracts
+  min_vpin: 0.60                     # minimum VPIN to consider (0-1 scale)
+  min_z_score: 2.0                   # z-score above baseline VPIN mean
+  min_volume: 200                    # skip thin markets (< 200 contracts/24h)
+  signal_cooldown_seconds: 600       # 10 min cooldown per market after signal
+  max_signals_per_cycle: 3           # max 3 signals per scan cycle
+  min_confidence: 0.55               # base confidence for orderflow signals
+  max_hours_to_close: 24             # same-day only
 
 # Compatibility
 bregman_arb: {}

@@ -115,6 +115,9 @@ class BotConfig(BaseModel):
     # Cross-platform arbitrage (Polymarket → Kalshi price signals)
     cross_arb: Dict[str, Any] = Field(default_factory=dict)
 
+    # Order flow engine (VPIN-based informed money detection)
+    orderflow: Dict[str, Any] = Field(default_factory=dict)
+
 
 def setup_logging(
     config: BotConfig,

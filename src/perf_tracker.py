@@ -157,7 +157,12 @@ class PerfTracker:
         }
 
     def _read_trades(self, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """Read trade log entries."""
+        """Read trade log entries.
+
+        Wave 36 fix: field is ``logged_at`` not ``timestamp``.
+        Previous code silently read ALL history because the wrong
+        field name meant the ``since`` filter never fired.
+        """
         if not self._trade_log.exists():
             return []
 
@@ -171,7 +176,9 @@ class PerfTracker:
                     try:
                         entry = json.loads(line)
                         if since:
-                            ts_str = entry.get("timestamp", "")
+                            # Trade logger writes "logged_at"; fall back to
+                            # "timestamp" for any legacy entries.
+                            ts_str = entry.get("logged_at") or entry.get("timestamp", "")
                             if ts_str:
                                 try:
                                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))

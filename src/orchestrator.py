@@ -402,14 +402,26 @@ class Orchestrator:
 
             # Event-level dedup: prevent correlated trades
             # (e.g., NO on 5 different BTC threshold tickers)
-            # Weather markets get a higher limit (3 vs 2) because each city-date
+            # Weather markets get a higher limit (3) because each city-date
             # can have a threshold + bracket that are independent bets.
+            # Index markets capped at 1 — Wave 36: Feb 17 audit showed 0W/4L
+            # (-$3.09) from 3 KXINXU trades at different thresholds all losing
+            # together on a volatile day. Different thresholds ≠ independent bets.
             event_count = self._event_dispatched.get(event_prefix, 0)
             is_weather_event = any(
                 event_prefix.startswith(p)
                 for p in ("KXHIGH", "KXLOW", "KXRAIN", "KXSNOW", "KXTEMP", "KXWIND")
             )
-            max_event = 3 if is_weather_event else self._max_per_event
+            is_index_event = any(
+                event_prefix.startswith(p)
+                for p in ("KXINXU", "KXINX-", "KXNASDAQ100", "KXSPY", "KXQQQ")
+            )
+            if is_weather_event:
+                max_event = 3
+            elif is_index_event:
+                max_event = 1
+            else:
+                max_event = self._max_per_event
             if event_count >= max_event:
                 self.logger.info(
                     "dispatch_event_dedup_skip",

@@ -94,6 +94,18 @@ _JUNK_TICKER_PREFIXES = [
     "KXTSAW",           # TSA checkpoint — no live data feed
     # Wave 33: FED rate markets — resolve in 2027, cross_arb bought $40+ worth
     "KXFED",            # Fed rate thresholds — year-long, ties up all capital
+    # Wave 36: Catch-all mention/speech markets — unpredictable what people say
+    # Feb 17-22 audit: mention markets bled -$2.44 in stuck positions
+    "KXSTARMERMENTION",  # UK PM — all variants (KXSTARMERMENTIONB above catches one)
+    "KXMAYORMENTION",   # Mayor debate mentions
+    "KXDEBATEMENTION",  # Generic debate mentions
+    "KXPRESSMENTION",   # Press conference mentions
+    "KXSPEECHMENTION",  # Speech mentions
+    # Wave 36: Additional no-edge markets found in audit
+    "KXSOLE",           # SOL/E crypto — structural 0W/6L -$1.11
+    "KXGOV",            # Government action — no data fast-path (subsumes KXGOVTSHUTDOWN)
+    "KXTARIFF",         # Tariff decision/announcement — unpredictable policy
+    "KXALBUMSALES",     # Album sales — entertainment, no data edge
 ]
 
 
