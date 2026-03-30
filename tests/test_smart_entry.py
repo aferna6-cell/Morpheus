@@ -29,12 +29,11 @@ def smart_entry():
 def market_index():
     return {
         "ticker": "KXINXU-26MAR28-T5480",
-        "yes_bid": 62,
-        "yes_ask": 65,
-        "no_bid": 35,
-        "no_ask": 38,
-        "yes_price": 63,
-        "no_price": 37,
+        "yes_bid_dollars": 0.62,
+        "yes_ask_dollars": 0.65,
+        "no_bid_dollars": 0.35,
+        "no_ask_dollars": 0.38,
+        "last_price_dollars": 0.63,
         "market_type": "index",
     }
 
@@ -43,13 +42,13 @@ class TestLimitPricingLogic:
     def test_limit_price_calculated(self, smart_entry, market_index):
         """SmartEntry should calculate a limit price from market data."""
         from src.smart_entry import _compute_limit_price
-        # market_index values are in cents (62 = $0.62), convert to float for _compute_limit_price
+        # _dollars fields are already 0-1 scale
         price = _compute_limit_price(
             side="yes",
-            yes_bid=market_index["yes_bid"] / 100,
-            yes_ask=market_index["yes_ask"] / 100,
-            no_bid=market_index["no_bid"] / 100,
-            no_ask=market_index["no_ask"] / 100,
+            yes_bid=market_index["yes_bid_dollars"],
+            yes_ask=market_index["yes_ask_dollars"],
+            no_bid=market_index["no_bid_dollars"],
+            no_ask=market_index["no_ask_dollars"],
             confidence=0.70,
         )
         # Should be a positive integer in cents
@@ -84,10 +83,10 @@ class TestPaperModeExecution:
             "side": "yes",
             "quantity": 1,
             "confidence": 0.75,
-            "yes_bid": market_index["yes_bid"] / 100,
-            "yes_ask": market_index["yes_ask"] / 100,
-            "no_bid": market_index["no_bid"] / 100,
-            "no_ask": market_index["no_ask"] / 100,
+            "yes_bid": market_index["yes_bid_dollars"],
+            "yes_ask": market_index["yes_ask_dollars"],
+            "no_bid": market_index["no_bid_dollars"],
+            "no_ask": market_index["no_ask_dollars"],
         }
 
         result = await smart_entry.execute(signal_meta, mock_trading_client, minimal_config)
@@ -113,10 +112,10 @@ class TestLiveExecution:
             "side": "yes",
             "quantity": 1,
             "confidence": 0.75,
-            "yes_bid": market_index["yes_bid"] / 100,
-            "yes_ask": market_index["yes_ask"] / 100,
-            "no_bid": market_index["no_bid"] / 100,
-            "no_ask": market_index["no_ask"] / 100,
+            "yes_bid": market_index["yes_bid_dollars"],
+            "yes_ask": market_index["yes_ask_dollars"],
+            "no_bid": market_index["no_bid_dollars"],
+            "no_ask": market_index["no_ask_dollars"],
         }
 
         try:

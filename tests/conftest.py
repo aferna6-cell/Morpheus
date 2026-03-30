@@ -95,19 +95,19 @@ async def test_db(tmp_path):
 
 @pytest.fixture
 def sample_market_index():
-    """A sample index (SPY) market dict."""
+    """A sample index (SPY) market dict (new _dollars/_fp field schema)."""
     return {
         "ticker": "KXINXU-26MAR28-T5480",
         "event_ticker": "KXINXU-26MAR28",
         "title": "Will S&P 500 be above 5480 at close on March 28?",
-        "yes_bid": 62,
-        "yes_ask": 65,
-        "no_bid": 35,
-        "no_ask": 38,
-        "yes_price": 63,
-        "no_price": 37,
-        "volume": 5000,
-        "open_interest": 1200,
+        "yes_bid_dollars": 0.62,
+        "yes_ask_dollars": 0.65,
+        "no_bid_dollars": 0.35,
+        "no_ask_dollars": 0.38,
+        "last_price_dollars": 0.63,
+        "volume_fp": 5000.0,
+        "open_interest_fp": 1200.0,
+        "volume_24h_fp": 5000.0,
         "close_time": "2026-03-28T21:00:00Z",
         "status": "open",
         "market_type": "index",
@@ -116,19 +116,19 @@ def sample_market_index():
 
 @pytest.fixture
 def sample_market_weather():
-    """A sample weather market dict."""
+    """A sample weather market dict (new _dollars/_fp field schema)."""
     return {
         "ticker": "KXHIGHTEMP-NYC-26MAR28-B72",
         "event_ticker": "KXHIGHTEMP-NYC-26MAR28",
         "title": "Will NYC high temperature be above 72°F on March 28?",
-        "yes_bid": 30,
-        "yes_ask": 34,
-        "no_bid": 66,
-        "no_ask": 70,
-        "yes_price": 32,
-        "no_price": 68,
-        "volume": 1500,
-        "open_interest": 400,
+        "yes_bid_dollars": 0.30,
+        "yes_ask_dollars": 0.34,
+        "no_bid_dollars": 0.66,
+        "no_ask_dollars": 0.70,
+        "last_price_dollars": 0.32,
+        "volume_fp": 1500.0,
+        "open_interest_fp": 400.0,
+        "volume_24h_fp": 1500.0,
         "close_time": "2026-03-28T23:59:00Z",
         "status": "open",
         "market_type": "weather",
@@ -137,19 +137,19 @@ def sample_market_weather():
 
 @pytest.fixture
 def sample_market_bracket():
-    """A sample bracket market where the sum of all bracket YES asks is < 1.00."""
+    """A sample bracket market where the sum of all bracket YES asks is < 1.00 (new schema)."""
     return {
         "ticker": "KXHIGHTEMP-NYC-26MAR28-B68",
         "event_ticker": "KXHIGHTEMP-NYC-26MAR28",
         "title": "Will NYC high temperature be 68-70°F on March 28?",
-        "yes_bid": 18,
-        "yes_ask": 21,
-        "no_bid": 79,
-        "no_ask": 82,
-        "yes_price": 20,
-        "no_price": 80,
-        "volume": 800,
-        "open_interest": 200,
+        "yes_bid_dollars": 0.18,
+        "yes_ask_dollars": 0.21,
+        "no_bid_dollars": 0.79,
+        "no_ask_dollars": 0.82,
+        "last_price_dollars": 0.20,
+        "volume_fp": 800.0,
+        "open_interest_fp": 200.0,
+        "volume_24h_fp": 800.0,
         "close_time": "2026-03-28T23:59:00Z",
         "status": "open",
         "market_type": "weather",
@@ -159,19 +159,19 @@ def sample_market_bracket():
 
 @pytest.fixture
 def sample_market_bonding():
-    """A market priced at 95c YES — near-certainty for bonding engine."""
+    """A market priced at 95c YES — near-certainty for bonding engine (new schema)."""
     return {
         "ticker": "KXINXU-26MAR28-T3000",
         "event_ticker": "KXINXU-26MAR28",
         "title": "Will S&P 500 be above 3000 at close on March 28?",
-        "yes_bid": 94,
-        "yes_ask": 95,
-        "no_bid": 5,
-        "no_ask": 6,
-        "yes_price": 95,
-        "no_price": 5,
-        "volume": 2000,
-        "open_interest": 500,
+        "yes_bid_dollars": 0.94,
+        "yes_ask_dollars": 0.95,
+        "no_bid_dollars": 0.05,
+        "no_ask_dollars": 0.06,
+        "last_price_dollars": 0.95,
+        "volume_fp": 2000.0,
+        "open_interest_fp": 500.0,
+        "volume_24h_fp": 2000.0,
         "close_time": "2026-03-28T21:00:00Z",
         "status": "open",
         "market_type": "index",

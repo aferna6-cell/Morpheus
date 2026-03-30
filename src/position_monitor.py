@@ -375,9 +375,12 @@ class PositionMonitor:
             if r.status_code == 200:
                 data = r.json()
                 m = data.get("market", data)
-                yb = (m.get("yes_bid") or 0) / 100.0
-                ya = (m.get("yes_ask") or 0) / 100.0
-                lp = (m.get("last_price") or 0) / 100.0
+                # Try new _dollars fields (already 0-1), fall back to old cent fields
+                _uses_dollars = "yes_bid_dollars" in m or "yes_ask_dollars" in m
+                _divisor = 1.0 if _uses_dollars else 100.0
+                yb = (m.get("yes_bid_dollars") or m.get("yes_bid") or 0) / _divisor
+                ya = (m.get("yes_ask_dollars") or m.get("yes_ask") or 0) / _divisor
+                lp = (m.get("last_price_dollars") or m.get("last_price") or 0) / _divisor
                 price = (yb + ya) / 2.0 if yb > 0 and ya > 0 else lp if lp > 0 else None
                 if price:
                     self._price_cache[ticker] = (now, price)

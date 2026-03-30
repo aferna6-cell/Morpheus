@@ -267,7 +267,7 @@ async def check_resolutions(
                 else:
                     # Check if settled by looking at final prices
                     # If settled, yes_price should be ~1.0 or ~0.0
-                    last_price = market_data.get("last_price", -1)
+                    last_price = market_data.get("last_price_dollars") or market_data.get("last_price", -1)
                     if isinstance(last_price, (int, float)):
                         # Kalshi prices in cents (0-100) or dollars (0-1)
                         price_val = last_price / 100.0 if last_price > 1 else last_price
