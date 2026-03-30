@@ -1,0 +1,24 @@
+[Unit]
+Description=Morpheus Trading Bot Watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/morpheus
+
+EnvironmentFile=/opt/morpheus/.env
+
+ExecStart=/opt/morpheus/.venv/bin/python -m src.healthcheck \
+    --state-dir /opt/morpheus/state \
+    --log-file /opt/morpheus/logs/morpheus.log \
+    --service morpheus
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=morpheus-watchdog
+
+[Install]
+WantedBy=multi-user.target

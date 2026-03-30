@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import signal
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -447,21 +449,74 @@ async def run(
     _resolution_task = asyncio.create_task(_resolution_loop())
     logger.info("resolution_tracker_started", interval_sec=900)
 
+    # Graceful shutdown: SIGTERM sets the event; orchestrator finishes its
+    # current cycle and exits cleanly.  Avoids SystemExit mid-coroutine.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    loop.add_signal_handler(signal.SIGINT, stop_event.set)
+
+    orchestrator_task = asyncio.create_task(orchestrator.run())
+    shutdown_watcher = asyncio.create_task(stop_event.wait())
+
     try:
-        await orchestrator.run()
+        await asyncio.wait(
+            [orchestrator_task, shutdown_watcher],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     finally:
+        shutdown_watcher.cancel()
+
+        # Graceful stop: let current cycle finish (up to 25s), then force-cancel.
+        orchestrator.stop()
+        try:
+            async with asyncio.timeout(25):
+                await orchestrator_task
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            orchestrator_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await orchestrator_task
+
+        # 1. Stop position monitor FIRST — prevents new exit orders being created.
+        if 'position_monitor' in dir():
+            with contextlib.suppress(Exception):
+                await position_monitor.stop()
+
+        # 2. Cancel all resting entry orders (not exit orders — those were
+        #    already killed with position_monitor).
+        if kalshi_executors:
+            logger.info("shutdown_cancelling_open_orders")
+            async with asyncio.timeout(10):
+                for executor in kalshi_executors:
+                    try:
+                        open_orders = await executor.trading_client.get_open_orders()
+                        for order in open_orders:
+                            await executor.trading_client.cancel_order(order.order_id)
+                            logger.info("shutdown_order_cancelled", order_id=order.order_id,
+                                        ticker=order.ticker)
+                    except Exception as exc:
+                        logger.warning("shutdown_cancel_orders_failed",
+                                       label=executor.trading_client.label, error=str(exc))
+
+        # 3. Stop fill manager.
+        if 'fill_manager' in dir():
+            with contextlib.suppress(Exception):
+                await fill_manager.stop()
+
+        # 4. Cancel resolution background task.
         if _resolution_task:
             _resolution_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await _resolution_task
-            except asyncio.CancelledError:
-                pass
+
+        # 5. Send shutdown alert (best-effort, bounded).
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(8):
+                await send_alert("Morpheus shutdown", config)
+
+        # 6. Stop remaining services.
         await perf_tracker.stop()
         await telegram_bot.stop()
-        if 'position_monitor' in dir():
-            await position_monitor.stop()
-        if 'fill_manager' in dir():
-            await fill_manager.stop()
         await orchestrator.stop_engines()
 
 

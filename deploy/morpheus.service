@@ -1,0 +1,43 @@
+[Unit]
+Description=Morpheus Kalshi Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/morpheus
+
+EnvironmentFile=/opt/morpheus/.env
+
+ExecStart=/opt/morpheus/.venv/bin/python -m src.main --state-dir /opt/morpheus/state --runs-dir /opt/morpheus/runs
+ExecStop=/bin/kill -TERM $MAINPID
+
+# Restart always — 24/7 trading requires auto-recovery from crashes.
+# Allow 5 restarts within 5 min before giving up (prevents infinite crash loops).
+Restart=always
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Graceful shutdown: allow 60s for in-flight orders to cancel before SIGKILL.
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/morpheus/state /opt/morpheus/logs /opt/morpheus/runs
+
+# Resource limits — 2G for 5-model LLM ensemble + async httpx
+MemoryMax=2G
+CPUQuota=150%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=morpheus
+
+[Install]
+WantedBy=multi-user.target

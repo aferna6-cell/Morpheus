@@ -12,6 +12,7 @@ set -euo pipefail
 DROPLET_IP="${1:?Usage: ./deploy.sh <droplet-ip> [--restart]}"
 RESTART="${2:-}"
 REMOTE_DIR="/opt/morpheus"
+BRANCH="merge/neo-integration"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 echo "==> Deploying Morpheus to ${DROPLET_IP}..."
@@ -37,9 +38,10 @@ mkdir -p ${REMOTE_DIR}
 if [ -d "${REMOTE_DIR}/.git" ]; then
     cd ${REMOTE_DIR}
     git fetch origin
-    git reset --hard origin/main 2>/dev/null || git reset --hard origin/master
+    git checkout ${BRANCH}
+    git reset --hard origin/${BRANCH}
 else
-    git clone git@github.com:aferna6-cell/Morpheus.git ${REMOTE_DIR}
+    git clone --branch ${BRANCH} https://github.com/aferna6-cell/Morpheus.git ${REMOTE_DIR}
     cd ${REMOTE_DIR}
 fi
 
@@ -55,10 +57,13 @@ fi
 # Create state directory
 mkdir -p state runs
 
-# Copy systemd service
-cp deploy/systemd/morpheus.service /etc/systemd/system/morpheus.service
+# Copy systemd services
+cp deploy/morpheus.service /etc/systemd/system/morpheus.service
+cp deploy/morpheus-watchdog.service /etc/systemd/system/morpheus-watchdog.service
+cp deploy/morpheus-watchdog.timer /etc/systemd/system/morpheus-watchdog.timer
 systemctl daemon-reload
 systemctl enable morpheus
+systemctl enable morpheus-watchdog.timer
 
 echo "==> Deploy complete on droplet"
 DEPLOY_SCRIPT
