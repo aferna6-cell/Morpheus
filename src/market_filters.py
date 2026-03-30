@@ -385,6 +385,19 @@ class MarketFilters:
         return FilterResult(passed=True, reason="all_checks_passed", market_id=market_id)
 
 
+def is_ticker_blocked(ticker: str) -> bool:
+    """Return True if the ticker matches any blocked prefix.
+
+    Convenience wrapper around the class-level blocklist for use in tests
+    and inline filter checks without instantiating MarketFilters.
+    """
+    ticker_upper = ticker.upper()
+    for prefix in _JUNK_TICKER_PREFIXES:
+        if ticker_upper.startswith(prefix.upper()):
+            return True
+    return False
+
+
 def count_data_sources(news_articles: List[dict]) -> int:
     """Count unique data sources from news articles.
 
