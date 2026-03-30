@@ -55,6 +55,7 @@ news_cache/
 .pytest_cache/
 .coverage
 htmlcov/
+*.db
 
 # OS
 .DS_Store

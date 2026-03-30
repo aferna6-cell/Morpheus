@@ -1,202 +1,219 @@
 # Morpheus
 
-Autonomous Polymarket trading bot (async Python) — **aggressive accuracy mode**.
+Autonomous **Kalshi** prediction market trading bot — async Python, production-hardened.
 
 *"I'm trying to free your mind, Neo. But I can only show you the door. You're the one that has to walk through it."*
 
-Swing hard on high-conviction plays, stay flat when edge isn't there.
+Trades binary YES/NO contracts on Kalshi using a multi-engine ensemble: LLM probability estimation, bracket arbitrage, bonding curve capture, and orderflow signals.
 
-## Architecture
+---
 
-- **Market discovery** via Polymarket Gamma API
-- **Execution** via Polymarket CLOB (py-clob-client)
-- **Strategies**: LLM probability edge + simple arbitrage checks
-- **Risk**: fractional Kelly sizing + conviction gating + exposure limits + daily loss halt
-- **24/7 hardening**: never crashes out, exponential backoff, heartbeat logging
-
-## Aggressive Accuracy Mode
-
-The bot only trades when it has genuine edge:
-
-1. **LLM outputs strict probability** (`p_yes`) — not vague sentiment
-2. **Net edge** = `|p_yes - market_price| - fees - slippage` — real edge after costs
-3. **Conviction levels**: LOW (2-5%), MEDIUM (5-10%), HIGH (10%+)
-4. **Only trades on MEDIUM or HIGH conviction** — no spray-and-pray
-5. **HIGH conviction → 2x position size** — swing hard when you're right
-6. **Market quality filters**: skip thin markets (<$10k liquidity), ambiguous questions
-
-### Position Sizing
-
-- **Half Kelly** (`kelly_fraction: 0.5`) — aggressive but not reckless
-- **Max position**: $5,000 (2x = $10,000 for HIGH conviction)
-- **Max exposure**: $25,000 total
-- **Linear confidence scaling** (removed conservative quadratic damping)
-
-### Prediction Tracking
-
-Every trade logs to `state/predictions.jsonl`:
-```json
-{"market_id": "...", "predicted_p_yes": 0.72, "market_price_at_entry": 0.55, "side": "buy_yes", "edge": 0.17, "net_edge": 0.145, "conviction": "high", "timestamp": "..."}
-```
-
-Use this to measure actual calibration over time.
-
-## Cost Optimization
-
-The bot includes two cost optimizations to reduce LLM API spend:
-
-### Two-Tier LLM Filtering
-
-Instead of running the expensive main model on every market, the bot uses a two-tier system:
-
-1. **Tier 1 — Screening (GPT-4o-mini):** A cheap, fast model receives the market question, current price, resolution date, and liquidity. It makes a quick YES/NO decision: "Is this market likely mispriced by >5%?" Markets that aren't worth evaluating are skipped immediately.
-
-2. **Tier 2 — Full Analysis (GPT-4o / configured model):** Only markets that pass tier-1 screening get the full probability analysis with news context, key facts extraction, uncertainty estimation, etc.
-
-This typically filters out 50-70% of markets at ~1/30th the cost per market.
-
-Config keys:
-- `llm.screening_enabled` — Enable/disable screening (default: `true`)
-- `llm.screening_model` — Model for tier 1 (default: `gpt-4o-mini`)
-
-### Result Caching
-
-LLM results are cached in-memory with a configurable TTL. The cache key includes the market ID, question, and price (rounded to nearest 0.02 so small price fluctuations don't bust the cache).
-
-Config keys:
-- `llm.cache_enabled` — Enable/disable caching (default: `true`)
-- `llm.cache_ttl_minutes` — Cache lifetime in minutes (default: `30`)
-
-Both optimizations log debug-level metrics (cache hits/misses, screening pass/reject) and a periodic summary each iteration.
-
-## Quickstart
-
-### 1) Install
+## Quick Start
 
 ```bash
-cd polymarket-bot
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
+# Install dependencies
+pip install -r requirements.txt
 
-### 2) Configure secrets
+# Copy and fill in API keys
+cp .env.example .env
+# Edit .env: KALSHI_KEY_PATH, OPENAI_API_KEY, ANTHROPIC_API_KEY, ...
 
-Create `.env`:
-
-```bash
-# Required
-POLYMARKET_PRIVATE_KEY=0x...
-POLYMARKET_FUNDER_ADDRESS=0x...
-POLYMARKET_SIGNATURE_TYPE=0
-OPENAI_API_KEY=sk-...
-
-# Optional: Telegram alerts
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_CHAT_ID=-100...
-```
-
-### 3) Run
-
-Single iteration (dry run):
-```bash
-python -m src.main --dry-run --once
-```
-
-24/7 continuous (dry run):
-```bash
+# Dry run (paper trading, no real orders)
 python -m src.main --dry-run
-```
 
-24/7 live trading:
-```bash
+# Single scan then exit
+python -m src.main --dry-run --once
+
+# Live trading
 python -m src.main
 ```
 
-## Config Reference (`config.yaml`)
-
-### Strategy (aggressive defaults)
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `kelly_fraction` | `0.5` | Fraction of Kelly criterion (half Kelly) |
-| `max_position_size` | `5000` | Max USD per position |
-| `max_total_exposure` | `25000` | Max total portfolio exposure |
-| `min_conviction` | `medium` | Minimum conviction to trade: none/low/medium/high |
-| `high_conviction_multiplier` | `2.0` | Position size multiplier for HIGH conviction |
-| `fee_pct` | `0.02` | Fee assumption for net edge calc (2%) |
-| `slippage_pct` | `0.005` | Slippage assumption (0.5%) |
-
-### Risk
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `max_loss_per_trade` | `500` | Max loss per trade |
-| `max_daily_loss` | `2000` | Daily loss halt threshold |
-| `stop_loss_pct` | `0.15` | Stop loss percentage |
-| `take_profit_pct` | `0.30` | Take profit percentage |
-
-### Market Filters
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `min_liquidity_aggressive` | `10000` | Reject markets with < $10k liquidity |
-| `min_volume_24h` | `5000` | Minimum 24h volume |
-
-## Run/ops flags
-
-| Flag | Description |
-|------|-------------|
-| `--once` | Single iteration then exit |
-| `--max-loops N` | Exit after N iterations |
-| `--no-llm` | Disable LLM strategy |
-| `--dry-run` | Simulate (no real orders) |
-| `--log-json` | Force JSON log output |
-| `--state-dir DIR` | Persistent state directory (default: `state/`) |
-| `--runs-dir DIR` | Run artifacts directory (default: `runs/`) |
-| `--replay DIR` | Replay from snapshot directory |
-
-## Alerts
-
-If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, the bot sends:
-- 💰 Trade execution alerts (side, amount, conviction, edge)
-- ⚠️ Error alerts (first 3 consecutive errors)
-- 🛑 Kill switch notification
-
-## Safety
-
 ### Kill switch
-```bash
-touch state/STOP_TRADING
-```
-
-### 24/7 Hardening
-- Main loop catches all exceptions, logs, and continues
-- Exponential backoff on repeated errors (5s → 300s)
-- Fatal errors: sleep 60s and restart the entire async loop
-- Heartbeat log every 10 iterations
-
-## Artifacts
-
-Each run creates:
-- `runs/<run_id>/markets_*.json` — market snapshots
-- `runs/<run_id>/decisions.jsonl` — trade/skip decisions
-- `state/predictions.jsonl` — prediction log for accuracy tracking
-
-## Deployment (systemd)
-
-Template at `deploy/systemd/polymarket-bot.service`.
 
 ```bash
-sudo cp deploy/systemd/polymarket-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now polymarket-bot
+touch state/STOP_TRADING    # halt all trading immediately
+rm state/STOP_TRADING       # resume
 ```
 
-## Notes
+---
 
-- Execution prefers limit orders with configurable slippage
-- Orders are reconciled (polled) — bot does not assume fills
-- Token mapping for BUY_YES/BUY_NO requires explicit Yes/No outcomes
-- Ensure token allowances are set before live trading
-- You are responsible for compliance with Polymarket terms and local laws
+## Architecture
+
+```
+Kalshi REST API
+  → Engines (LLM, bracket_arb, bonding, orderbook, rules, orderflow)
+    → Orchestrator (score, rank, deduplicate, multi-engine consensus)
+      → RiskPipeline (8-layer sequential validation + Kelly sizing)
+        → SmartEntry (limit → timeout → market fallback execution)
+          → SQLite DB (WAL mode, trades/positions/signals/CLV)
+            → REST API (FastAPI monitoring + admin control)
+```
+
+### Engines
+
+| Engine | Strategy |
+|--------|----------|
+| `kalshi_llm` | LLM ensemble (Claude Sonnet + GPT-4o) on same-day markets. Yahoo Finance fast-path for index — **zero LLM cost on index signals**. |
+| `kalshi_bracket_arb` | Buys the cheapest bracket leg when the sum of all YES asks is < 100c. |
+| `kalshi_bonding` | Captures near-certain contracts (≥ 93c YES or ≤ 7c NO) at premium. |
+| `kalshi_orderbook` | Orderbook imbalance (OBI > 0.3) as directional signal. |
+| `kalshi_rules` | Time-decay and price-consistency rules (no ML required). |
+| `kalshi_orderflow` | VPIN (Volume-Synchronized Probability of Informed Trading) for toxic flow detection. |
+
+### Risk Pipeline (8 layers)
+
+Each signal passes through all 8 layers sequentially. **Hard-coded ceilings cannot be overridden by config.**
+
+| Layer | Check | Hard Ceiling |
+|-------|-------|-------------|
+| 1 | Spread cost — net edge after Kalshi maker fee > 0 | — |
+| 2 | Volume/liquidity — min 1k 24h volume | — |
+| 3 | Confidence floor — per market type (politics = 70%) | 30% absolute minimum |
+| 4 | Net edge cents — configurable minimum | 1c absolute minimum |
+| 5 | Daily loss limit — halt when daily P&L < -limit | $500 absolute max daily loss |
+| 6 | Consecutive loss breaker — halve Kelly after N losses | — |
+| 7 | Drawdown / survival mode — reduce sizing in drawdown | — |
+| 8 | Exposure cap — total portfolio exposure check | $10,000 absolute max |
+
+### Execution (SmartEntry)
+
+1. **Limit order** placed 1–2c inside the spread (inside = better price than crossing)
+2. **5-minute timeout** — polls for fills every 10s
+3. **Market fallback** — cancel resting limit, fill remainder at market price
+4. **Paper mode** — simulates fill at mid-price, no real orders
+
+### Configuration
+
+All parameters are in `config.yaml`. Key sections:
+
+```yaml
+strategy:
+  kelly_fraction: 0.25        # Third-Kelly sizing
+  max_position_size: 10.0     # USD per trade
+  max_total_exposure: 50.0    # Total portfolio exposure
+  min_confidence: 0.60        # Minimum confidence to trade
+
+risk:
+  max_daily_loss: 10.0        # Halt if daily P&L < -$10
+  consecutive_loss_limit: 5   # Halve Kelly after 5 straight losses
+
+calibration:
+  index_platt_alpha: 0.90     # Platt scaling per market type
+  weather_platt_alpha: 0.83
+  default_platt_alpha: 0.68
+```
+
+---
+
+## Monitoring API
+
+The bot exposes a FastAPI REST API on port 8000. Requires `X-API-Key` header (set `MORPHEUS_API_KEY` in `.env`).
+
+```bash
+# Health (no auth required)
+curl http://localhost:8000/api/health
+
+# Current positions
+curl -H "X-API-Key: $KEY" http://localhost:8000/api/positions
+
+# P&L (last 7 days)
+curl -H "X-API-Key: $KEY" http://localhost:8000/api/pnl?days=7
+
+# Strategy performance
+curl -H "X-API-Key: $KEY" http://localhost:8000/api/strategies
+
+# Emergency halt
+curl -X POST -H "X-API-Key: $KEY" http://localhost:8000/api/admin/halt
+```
+
+---
+
+## Deployment
+
+```bash
+# Deploy to production server
+ssh morpheus "cd /opt/morpheus && git pull && systemctl restart morpheus"
+
+# View logs
+ssh morpheus "journalctl -u morpheus -n 50 --no-pager"
+
+# Audit resolved trades
+ssh morpheus "cd /opt/morpheus && .venv/bin/python3 scripts/audit_resolutions.py --state-dir state --since 2026-01-01"
+```
+
+---
+
+## Testing
+
+```bash
+pytest tests/                       # run all tests
+pytest tests/ --timeout=30          # with timeout guard
+pytest tests/ --cov=src             # with coverage report
+```
+
+Key test modules:
+- `test_risk_pipeline.py` — 8-layer risk pipeline, Kelly sizing, hard-coded ceilings
+- `test_db.py` — SQLite WAL database CRUD
+- `test_api.py` — REST API endpoints and auth
+- `test_smart_entry.py` — SmartEntry execution state machine
+- `test_strategies.py` — bracket arb math, bonding thresholds, VPIN, calibration
+
+---
+
+## Project Structure
+
+```
+src/
+  main.py                  # Entry point, orchestration loop
+  orchestrator.py          # Signal collection, scoring, deduplication
+  risk_pipeline.py         # 8-layer risk validation + Kelly sizing (NEW)
+  smart_entry.py           # Limit→timeout→market execution state machine (NEW)
+  db.py                    # SQLite WAL async database layer (NEW)
+  api.py                   # FastAPI REST monitoring API (NEW)
+  market_filters.py        # Ticker blocklist, spread/volume gates
+  engines/                 # Trading strategy engines
+    kalshi_llm_engine.py
+    kalshi_bracket_arb_engine.py
+    kalshi_bonding_engine.py
+    kalshi_orderbook_engine.py
+    kalshi_rules_engine.py
+    kalshi_orderflow_engine.py
+  signals/                 # Signal definitions and LLM ensemble
+  cost_basis.py            # FIFO cost basis / tax lot tracking (NEW)
+tests/
+  conftest.py              # Shared fixtures
+  test_risk_pipeline.py
+  test_db.py
+  test_api.py
+  test_smart_entry.py
+  test_strategies.py
+config.yaml                # All bot parameters
+.env                       # API keys (never committed)
+state/                     # Runtime state (gitignored)
+```
+
+---
+
+## Kalshi Authentication
+
+The bot uses RSA-PSS key signing (not username/password).
+
+```bash
+# Generate RSA key pair
+openssl genrsa -out kalshi_key.pem 2048
+openssl rsa -in kalshi_key.pem -pubout -out kalshi_key_pub.pem
+# Upload kalshi_key_pub.pem to Kalshi dashboard → API Keys
+```
+
+Set `KALSHI_KEY_PATH=kalshi_key.pem` and `KALSHI_KEY_ID=<your-key-id>` in `.env`.
+
+---
+
+## Known Gotchas
+
+- Kalshi SDK bug: use `get_positions_without_preload_content` for raw JSON
+- `get_balance()` returns cash only — equity in open positions is separate
+- Kelly formula: `edge*(1+odds)/odds` not `edge/odds`
+- Platt scaling: alpha < 1.0 compresses toward 0.5, alpha > 1.0 amplifies
+- structlog reserved kwarg: never pass `event=` as a keyword argument
+- New BotConfig sections require an explicit Pydantic field declaration
