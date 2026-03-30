@@ -168,21 +168,20 @@ class KalshiClient:
 
         # Prices — try new _dollars fields first (already on 0-1 scale),
         # fall back to old cent fields (0-100, divide by 100).
-        yes_bid_raw = m.get("yes_bid_dollars") or m.get("yes_bid")
-        yes_ask_raw = m.get("yes_ask_dollars") or m.get("yes_ask")
-        no_bid_raw = m.get("no_bid_dollars") or m.get("no_bid")
-        no_ask_raw = m.get("no_ask_dollars") or m.get("no_ask")
-        last_price_raw = m.get("last_price_dollars") or m.get("last_price")
-
-        # _dollars fields are already 0-1; old fields were in cents (divide by 100)
+        # Use explicit key presence check (not `or`) so 0.0 bids are preserved.
         uses_dollar_fields = "yes_bid_dollars" in m or "yes_ask_dollars" in m
         divisor = 1.0 if uses_dollar_fields else 100.0
 
-        yes_bid = safe_float(yes_bid_raw or 0) / divisor
-        yes_ask = safe_float(yes_ask_raw or 0) / divisor
-        no_bid = safe_float(no_bid_raw or 0) / divisor
-        no_ask = safe_float(no_ask_raw or 0) / divisor
-        last_price = safe_float(last_price_raw or 0) / divisor
+        def _price(new_key: str, old_key: str) -> float:
+            if new_key in m:
+                return safe_float(m[new_key])
+            return safe_float(m.get(old_key) or 0) / 100.0
+
+        yes_bid = _price("yes_bid_dollars", "yes_bid")
+        yes_ask = _price("yes_ask_dollars", "yes_ask")
+        no_bid = _price("no_bid_dollars", "no_bid")
+        no_ask = _price("no_ask_dollars", "no_ask")
+        last_price = _price("last_price_dollars", "last_price")
 
         # Best estimate of current yes/no price: midpoint of bid/ask
         if yes_bid > 0 and yes_ask > 0:
