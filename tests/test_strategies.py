@@ -55,8 +55,10 @@ class TestBondingEngine:
 
     def test_qualifies_near_certain_market(self, sample_market_bonding):
         """Market at 95c YES should qualify for bonding."""
-        yes_price = sample_market_bonding["yes_price"]
-        assert 90 <= yes_price <= 97, "Bonding target: 90-97c"
+        # New schema uses _dollars fields (0-1 scale); derive yes_price from last_price_dollars
+        yes_price_dollars = sample_market_bonding["last_price_dollars"]
+        yes_price_cents = int(yes_price_dollars * 100)
+        assert 90 <= yes_price_cents <= 97, "Bonding target: 90-97c"
 
     def test_rejects_too_cheap(self):
         """Market at 80c YES should not qualify."""

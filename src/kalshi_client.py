@@ -166,16 +166,23 @@ class KalshiClient:
         if not ticker or not title:
             return None
 
-        # Kalshi returns prices in cents (0-100) when response_price_units == "usd_cent"
-        # Some newer endpoints may return dollar strings; handle both.
-        price_units = m.get("response_price_units", "usd_cent")
-        divisor = 100.0 if price_units == "usd_cent" else 1.0
+        # Prices — try new _dollars fields first (already on 0-1 scale),
+        # fall back to old cent fields (0-100, divide by 100).
+        yes_bid_raw = m.get("yes_bid_dollars") or m.get("yes_bid")
+        yes_ask_raw = m.get("yes_ask_dollars") or m.get("yes_ask")
+        no_bid_raw = m.get("no_bid_dollars") or m.get("no_bid")
+        no_ask_raw = m.get("no_ask_dollars") or m.get("no_ask")
+        last_price_raw = m.get("last_price_dollars") or m.get("last_price")
 
-        yes_bid = safe_float(m.get("yes_bid", 0)) / divisor
-        yes_ask = safe_float(m.get("yes_ask", 0)) / divisor
-        no_bid = safe_float(m.get("no_bid", 0)) / divisor
-        no_ask = safe_float(m.get("no_ask", 0)) / divisor
-        last_price = safe_float(m.get("last_price", 0)) / divisor
+        # _dollars fields are already 0-1; old fields were in cents (divide by 100)
+        uses_dollar_fields = "yes_bid_dollars" in m or "yes_ask_dollars" in m
+        divisor = 1.0 if uses_dollar_fields else 100.0
+
+        yes_bid = safe_float(yes_bid_raw or 0) / divisor
+        yes_ask = safe_float(yes_ask_raw or 0) / divisor
+        no_bid = safe_float(no_bid_raw or 0) / divisor
+        no_ask = safe_float(no_ask_raw or 0) / divisor
+        last_price = safe_float(last_price_raw or 0) / divisor
 
         # Best estimate of current yes/no price: midpoint of bid/ask
         if yes_bid > 0 and yes_ask > 0:
@@ -210,12 +217,12 @@ class KalshiClient:
             category=category,
             yes_price=yes_price,
             no_price=no_price,
-            volume=safe_int(m.get("volume", 0)),
-            open_interest=safe_int(m.get("open_interest", 0)),
+            volume=safe_int(m.get("volume_fp") or m.get("volume") or 0),
+            open_interest=safe_int(m.get("open_interest_fp") or m.get("open_interest") or 0),
             close_time=close_time,
             status=status,
             event_ticker=event_ticker,
-            volume_24h=safe_int(m.get("volume_24h", 0)),
+            volume_24h=safe_int(m.get("volume_24h_fp") or m.get("volume_24h") or 0),
             last_price=last_price,
             yes_bid=yes_bid,
             yes_ask=yes_ask,
@@ -405,7 +412,7 @@ class KalshiClient:
                 # Skip sports parlays
                 if "KXMVESPORTS" in ticker or "MULTIGAME" in ticker:
                     continue
-                vol = int(m.get("volume", 0) or 0)
+                vol = int(float(m.get("volume_fp") or m.get("volume") or 0))
                 # Weather markets bypass volume filter (NOAA fast-path is free,
                 # and newly listed weather markets start at low volume)
                 is_weather = any(
