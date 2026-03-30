@@ -358,8 +358,8 @@ class KalshiOrderFlowEngine(BaseEngine):
             if edge < 0.02:
                 continue  # not enough edge to bother
 
-            # Use market YES price to estimate actual edge
-            market_price = market.yes_price / 100.0 if direction == "yes" else market.no_price / 100.0
+            # Use market YES price to estimate actual edge (already 0-1 scale)
+            market_price = market.yes_price if direction == "yes" else market.no_price
             if market_price <= 0 or market_price >= 1:
                 continue
 
